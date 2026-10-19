@@ -16,6 +16,7 @@ var ErrArtifactExists = errors.New("artifact already exists")
 
 // ArtifactRecord represents a pipeline, options, or config XML document stored in the database.
 type ArtifactRecord struct {
+	ID          int64  `json:"id,omitempty"`
 	Type        string `json:"type"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
@@ -139,7 +140,12 @@ func (s *APIServer) UpsertArtifact(ctx context.Context, artifactType, name, desc
 		return nil, fmt.Errorf("failed upserting %s %q into %s: %w", canonicalType, name, table, err)
 	}
 
+	var id int64
+	idQuery := fmt.Sprintf("SELECT ID FROM %s WHERE Name = %s", table, Placeholder(s.dialect, 1))
+	_ = s.db.QueryRowContext(ctx, idQuery, name).Scan(&id)
+
 	return &ArtifactRecord{
+		ID:          id,
 		Type:        canonicalType,
 		Name:        name,
 		Description: desc,
@@ -172,6 +178,41 @@ func (s *APIServer) UpdateArtifact(ctx context.Context, artifactType, name, desc
 	return s.UpsertArtifact(ctx, artifactType, name, desc, rawContent, encrypt, secureKey)
 }
 
+// UpdateArtifactByID updates an existing artifact by its database table ID and returns ErrArtifactNotFound if the ID does not exist.
+func (s *APIServer) UpdateArtifactByID(ctx context.Context, artifactType string, id int64, desc, rawContent string, encrypt bool, secureKey string) (*ArtifactRecord, error) {
+	existing, err := s.GetArtifactByID(ctx, artifactType, id, false, "")
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(desc) == "" {
+		desc = existing.Description
+	}
+	return s.UpsertArtifact(ctx, artifactType, existing.Name, desc, rawContent, encrypt, secureKey)
+}
+
+func (s *APIServer) finalizeArtifactRecord(rec *ArtifactRecord, table string, decrypt bool, secureKey string) (*ArtifactRecord, error) {
+	isEnc := flowcrypto.IsEncryptedPayload([]byte(rec.Content))
+	rec.Encrypted = isEnc
+
+	if decrypt && isEnc {
+		key := strings.TrimSpace(secureKey)
+		if key == "" {
+			key = s.cfg.DefaultSecureKey
+		}
+		if key == "" {
+			return nil, fmt.Errorf("artifact %q (id=%d) in %s is encrypted, but no secure_key was provided", rec.Name, rec.ID, table)
+		}
+		plain, err := flowcrypto.DecryptAuto([]byte(rec.Content), key, true)
+		if err != nil {
+			return nil, fmt.Errorf("failed decrypting artifact %q (id=%d): %w", rec.Name, rec.ID, err)
+		}
+		rec.Content = string(plain)
+		rec.Encrypted = false
+	}
+
+	return rec, nil
+}
+
 // GetArtifact fetches a single artifact by name, optionally decrypting its content if encrypted.
 func (s *APIServer) GetArtifact(ctx context.Context, artifactType, name string, decrypt bool, secureKey string) (*ArtifactRecord, error) {
 	name = strings.TrimSpace(name)
@@ -182,11 +223,11 @@ func (s *APIServer) GetArtifact(ctx context.Context, artifactType, name string, 
 	table := resolveTableName(s.dialect, tableConst)
 	ph := Placeholder(s.dialect, 1)
 
-	query := fmt.Sprintf("SELECT Name, COALESCE(Description, ''), COALESCE(%s, '') FROM %s WHERE Name = %s", xmlCol, table, ph)
+	query := fmt.Sprintf("SELECT ID, Name, COALESCE(Description, ''), COALESCE(%s, '') FROM %s WHERE Name = %s", xmlCol, table, ph)
 	var rec ArtifactRecord
 	rec.Type = canonicalType
 
-	err = s.db.QueryRowContext(ctx, query, name).Scan(&rec.Name, &rec.Description, &rec.Content)
+	err = s.db.QueryRowContext(ctx, query, name).Scan(&rec.ID, &rec.Name, &rec.Description, &rec.Content)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrArtifactNotFound
@@ -194,26 +235,34 @@ func (s *APIServer) GetArtifact(ctx context.Context, artifactType, name string, 
 		return nil, fmt.Errorf("failed querying %s for %q: %w", table, name, err)
 	}
 
-	isEnc := flowcrypto.IsEncryptedPayload([]byte(rec.Content))
-	rec.Encrypted = isEnc
+	return s.finalizeArtifactRecord(&rec, table, decrypt, secureKey)
+}
 
-	if decrypt && isEnc {
-		key := strings.TrimSpace(secureKey)
-		if key == "" {
-			key = s.cfg.DefaultSecureKey
+// GetArtifactByID fetches a single artifact by its database table ID primary key, optionally decrypting its content if encrypted.
+func (s *APIServer) GetArtifactByID(ctx context.Context, artifactType string, id int64, decrypt bool, secureKey string) (*ArtifactRecord, error) {
+	if id <= 0 {
+		return nil, fmt.Errorf("invalid artifact ID %d: must be a positive integer", id)
+	}
+	tableConst, xmlCol, canonicalType, err := ResolveArtifactTarget(artifactType)
+	if err != nil {
+		return nil, err
+	}
+	table := resolveTableName(s.dialect, tableConst)
+	ph := Placeholder(s.dialect, 1)
+
+	query := fmt.Sprintf("SELECT ID, Name, COALESCE(Description, ''), COALESCE(%s, '') FROM %s WHERE ID = %s", xmlCol, table, ph)
+	var rec ArtifactRecord
+	rec.Type = canonicalType
+
+	err = s.db.QueryRowContext(ctx, query, id).Scan(&rec.ID, &rec.Name, &rec.Description, &rec.Content)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrArtifactNotFound
 		}
-		if key == "" {
-			return nil, fmt.Errorf("artifact %q in %s is encrypted, but no secure_key was provided", name, table)
-		}
-		plain, err := flowcrypto.DecryptAuto([]byte(rec.Content), key, true)
-		if err != nil {
-			return nil, fmt.Errorf("failed decrypting artifact %q: %w", name, err)
-		}
-		rec.Content = string(plain)
-		rec.Encrypted = false
+		return nil, fmt.Errorf("failed querying %s for ID %d: %w", table, id, err)
 	}
 
-	return &rec, nil
+	return s.finalizeArtifactRecord(&rec, table, decrypt, secureKey)
 }
 
 // ListArtifacts returns all artifacts of the given type from the database.
@@ -224,7 +273,7 @@ func (s *APIServer) ListArtifacts(ctx context.Context, artifactType string, incl
 	}
 	table := resolveTableName(s.dialect, tableConst)
 
-	query := fmt.Sprintf("SELECT Name, COALESCE(Description, ''), COALESCE(%s, '') FROM %s ORDER BY Name ASC", xmlCol, table)
+	query := fmt.Sprintf("SELECT ID, Name, COALESCE(Description, ''), COALESCE(%s, '') FROM %s ORDER BY Name ASC", xmlCol, table)
 	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed listing %s from %s: %w", canonicalType, table, err)
@@ -236,7 +285,7 @@ func (s *APIServer) ListArtifacts(ctx context.Context, artifactType string, incl
 		var rec ArtifactRecord
 		rec.Type = canonicalType
 		var content string
-		if err := rows.Scan(&rec.Name, &rec.Description, &content); err != nil {
+		if err := rows.Scan(&rec.ID, &rec.Name, &rec.Description, &content); err != nil {
 			return nil, err
 		}
 		rec.Encrypted = flowcrypto.IsEncryptedPayload([]byte(content))
@@ -265,6 +314,30 @@ func (s *APIServer) DeleteArtifact(ctx context.Context, artifactType, name strin
 	res, err := s.db.ExecContext(ctx, query, name)
 	if err != nil {
 		return fmt.Errorf("failed deleting %q from %s: %w", name, table, err)
+	}
+	affected, err := res.RowsAffected()
+	if err == nil && affected == 0 {
+		return ErrArtifactNotFound
+	}
+	return nil
+}
+
+// DeleteArtifactByID deletes an artifact by its database table ID and returns ErrArtifactNotFound if no row was deleted.
+func (s *APIServer) DeleteArtifactByID(ctx context.Context, artifactType string, id int64) error {
+	if id <= 0 {
+		return fmt.Errorf("invalid artifact ID %d: must be a positive integer", id)
+	}
+	tableConst, _, _, err := ResolveArtifactTarget(artifactType)
+	if err != nil {
+		return err
+	}
+	table := resolveTableName(s.dialect, tableConst)
+	ph := Placeholder(s.dialect, 1)
+
+	query := fmt.Sprintf("DELETE FROM %s WHERE ID = %s", table, ph)
+	res, err := s.db.ExecContext(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("failed deleting ID %d from %s: %w", id, table, err)
 	}
 	affected, err := res.RowsAffected()
 	if err == nil && affected == 0 {

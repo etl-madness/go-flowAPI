@@ -24,6 +24,10 @@ type ServerConfig struct {
 	DefaultSecureKey string
 	KeyFilePath      string
 	Debug            bool
+	BootstrapUser    string
+	BootstrapPass    string
+	BootstrapPerm    string
+	HashPassword     string
 }
 
 // LoadStartupConfig initializes ServerConfig starting from the StartupConnectionString variable,
@@ -36,6 +40,10 @@ func LoadStartupConfig(args []string) (*ServerConfig, error) {
 	secureKeyFlag := fs.String("secure-key", "", "Default encryption/decryption key (falls back to FLOW_SECURE_KEY or SECURE_KEY)")
 	keyFileFlag := fs.String("key-file", "", "Path to file containing default encryption/decryption key")
 	debugFlag := fs.Bool("debug", false, "Enable verbose debug logging")
+	bootstrapUserFlag := fs.String("bootstrap-user", "", "Initial API username to seed/upsert at startup (or FLOW_API_BOOTSTRAP_USER)")
+	bootstrapPassFlag := fs.String("bootstrap-pass", "", "Password for -bootstrap-user (or FLOW_API_BOOTSTRAP_PASS)")
+	bootstrapPermFlag := fs.String("bootstrap-perm", PermAll, "Permission role for -bootstrap-user (default: all)")
+	hashPasswordFlag := fs.String("hash-password", "", "Generate and print a bcrypt hash for the given plaintext password, then exit")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -71,6 +79,24 @@ func LoadStartupConfig(args []string) (*ServerConfig, error) {
 		}
 	}
 
+	bootstrapUser := strings.TrimSpace(os.Getenv("FLOW_API_BOOTSTRAP_USER"))
+	if strings.TrimSpace(*bootstrapUserFlag) != "" {
+		bootstrapUser = strings.TrimSpace(*bootstrapUserFlag)
+	}
+
+	bootstrapPass := os.Getenv("FLOW_API_BOOTSTRAP_PASS")
+	if *bootstrapPassFlag != "" {
+		bootstrapPass = *bootstrapPassFlag
+	}
+
+	bootstrapPerm := strings.TrimSpace(os.Getenv("FLOW_API_BOOTSTRAP_PERM"))
+	if strings.TrimSpace(*bootstrapPermFlag) != "" {
+		bootstrapPerm = strings.TrimSpace(*bootstrapPermFlag)
+	}
+	if bootstrapPerm == "" {
+		bootstrapPerm = PermAll
+	}
+
 	key := resolveKey(*secureKeyFlag, *keyFileFlag)
 
 	return &ServerConfig{
@@ -79,6 +105,10 @@ func LoadStartupConfig(args []string) (*ServerConfig, error) {
 		DefaultSecureKey: key,
 		KeyFilePath:      strings.TrimSpace(*keyFileFlag),
 		Debug:            debug,
+		BootstrapUser:    bootstrapUser,
+		BootstrapPass:    bootstrapPass,
+		BootstrapPerm:    bootstrapPerm,
+		HashPassword:     *hashPasswordFlag,
 	}, nil
 }
 

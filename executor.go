@@ -7,6 +7,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,8 +43,14 @@ type CliOptionsXML struct {
 	Signature       *string  `xml:"signature"`
 }
 
-// ExecutionRequest supports all CLI, Builder, and db_importer execution options.
+// ExecutionRequest supports all CLI, Builder, and db_importer execution options,
+// including lookup by artifact type ("pipeline", "options", "config") and database table ID.
 type ExecutionRequest struct {
+	ArtifactType    string            `json:"artifact_type,omitempty"`
+	ID              int64             `json:"id,omitempty"`
+	PipelineID      int64             `json:"pipeline_id,omitempty"`
+	OptionsID       int64             `json:"options_id,omitempty"`
+	ConfigID        int64             `json:"config_id,omitempty"`
 	File            string            `json:"file"`
 	FileXML         string            `json:"file_xml,omitempty"`
 	Config          string            `json:"config,omitempty"`
@@ -112,9 +119,25 @@ func (m *MultiSink) Emit(ctx context.Context, event flow.ExecutionEvent) error {
 	return firstErr
 }
 
-// resolveArtifactBytes loads XML content from inline XML, the startup database (TablePipelineContent /
-// TableOptionsContent / TableConfigContent), or local file fallback, and handles decryption & signature verification.
-func (s *APIServer) resolveArtifactBytes(ctx context.Context, artifactType, nameOrPath, inlineXML string, req *ExecutionRequest) ([]byte, string, error) {
+// parseExplicitIDRef checks if a string reference uses an explicit ID prefix such as "id:12", "id/12", or "db://id/12".
+func parseExplicitIDRef(ref string) (int64, bool) {
+	trimmed := strings.TrimSpace(ref)
+	lower := strings.ToLower(trimmed)
+	for _, prefix := range []string{"db://id/", "db:id:", "id:", "id/"} {
+		if strings.HasPrefix(lower, prefix) {
+			numStr := strings.TrimSpace(trimmed[len(prefix):])
+			if id, err := strconv.ParseInt(numStr, 10, 64); err == nil && id > 0 {
+				return id, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// resolveArtifactBytes loads XML content from inline XML, the startup database by table ID or Name
+// (TablePipelineContent / TableOptionsContent / TableConfigContent), or local file fallback,
+// and handles decryption & signature verification.
+func (s *APIServer) resolveArtifactBytes(ctx context.Context, artifactType string, artifactID int64, nameOrPath, inlineXML string, req *ExecutionRequest) ([]byte, string, error) {
 	key := resolveKey(req.SecureKey, req.KeyFile)
 	if key == "" {
 		key = s.cfg.DefaultSecureKey
@@ -126,18 +149,44 @@ func (s *APIServer) resolveArtifactBytes(ctx context.Context, artifactType, name
 	if strings.TrimSpace(inlineXML) != "" {
 		rawBytes = []byte(inlineXML)
 		sourceLabel = "inline:" + artifactType
+	} else if artifactID > 0 {
+		rec, dbErr := s.GetArtifactByID(ctx, artifactType, artifactID, false, "")
+		if dbErr != nil {
+			return nil, "", fmt.Errorf("failed resolving %s with ID %d from database: %w", artifactType, artifactID, dbErr)
+		}
+		rawBytes = []byte(rec.Content)
+		sourceLabel = fmt.Sprintf("db://%s/id/%d(%s)", artifactType, rec.ID, rec.Name)
 	} else if strings.TrimSpace(nameOrPath) != "" {
 		ref := strings.TrimSpace(nameOrPath)
-		lookupName := strings.TrimPrefix(strings.TrimPrefix(ref, "db://"), "db:")
-		rec, dbErr := s.GetArtifact(ctx, artifactType, lookupName, false, "")
-		if dbErr == nil && rec != nil {
+		if explicitID, ok := parseExplicitIDRef(ref); ok {
+			rec, dbErr := s.GetArtifactByID(ctx, artifactType, explicitID, false, "")
+			if dbErr != nil {
+				return nil, "", fmt.Errorf("failed resolving %s with ID %d from database: %w", artifactType, explicitID, dbErr)
+			}
 			rawBytes = []byte(rec.Content)
-			sourceLabel = "db://" + artifactType + "/" + rec.Name
-		} else if data, fileErr := os.ReadFile(ref); fileErr == nil {
-			rawBytes = data
-			sourceLabel = ref
+			sourceLabel = fmt.Sprintf("db://%s/id/%d(%s)", artifactType, rec.ID, rec.Name)
 		} else {
-			return nil, "", fmt.Errorf("failed resolving %s %q from database (%v) or filesystem (%v)", artifactType, ref, dbErr, fileErr)
+			lookupName := strings.TrimPrefix(strings.TrimPrefix(ref, "db://"), "db:")
+			rec, dbErr := s.GetArtifact(ctx, artifactType, lookupName, false, "")
+			if dbErr == nil && rec != nil {
+				rawBytes = []byte(rec.Content)
+				sourceLabel = "db://" + artifactType + "/" + rec.Name
+			} else if numID, numErr := strconv.ParseInt(lookupName, 10, 64); numErr == nil && numID > 0 {
+				if recByID, idErr := s.GetArtifactByID(ctx, artifactType, numID, false, ""); idErr == nil && recByID != nil {
+					rawBytes = []byte(recByID.Content)
+					sourceLabel = fmt.Sprintf("db://%s/id/%d(%s)", artifactType, recByID.ID, recByID.Name)
+				} else if data, fileErr := os.ReadFile(ref); fileErr == nil {
+					rawBytes = data
+					sourceLabel = ref
+				} else {
+					return nil, "", fmt.Errorf("failed resolving %s %q from database by name (%v), ID %d (%v), or filesystem (%v)", artifactType, ref, dbErr, numID, idErr, fileErr)
+				}
+			} else if data, fileErr := os.ReadFile(ref); fileErr == nil {
+				rawBytes = data
+				sourceLabel = ref
+			} else {
+				return nil, "", fmt.Errorf("failed resolving %s %q from database (%v) or filesystem (%v)", artifactType, ref, dbErr, fileErr)
+			}
 		}
 	} else {
 		return nil, "", nil
@@ -223,10 +272,10 @@ func (s *APIServer) resolveArtifactBytes(ctx context.Context, artifactType, name
 }
 
 func (s *APIServer) applyOptionsXMLToRequest(ctx context.Context, req *ExecutionRequest) (string, error) {
-	if strings.TrimSpace(req.Options) == "" && strings.TrimSpace(req.OptionsXML) == "" {
+	if req.OptionsID <= 0 && strings.TrimSpace(req.Options) == "" && strings.TrimSpace(req.OptionsXML) == "" {
 		return "", nil
 	}
-	optBytes, optLabel, err := s.resolveArtifactBytes(ctx, "options", req.Options, req.OptionsXML, req)
+	optBytes, optLabel, err := s.resolveArtifactBytes(ctx, "options", req.OptionsID, req.Options, req.OptionsXML, req)
 	if err != nil {
 		return "", err
 	}
@@ -240,7 +289,7 @@ func (s *APIServer) applyOptionsXMLToRequest(ctx context.Context, req *Execution
 	}
 
 	// Apply XML defaults where request fields were not explicitly set
-	if req.File == "" && req.FileXML == "" && opts.File != nil {
+	if req.File == "" && req.FileXML == "" && req.PipelineID <= 0 && opts.File != nil {
 		req.File = strings.TrimSpace(*opts.File)
 	}
 	if req.Format == "" && opts.Format != nil {
@@ -249,7 +298,7 @@ func (s *APIServer) applyOptionsXMLToRequest(ctx context.Context, req *Execution
 	if req.XSD == "" && opts.XSD != nil {
 		req.XSD = strings.TrimSpace(*opts.XSD)
 	}
-	if req.Config == "" && req.ConfigXML == "" && opts.Config != nil {
+	if req.Config == "" && req.ConfigXML == "" && req.ConfigID <= 0 && opts.Config != nil {
 		req.Config = strings.TrimSpace(*opts.Config)
 	}
 	if !req.Validate && opts.Validate != nil {
@@ -304,30 +353,72 @@ func (s *APIServer) applyOptionsXMLToRequest(ctx context.Context, req *Execution
 	return optLabel, nil
 }
 
-// ExecutePipeline executes or validates a pipeline with all available CLI/Builder options.
+// ExecutePipeline executes or validates a pipeline with all available CLI/Builder options,
+// supporting resolution by artifact name, inline XML, local path, or database table ID.
 func (s *APIServer) ExecutePipeline(ctx context.Context, req ExecutionRequest, onEvent func(flow.ExecutionEvent)) (*ExecutionResponse, error) {
 	start := time.Now().UTC()
+
+	// Normalize ArtifactType + ID into the corresponding typed ID field (PipelineID, OptionsID, or ConfigID)
+	canonicalType := "pipeline"
+	if strings.TrimSpace(req.ArtifactType) != "" {
+		_, _, ct, err := ResolveArtifactTarget(req.ArtifactType)
+		if err != nil {
+			return nil, err
+		}
+		canonicalType = ct
+		req.ArtifactType = ct
+	}
+	if req.ID > 0 {
+		switch canonicalType {
+		case "pipeline":
+			if req.PipelineID <= 0 {
+				req.PipelineID = req.ID
+			}
+		case "options":
+			if req.OptionsID <= 0 {
+				req.OptionsID = req.ID
+			}
+		case "config":
+			if req.ConfigID <= 0 {
+				req.ConfigID = req.ID
+			}
+		}
+	}
 
 	optionsLabel, err := s.applyOptionsXMLToRequest(ctx, &req)
 	if err != nil {
 		return nil, err
 	}
 
-	if strings.TrimSpace(req.File) == "" && strings.TrimSpace(req.FileXML) == "" {
-		req.File = "scripts.xml"
-	}
 	if strings.TrimSpace(req.Format) == "" {
 		req.Format = "json"
 	}
 
-	pipelineBytes, fileLabel, err := s.resolveArtifactBytes(ctx, "pipeline", req.File, req.FileXML, &req)
-	if err != nil {
-		return nil, err
+	var pipelineBytes []byte
+	var fileLabel string
+	var configUsedAsPrimary bool
+
+	// If executing a config artifact directly (e.g. /api/v1/execute/config/{id}) without a separate pipeline file/ID,
+	// load the config XML from TableConfigContent as the primary XML document.
+	if (req.ArtifactType == "config" || req.ConfigID > 0) && req.PipelineID <= 0 && strings.TrimSpace(req.File) == "" && strings.TrimSpace(req.FileXML) == "" {
+		pipelineBytes, fileLabel, err = s.resolveArtifactBytes(ctx, "config", req.ConfigID, req.Config, req.ConfigXML, &req)
+		if err != nil {
+			return nil, err
+		}
+		configUsedAsPrimary = true
+	} else {
+		if req.PipelineID <= 0 && strings.TrimSpace(req.File) == "" && strings.TrimSpace(req.FileXML) == "" {
+			req.File = "scripts.xml"
+		}
+		pipelineBytes, fileLabel, err = s.resolveArtifactBytes(ctx, "pipeline", req.PipelineID, req.File, req.FileXML, &req)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Optional XSLT transformation
 	if strings.TrimSpace(req.XSLT) != "" {
-		xsltBytes, _, xsltErr := s.resolveArtifactBytes(ctx, "pipeline", req.XSLT, "", &req)
+		xsltBytes, _, xsltErr := s.resolveArtifactBytes(ctx, "pipeline", 0, req.XSLT, "", &req)
 		if xsltErr != nil {
 			return nil, fmt.Errorf("failed loading XSLT stylesheet %q: %w", req.XSLT, xsltErr)
 		}
@@ -352,7 +443,7 @@ func (s *APIServer) ExecutePipeline(ctx context.Context, req ExecutionRequest, o
 
 	parsedCfg, err := flow.ParseXMLConfig(pipelineBytes)
 	if err != nil {
-		return nil, fmt.Errorf("XML parsing error in pipeline %s: %w", fileLabel, err)
+		return nil, fmt.Errorf("XML parsing error in %s: %w", fileLabel, err)
 	}
 
 	varConfigs := parsedCfg.Variables
@@ -361,8 +452,8 @@ func (s *APIServer) ExecutePipeline(ctx context.Context, req ExecutionRequest, o
 	flowNodes := parsedCfg.FlowNodes
 
 	var configLabel string
-	if strings.TrimSpace(req.Config) != "" || strings.TrimSpace(req.ConfigXML) != "" {
-		cfgBytes, lbl, err := s.resolveArtifactBytes(ctx, "config", req.Config, req.ConfigXML, &req)
+	if !configUsedAsPrimary && (req.ConfigID > 0 || strings.TrimSpace(req.Config) != "" || strings.TrimSpace(req.ConfigXML) != "") {
+		cfgBytes, lbl, err := s.resolveArtifactBytes(ctx, "config", req.ConfigID, req.Config, req.ConfigXML, &req)
 		if err != nil {
 			return nil, err
 		}
@@ -375,6 +466,8 @@ func (s *APIServer) ExecutePipeline(ctx context.Context, req ExecutionRequest, o
 		dbConfigs = append(dbConfigs, overrideCfg.Databases...)
 		preflightNodes = append(preflightNodes, overrideCfg.PreflightNodes...)
 		flowNodes = append(flowNodes, overrideCfg.FlowNodes...)
+	} else if configUsedAsPrimary {
+		configLabel = fileLabel
 	}
 
 	if err := flow.ValidateAST(preflightNodes, flowNodes, dbConfigs); err != nil {

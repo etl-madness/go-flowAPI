@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -365,7 +366,187 @@ func TestMultipartUploadAndEncryptionCRUD(t *testing.T) {
 	}
 }
 
+func TestSwaggerAndBootstrap(t *testing.T) {
+	_, ts, _ := setupTestServer(t)
+	client := ts.Client()
+
+	// 1. Verify /swagger/ serves Swagger UI HTML without requiring prior BasicAuth
+	resp, err := client.Get(ts.URL + "/swagger/")
+	if err != nil {
+		t.Fatalf("GET /swagger/ failed: %v", err)
+	}
+	htmlBytes, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for GET /swagger/, got %d", resp.StatusCode)
+	}
+	if !strings.Contains(string(htmlBytes), "SwaggerUIBundle") || !strings.Contains(string(htmlBytes), "/swagger/doc.json") {
+		t.Fatalf("expected Swagger UI HTML to reference SwaggerUIBundle and /swagger/doc.json")
+	}
+
+	// 2. Verify /swagger/doc.json and /api/v1/openapi.json return valid OpenAPI 3.0.3 JSON
+	for _, specPath := range []string{"/swagger/doc.json", "/swagger/openapi.json", "/api/v1/openapi.json"} {
+		specResp, err := client.Get(ts.URL + specPath)
+		if err != nil {
+			t.Fatalf("GET %s failed: %v", specPath, err)
+		}
+		specBytes, _ := io.ReadAll(specResp.Body)
+		specResp.Body.Close()
+		if specResp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 for GET %s, got %d", specPath, specResp.StatusCode)
+		}
+		var parsed map[string]any
+		if err := json.Unmarshal(specBytes, &parsed); err != nil {
+			t.Fatalf("failed unmarshaling OpenAPI JSON from %s: %v", specPath, err)
+		}
+		if parsed["openapi"] != "3.0.3" {
+			t.Fatalf("expected openapi 3.0.3, got %v", parsed["openapi"])
+		}
+		paths, ok := parsed["paths"].(map[string]any)
+		if !ok || paths["/api/v1/execute"] == nil || paths["/api/v1/users"] == nil || paths["/api/v1/upload/{type}"] == nil {
+			t.Fatalf("expected OpenAPI paths to include /api/v1/execute, /api/v1/users, and /api/v1/upload/{type}")
+		}
+	}
+
+	// 3. Verify LoadStartupConfig parses -bootstrap-user, -bootstrap-pass, and defaults -bootstrap-perm to "all"
+	cfg, err := LoadStartupConfig([]string{
+		"-bootstrap-user", "initial_admin",
+		"-bootstrap-pass", "StrongBootstrapPass!123",
+	})
+	if err != nil {
+		t.Fatalf("LoadStartupConfig failed: %v", err)
+	}
+	if cfg.BootstrapUser != "initial_admin" || cfg.BootstrapPass != "StrongBootstrapPass!123" || cfg.BootstrapPerm != PermAll {
+		t.Fatalf("unexpected bootstrap config: %+v", cfg)
+	}
+}
+
+func TestExecuteAndStreamByArtifactTypeAndTableID(t *testing.T) {
+	_, ts, _ := setupTestServer(t)
+	client := ts.Client()
+
+	createArtifact := func(artType, name, content string) ArtifactRecord {
+		t.Helper()
+		payload := fmt.Sprintf(`{"name":%s,"content":%s,"encrypted":false,"upsert":true}`, mustJSONString(name), mustJSONString(content))
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/artifacts/"+artType, strings.NewReader(payload))
+		req.SetBasicAuth("admin_user", "admin_pass")
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("POST /api/v1/artifacts/%s failed: %v", artType, err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("expected 201 creating %s artifact, got %d: %s", artType, resp.StatusCode, string(body))
+		}
+		var rec ArtifactRecord
+		if err := json.Unmarshal(body, &rec); err != nil {
+			t.Fatalf("unmarshal artifact record failed: %v", err)
+		}
+		if rec.ID <= 0 {
+			t.Fatalf("expected positive database table ID for %s artifact, got %d", artType, rec.ID)
+		}
+		return rec
+	}
+
+	// 1. Create pipeline, config, and options artifacts and capture their database table IDs
+	pipeRec := createArtifact("pipeline", "id_test_pipe", samplePipelineXML)
+	cfgRec := createArtifact("config", "id_test_cfg", samplePipelineXML)
+	optionsXML := fmt.Sprintf(
+		`<cli_options><file>id:%d</file><format>json</format><node_output>true</node_output></cli_options>`,
+		pipeRec.ID,
+	)
+	optRec := createArtifact("options", "id_test_opt", optionsXML)
+
+	// 2. Verify GET /api/v1/artifacts/{type}/id/{id} returns the record by table ID
+	getReq, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/v1/artifacts/pipeline/id/%d", ts.URL, pipeRec.ID), nil)
+	getReq.SetBasicAuth("read_user", "read_pass")
+	getResp, err := client.Do(getReq)
+	if err != nil {
+		t.Fatalf("GET artifact by ID failed: %v", err)
+	}
+	getBytes, _ := io.ReadAll(getResp.Body)
+	getResp.Body.Close()
+	if getResp.StatusCode != http.StatusOK || !strings.Contains(string(getBytes), "id_test_pipe") {
+		t.Fatalf("expected 200 and id_test_pipe from GET by ID, got %d: %s", getResp.StatusCode, string(getBytes))
+	}
+
+	// 3. Execute synchronously via POST /api/v1/execute/pipeline/{id}
+	execPipeReq, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/api/v1/execute/pipeline/%d?format=json&node_output=true", ts.URL, pipeRec.ID), nil)
+	execPipeReq.SetBasicAuth("exec_user", "exec_pass")
+	execPipeResp, err := client.Do(execPipeReq)
+	if err != nil {
+		t.Fatalf("POST /api/v1/execute/pipeline/%d failed: %v", pipeRec.ID, err)
+	}
+	execPipeBytes, _ := io.ReadAll(execPipeResp.Body)
+	execPipeResp.Body.Close()
+	if execPipeResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 from /api/v1/execute/pipeline/%d, got %d: %s", pipeRec.ID, execPipeResp.StatusCode, string(execPipeBytes))
+	}
+	var execResult ExecutionResponse
+	if err := json.Unmarshal(execPipeBytes, &execResult); err != nil {
+		t.Fatalf("unmarshal ExecutionResponse failed: %v", err)
+	}
+	if execResult.Status != "succeeded" {
+		t.Fatalf("expected succeeded executing pipeline by ID, got %+v", execResult)
+	}
+
+	// 4. Execute synchronously via POST /api/v1/execute/options/{id}
+	execOptReq, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/api/v1/execute/options/%d", ts.URL, optRec.ID), nil)
+	execOptReq.SetBasicAuth("exec_user", "exec_pass")
+	execOptResp, err := client.Do(execOptReq)
+	if err != nil {
+		t.Fatalf("POST /api/v1/execute/options/%d failed: %v", optRec.ID, err)
+	}
+	execOptBytes, _ := io.ReadAll(execOptResp.Body)
+	execOptResp.Body.Close()
+	if execOptResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 from /api/v1/execute/options/%d, got %d: %s", optRec.ID, execOptResp.StatusCode, string(execOptBytes))
+	}
+
+	// 5. Execute synchronously via POST /api/v1/execute/config/{id}
+	execCfgReq, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/api/v1/execute/config/%d?format=json", ts.URL, cfgRec.ID), nil)
+	execCfgReq.SetBasicAuth("exec_user", "exec_pass")
+	execCfgResp, err := client.Do(execCfgReq)
+	if err != nil {
+		t.Fatalf("POST /api/v1/execute/config/%d failed: %v", cfgRec.ID, err)
+	}
+	execCfgBytes, _ := io.ReadAll(execCfgResp.Body)
+	execCfgResp.Body.Close()
+	if execCfgResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 from /api/v1/execute/config/%d, got %d: %s", cfgRec.ID, execCfgResp.StatusCode, string(execCfgBytes))
+	}
+
+	// 6. Stream SSE events via POST /api/v1/execute/stream/pipeline/{id} and GET /api/v1/execute/options/{id}/stream
+	streamURLs := []string{
+		fmt.Sprintf("%s/api/v1/execute/stream/pipeline/%d", ts.URL, pipeRec.ID),
+		fmt.Sprintf("%s/api/v1/execute/options/%d/stream", ts.URL, optRec.ID),
+		fmt.Sprintf("%s/api/v1/execution/stream/pipeline/%d", ts.URL, pipeRec.ID),
+	}
+	for _, sURL := range streamURLs {
+		sReq, _ := http.NewRequest(http.MethodPost, sURL, strings.NewReader(`{"node_output":true}`))
+		sReq.SetBasicAuth("exec_user", "exec_pass")
+		sReq.Header.Set("Content-Type", "application/json")
+		sResp, err := client.Do(sReq)
+		if err != nil {
+			t.Fatalf("stream request %s failed: %v", sURL, err)
+		}
+		sBytes, _ := io.ReadAll(sResp.Body)
+		sResp.Body.Close()
+		if sResp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 from stream %s, got %d: %s", sURL, sResp.StatusCode, string(sBytes))
+		}
+		sseText := string(sBytes)
+		if !strings.Contains(sseText, "event: node_event") || !strings.Contains(sseText, "event: done") {
+			t.Fatalf("expected SSE stream from %s to contain node_event and done, got:\n%s", sURL, sseText)
+		}
+	}
+}
+
 func mustJSONString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
 }
+
+

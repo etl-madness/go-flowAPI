@@ -41,6 +41,13 @@ func (s *APIServer) Router() http.Handler {
 func (s *APIServer) Handler() http.Handler {
 	mux := http.NewServeMux()
 
+	// Swagger UI & OpenAPI 3.0 Spec (publicly accessible so users can authorize via BasicAuth in the UI)
+	mux.HandleFunc("/swagger", s.handleSwaggerUI)
+	mux.HandleFunc("/swagger/", s.handleSwaggerUI)
+	mux.HandleFunc("/docs", s.handleSwaggerUI)
+	mux.HandleFunc("/docs/", s.handleSwaggerUI)
+	mux.HandleFunc("/api/v1/openapi.json", s.handleOpenAPISpec)
+
 	// Health check (BasicAuth protected with any valid permission)
 	mux.HandleFunc("/api/v1/health", s.RequirePermission(PermReadOnly, s.handleHealth))
 
@@ -50,8 +57,11 @@ func (s *APIServer) Handler() http.Handler {
 
 	// Execution & Validation Routes (requires "execution-only" or "all")
 	mux.HandleFunc("/api/v1/execute", s.RequirePermission(PermExecutionOnly, s.handleExecuteSync))
-	mux.HandleFunc("/api/v1/execute/stream", s.RequirePermission(PermExecutionOnly, s.handleExecuteStream))
+	mux.HandleFunc("/api/v1/execute/", s.RequirePermission(PermExecutionOnly, s.handleExecuteRouter))
+	mux.HandleFunc("/api/v1/execution", s.RequirePermission(PermExecutionOnly, s.handleExecuteSync))
+	mux.HandleFunc("/api/v1/execution/", s.RequirePermission(PermExecutionOnly, s.handleExecuteRouter))
 	mux.HandleFunc("/api/v1/validate", s.RequirePermission(PermExecutionOnly, s.handleValidate))
+	mux.HandleFunc("/api/v1/validate/", s.RequirePermission(PermExecutionOnly, s.handleValidateRouter))
 
 	// Telemetry & Audit Event Log Queries (requires "read-only" or "all")
 	mux.HandleFunc("/api/v1/logs/runs", s.RequirePermission(PermReadOnly, s.handleListRuns))
@@ -257,6 +267,96 @@ func (s *APIServer) dispatchArtifactRequest(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Route 2b: /api/v1/artifacts/{type}/id/{id}[/export] (GET, PUT, DELETE, export by database table ID)
+	if len(parts) >= 3 && strings.ToLower(parts[1]) == "id" {
+		idVal, idErr := strconv.ParseInt(strings.TrimSpace(parts[2]), 10, 64)
+		if idErr != nil || idVal <= 0 {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid artifact ID %q: must be a positive integer", parts[2]))
+			return
+		}
+		idLabel := fmt.Sprintf("id:%d", idVal)
+		if len(parts) == 4 && strings.ToLower(parts[3]) == "export" {
+			if r.Method != http.MethodGet {
+				writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
+				return
+			}
+			decrypt := r.URL.Query().Get("decrypt") == "true" || r.URL.Query().Get("decrypt") == "1"
+			secKey := r.URL.Query().Get("secure_key")
+			if secKey == "" {
+				secKey = r.Header.Get("X-Flow-Secure-Key")
+			}
+			rec, err := s.GetArtifactByID(r.Context(), artifactType, idVal, decrypt, secKey)
+			if err != nil {
+				code := http.StatusInternalServerError
+				if errors.Is(err, ErrArtifactNotFound) {
+					code = http.StatusNotFound
+				}
+				s.recordArtifactAudit(r, authUsername, "artifact.export", artifactType, idLabel, code, "ERROR", start, err.Error())
+				writeJSONError(w, code, err.Error())
+				return
+			}
+			s.recordArtifactAudit(r, authUsername, "artifact.export", artifactType, rec.Name, http.StatusOK, "SUCCESS", start, "")
+			w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", rec.Name+".xml"))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(rec.Content))
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			decrypt := r.URL.Query().Get("decrypt") == "true" || r.URL.Query().Get("decrypt") == "1"
+			secKey := r.URL.Query().Get("secure_key")
+			if secKey == "" {
+				secKey = r.Header.Get("X-Flow-Secure-Key")
+			}
+			rec, err := s.GetArtifactByID(r.Context(), artifactType, idVal, decrypt, secKey)
+			if err != nil {
+				code := http.StatusInternalServerError
+				if errors.Is(err, ErrArtifactNotFound) {
+					code = http.StatusNotFound
+				}
+				s.recordArtifactAudit(r, authUsername, "artifact.read", artifactType, idLabel, code, "ERROR", start, err.Error())
+				writeJSONError(w, code, err.Error())
+				return
+			}
+			s.recordArtifactAudit(r, authUsername, "artifact.read", artifactType, rec.Name, http.StatusOK, "SUCCESS", start, "")
+			writeJSON(w, http.StatusOK, rec)
+		case http.MethodPut:
+			var body artifactPayload
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON body: %v", err))
+				return
+			}
+			rec, err := s.UpdateArtifactByID(r.Context(), artifactType, idVal, body.Description, body.resolvedContent(), body.resolvedEncrypted(), body.SecureKey)
+			if err != nil {
+				code := http.StatusInternalServerError
+				if errors.Is(err, ErrArtifactNotFound) {
+					code = http.StatusNotFound
+				}
+				s.recordArtifactAudit(r, authUsername, "artifact.update", artifactType, idLabel, code, "ERROR", start, err.Error())
+				writeJSONError(w, code, err.Error())
+				return
+			}
+			s.recordArtifactAudit(r, authUsername, "artifact.update", artifactType, rec.Name, http.StatusOK, "SUCCESS", start, "")
+			writeJSON(w, http.StatusOK, rec)
+		case http.MethodDelete:
+			if err := s.DeleteArtifactByID(r.Context(), artifactType, idVal); err != nil {
+				code := http.StatusInternalServerError
+				if errors.Is(err, ErrArtifactNotFound) {
+					code = http.StatusNotFound
+				}
+				s.recordArtifactAudit(r, authUsername, "artifact.delete", artifactType, idLabel, code, "ERROR", start, err.Error())
+				writeJSONError(w, code, err.Error())
+				return
+			}
+			s.recordArtifactAudit(r, authUsername, "artifact.delete", artifactType, idLabel, http.StatusOK, "SUCCESS", start, "")
+			writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "type": artifactType, "id": idVal})
+		default:
+			writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		}
+		return
+	}
+
 	name := parts[1]
 
 	// Route 3: /api/v1/artifacts/{type}/{name}/export (GET raw XML file download)
@@ -443,6 +543,48 @@ func parseExecutionRequest(r *http.Request) (ExecutionRequest, error) {
 		}
 	}
 	q := r.URL.Query()
+	if req.ArtifactType == "" {
+		req.ArtifactType = strings.TrimSpace(q.Get("artifact_type"))
+		if req.ArtifactType == "" {
+			req.ArtifactType = strings.TrimSpace(q.Get("type"))
+		}
+	}
+	if req.ID <= 0 {
+		if v := strings.TrimSpace(q.Get("id")); v != "" {
+			idVal, err := strconv.ParseInt(v, 10, 64)
+			if err != nil || idVal <= 0 {
+				return req, fmt.Errorf("invalid id query parameter %q: must be a positive integer", v)
+			}
+			req.ID = idVal
+		}
+	}
+	if req.PipelineID <= 0 {
+		if v := strings.TrimSpace(q.Get("pipeline_id")); v != "" {
+			idVal, err := strconv.ParseInt(v, 10, 64)
+			if err != nil || idVal <= 0 {
+				return req, fmt.Errorf("invalid pipeline_id query parameter %q: must be a positive integer", v)
+			}
+			req.PipelineID = idVal
+		}
+	}
+	if req.OptionsID <= 0 {
+		if v := strings.TrimSpace(q.Get("options_id")); v != "" {
+			idVal, err := strconv.ParseInt(v, 10, 64)
+			if err != nil || idVal <= 0 {
+				return req, fmt.Errorf("invalid options_id query parameter %q: must be a positive integer", v)
+			}
+			req.OptionsID = idVal
+		}
+	}
+	if req.ConfigID <= 0 {
+		if v := strings.TrimSpace(q.Get("config_id")); v != "" {
+			idVal, err := strconv.ParseInt(v, 10, 64)
+			if err != nil || idVal <= 0 {
+				return req, fmt.Errorf("invalid config_id query parameter %q: must be a positive integer", v)
+			}
+			req.ConfigID = idVal
+		}
+	}
 	if req.File == "" {
 		req.File = strings.TrimSpace(q.Get("file"))
 	}
@@ -470,12 +612,154 @@ func parseExecutionRequest(r *http.Request) (ExecutionRequest, error) {
 	if req.VarsRaw == "" {
 		req.VarsRaw = strings.TrimSpace(q.Get("vars"))
 	}
+	if req.SecureKey == "" {
+		req.SecureKey = strings.TrimSpace(q.Get("secure_key"))
+		if req.SecureKey == "" {
+			req.SecureKey = strings.TrimSpace(r.Header.Get("X-Flow-Secure-Key"))
+		}
+	}
 	return req, nil
 }
 
+func describeExecutionTarget(req ExecutionRequest) (artifactType, artifactName string) {
+	artifactType = req.ArtifactType
+	if artifactType == "" {
+		if req.OptionsID > 0 {
+			artifactType = "options"
+		} else if req.ConfigID > 0 && req.PipelineID <= 0 && req.File == "" {
+			artifactType = "config"
+		} else {
+			artifactType = "pipeline"
+		}
+	}
+	switch {
+	case req.ID > 0:
+		artifactName = fmt.Sprintf("id:%d", req.ID)
+	case req.PipelineID > 0:
+		artifactName = fmt.Sprintf("id:%d", req.PipelineID)
+	case req.OptionsID > 0:
+		artifactName = fmt.Sprintf("id:%d", req.OptionsID)
+	case req.ConfigID > 0 && req.File == "":
+		artifactName = fmt.Sprintf("id:%d", req.ConfigID)
+	case req.File != "":
+		artifactName = req.File
+	case req.Options != "":
+		artifactName = req.Options
+	case req.Config != "":
+		artifactName = req.Config
+	default:
+		artifactName = "inline"
+	}
+	return artifactType, artifactName
+}
+
+// handleExecuteRouter dispatches:
+//   - /api/v1/execute/stream (or /api/v1/execution/stream)
+//   - /api/v1/execute/{type}/{id} (or /api/v1/execution/{type}/{id})
+//   - /api/v1/execute/stream/{type}/{id} (or /api/v1/execution/stream/{type}/{id})
+//   - /api/v1/execute/{type}/{id}/stream (or /api/v1/execution/{type}/{id}/stream)
+func (s *APIServer) handleExecuteRouter(w http.ResponseWriter, r *http.Request) {
+	rel := r.URL.Path
+	if strings.HasPrefix(rel, "/api/v1/execution/") {
+		rel = strings.TrimPrefix(rel, "/api/v1/execution/")
+	} else {
+		rel = strings.TrimPrefix(rel, "/api/v1/execute/")
+	}
+	rel = strings.TrimSuffix(rel, "/")
+	if rel == "" {
+		s.handleExecuteSync(w, r)
+		return
+	}
+	if strings.EqualFold(rel, "stream") {
+		s.handleExecuteStream(w, r)
+		return
+	}
+
+	parts := strings.Split(rel, "/")
+	// Pattern 1: /api/v1/execute/stream/{type}/{id}
+	if len(parts) == 3 && strings.EqualFold(parts[0], "stream") {
+		_, _, canonicalType, err := ResolveArtifactTarget(parts[1])
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		idVal, err := strconv.ParseInt(strings.TrimSpace(parts[2]), 10, 64)
+		if err != nil || idVal <= 0 {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid artifact ID %q: must be a positive integer", parts[2]))
+			return
+		}
+		s.executeStreamWithTarget(w, r, canonicalType, idVal)
+		return
+	}
+
+	// Pattern 2: /api/v1/execute/{type}/{id}/stream
+	if len(parts) == 3 && strings.EqualFold(parts[2], "stream") {
+		_, _, canonicalType, err := ResolveArtifactTarget(parts[0])
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		idVal, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+		if err != nil || idVal <= 0 {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid artifact ID %q: must be a positive integer", parts[1]))
+			return
+		}
+		s.executeStreamWithTarget(w, r, canonicalType, idVal)
+		return
+	}
+
+	// Pattern 3: /api/v1/execute/{type}/{id}
+	if len(parts) == 2 {
+		_, _, canonicalType, err := ResolveArtifactTarget(parts[0])
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		idVal, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+		if err != nil || idVal <= 0 {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid artifact ID %q: must be a positive integer", parts[1]))
+			return
+		}
+		s.executeSyncWithTarget(w, r, canonicalType, idVal)
+		return
+	}
+
+	writeJSONError(w, http.StatusBadRequest, "expected /api/v1/execute/{type}/{id}, /api/v1/execute/stream/{type}/{id}, or /api/v1/execute/{type}/{id}/stream")
+}
+
+// handleValidateRouter dispatches /api/v1/validate/{type}/{id}.
+func (s *APIServer) handleValidateRouter(w http.ResponseWriter, r *http.Request) {
+	rel := strings.TrimPrefix(r.URL.Path, "/api/v1/validate/")
+	rel = strings.TrimSuffix(rel, "/")
+	if rel == "" {
+		s.handleValidate(w, r)
+		return
+	}
+	parts := strings.Split(rel, "/")
+	if len(parts) == 2 {
+		_, _, canonicalType, err := ResolveArtifactTarget(parts[0])
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		idVal, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+		if err != nil || idVal <= 0 {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid artifact ID %q: must be a positive integer", parts[1]))
+			return
+		}
+		s.validateWithTarget(w, r, canonicalType, idVal)
+		return
+	}
+	writeJSONError(w, http.StatusBadRequest, "expected /api/v1/validate/{type}/{id}")
+}
+
 func (s *APIServer) handleExecuteSync(w http.ResponseWriter, r *http.Request) {
+	s.executeSyncWithTarget(w, r, "", 0)
+}
+
+func (s *APIServer) executeSyncWithTarget(w http.ResponseWriter, r *http.Request, targetType string, targetID int64) {
 	if r.Method != http.MethodPost {
-		writeJSONError(w, http.StatusMethodNotAllowed, "Use POST for /api/v1/execute")
+		writeJSONError(w, http.StatusMethodNotAllowed, "Use POST for synchronous execution")
 		return
 	}
 	start := time.Now().UTC()
@@ -490,6 +774,14 @@ func (s *APIServer) handleExecuteSync(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid execution request: %v", err))
 		return
 	}
+	if targetType != "" {
+		req.ArtifactType = targetType
+	}
+	if targetID > 0 {
+		req.ID = targetID
+	}
+
+	artType, artName := describeExecutionTarget(req)
 
 	resp, execErr := s.ExecutePipeline(r.Context(), req, nil)
 	if resp == nil && execErr != nil {
@@ -498,8 +790,8 @@ func (s *APIServer) handleExecuteSync(w http.ResponseWriter, r *http.Request) {
 			EventType:    "pipeline.execute",
 			HTTPMethod:   r.Method,
 			Path:         r.URL.Path,
-			ArtifactType: "pipeline",
-			ArtifactName: req.File,
+			ArtifactType: artType,
+			ArtifactName: artName,
 			AuthUser:     authUser,
 			RemoteAddr:   r.RemoteAddr,
 			StatusCode:   http.StatusBadRequest,
@@ -525,8 +817,8 @@ func (s *APIServer) handleExecuteSync(w http.ResponseWriter, r *http.Request) {
 		EventType:    "pipeline.execute",
 		HTTPMethod:   r.Method,
 		Path:         r.URL.Path,
-		ArtifactType: "pipeline",
-		ArtifactName: req.File,
+		ArtifactType: artType,
+		ArtifactName: artName,
 		RunID:        resp.RunID,
 		AuthUser:     authUser,
 		RemoteAddr:   r.RemoteAddr,
@@ -540,6 +832,10 @@ func (s *APIServer) handleExecuteSync(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *APIServer) handleValidate(w http.ResponseWriter, r *http.Request) {
+	s.validateWithTarget(w, r, "", 0)
+}
+
+func (s *APIServer) validateWithTarget(w http.ResponseWriter, r *http.Request, targetType string, targetID int64) {
 	if r.Method != http.MethodPost {
 		writeJSONError(w, http.StatusMethodNotAllowed, "Use POST for /api/v1/validate")
 		return
@@ -556,7 +852,15 @@ func (s *APIServer) handleValidate(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid validation request: %v", err))
 		return
 	}
+	if targetType != "" {
+		req.ArtifactType = targetType
+	}
+	if targetID > 0 {
+		req.ID = targetID
+	}
 	req.Validate = true
+
+	artType, artName := describeExecutionTarget(req)
 
 	resp, valErr := s.ExecutePipeline(r.Context(), req, nil)
 	if valErr != nil {
@@ -565,8 +869,8 @@ func (s *APIServer) handleValidate(w http.ResponseWriter, r *http.Request) {
 			EventType:    "pipeline.validate",
 			HTTPMethod:   r.Method,
 			Path:         r.URL.Path,
-			ArtifactType: "pipeline",
-			ArtifactName: req.File,
+			ArtifactType: artType,
+			ArtifactName: artName,
 			AuthUser:     authUser,
 			RemoteAddr:   r.RemoteAddr,
 			StatusCode:   http.StatusUnprocessableEntity,
@@ -583,8 +887,8 @@ func (s *APIServer) handleValidate(w http.ResponseWriter, r *http.Request) {
 		EventType:    "pipeline.validate",
 		HTTPMethod:   r.Method,
 		Path:         r.URL.Path,
-		ArtifactType: "pipeline",
-		ArtifactName: req.File,
+		ArtifactType: artType,
+		ArtifactName: artName,
 		RunID:        resp.RunID,
 		AuthUser:     authUser,
 		RemoteAddr:   r.RemoteAddr,
@@ -596,8 +900,12 @@ func (s *APIServer) handleValidate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *APIServer) handleExecuteStream(w http.ResponseWriter, r *http.Request) {
+	s.executeStreamWithTarget(w, r, "", 0)
+}
+
+func (s *APIServer) executeStreamWithTarget(w http.ResponseWriter, r *http.Request, targetType string, targetID int64) {
 	if r.Method != http.MethodPost && r.Method != http.MethodGet {
-		writeJSONError(w, http.StatusMethodNotAllowed, "Use POST or GET for /api/v1/execute/stream")
+		writeJSONError(w, http.StatusMethodNotAllowed, "Use POST or GET for streaming execution")
 		return
 	}
 	start := time.Now().UTC()
@@ -612,6 +920,14 @@ func (s *APIServer) handleExecuteStream(w http.ResponseWriter, r *http.Request) 
 		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid stream request: %v", err))
 		return
 	}
+	if targetType != "" {
+		req.ArtifactType = targetType
+	}
+	if targetID > 0 {
+		req.ID = targetID
+	}
+
+	artType, artName := describeExecutionTarget(req)
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -655,8 +971,8 @@ func (s *APIServer) handleExecuteStream(w http.ResponseWriter, r *http.Request) 
 			EventType:    "pipeline.stream",
 			HTTPMethod:   r.Method,
 			Path:         r.URL.Path,
-			ArtifactType: "pipeline",
-			ArtifactName: req.File,
+			ArtifactType: artType,
+			ArtifactName: artName,
 			RunID:        runID,
 			AuthUser:     authUser,
 			RemoteAddr:   r.RemoteAddr,
@@ -680,8 +996,8 @@ func (s *APIServer) handleExecuteStream(w http.ResponseWriter, r *http.Request) 
 		EventType:    "pipeline.stream",
 		HTTPMethod:   r.Method,
 		Path:         r.URL.Path,
-		ArtifactType: "pipeline",
-		ArtifactName: req.File,
+		ArtifactType: artType,
+		ArtifactName: artName,
 		RunID:        runID,
 		AuthUser:     authUser,
 		RemoteAddr:   r.RemoteAddr,
@@ -775,13 +1091,22 @@ func (s *APIServer) handleTestDatabase(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		DSN string `json:"dsn"`
+		DSN              string `json:"dsn"`
+		ConnectionString string `json:"connection_string"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
-		return
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
+			return
+		}
 	}
 	targetDSN := strings.TrimSpace(req.DSN)
+	if targetDSN == "" {
+		targetDSN = strings.TrimSpace(req.ConnectionString)
+	}
+	if targetDSN == "" {
+		targetDSN = strings.TrimSpace(r.URL.Query().Get("dsn"))
+	}
 	if targetDSN == "" {
 		targetDSN = s.cfg.ConnectionString
 	}
