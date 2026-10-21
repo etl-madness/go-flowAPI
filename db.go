@@ -20,8 +20,14 @@ import (
 // from any go-flow connection string format (including sql://driver@dsn, db://driver@dsn,
 // Azure AD fedauth=, postgres://, mysql://, oracle://, sqlserver://, and sqlite files).
 func ParseDSN(rawDSN string) (sqlDriver string, dialect string, cleanDSN string) {
+	return ParseDSNWithDriver(rawDSN, "")
+}
+
+// ParseDSNWithDriver extracts the sql.Open driver name, canonical dialect type, and clean DSN,
+// using explicitDriverHint when no scheme prefix is embedded in rawDSN.
+func ParseDSNWithDriver(rawDSN, explicitDriverHint string) (sqlDriver string, dialect string, cleanDSN string) {
 	dsn := strings.TrimSpace(rawDSN)
-	driverHint := ""
+	driverHint := strings.ToLower(strings.TrimSpace(explicitDriverHint))
 
 	if strings.HasPrefix(dsn, "sql://") || strings.HasPrefix(dsn, "db://") {
 		stripped := strings.TrimPrefix(strings.TrimPrefix(dsn, "sql://"), "db://")
@@ -92,7 +98,12 @@ func RedactDSN(rawDSN string) string {
 
 // OpenDatabase opens a database connection using any supported go-flow DSN format.
 func OpenDatabase(rawDSN string) (*sql.DB, string, error) {
-	sqlDriver, dialect, cleanDSN := ParseDSN(rawDSN)
+	return OpenDatabaseWithDriver(rawDSN, "")
+}
+
+// OpenDatabaseWithDriver opens a database connection using any supported go-flow DSN format and optional driver hint.
+func OpenDatabaseWithDriver(rawDSN, driverHint string) (*sql.DB, string, error) {
+	sqlDriver, dialect, cleanDSN := ParseDSNWithDriver(rawDSN, driverHint)
 	db, err := sql.Open(sqlDriver, cleanDSN)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed opening %s database: %w", sqlDriver, err)

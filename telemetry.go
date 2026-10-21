@@ -467,7 +467,9 @@ func (s *DatabaseSink) Emit(ctx context.Context, event flow.ExecutionEvent) erro
 		}
 	}
 
-	_, err := s.DB.ExecContext(ctx, query, args...)
+	emitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	_, err := s.DB.ExecContext(emitCtx, query, args...)
 	return err
 }
 

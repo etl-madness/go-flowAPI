@@ -1,0 +1,76 @@
+# Docker Compose with Microsoft SQL Server 2022 + automated schema provisioning
+# Usage:
+#   docker compose -f docker-compose.sqlserver.yml up -d --build
+
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: go-flow-sqlserver
+    restart: unless-stopped
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:-YourStrong!Passw0rd}"
+      MSSQL_PID: "Developer"
+    ports:
+      - "${MSSQL_HOST_PORT:-1433}:1433"
+    volumes:
+      - sqlserver_data:/var/opt/mssql
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q \"SELECT 1\" || /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q \"SELECT 1\""
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+  sqlserver-init:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: go-flow-sqlserver-init
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    environment:
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:-YourStrong!Passw0rd}"
+    volumes:
+      - ./docker/init/sqlserver-init.sql:/init/sqlserver-init.sql:ro
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        echo "[sqlserver-init] Provisioning PROTO database and go-flowAPI tables..."
+        if [ -x /opt/mssql-tools18/bin/sqlcmd ]; then
+          /opt/mssql-tools18/bin/sqlcmd -S sqlserver -U sa -P "$$MSSQL_SA_PASSWORD" -C -i /init/sqlserver-init.sql
+        else
+          /opt/mssql-tools/bin/sqlcmd -S sqlserver -U sa -P "$$MSSQL_SA_PASSWORD" -i /init/sqlserver-init.sql
+        fi
+        echo "[sqlserver-init] Schema initialization complete."
+    restart: "no"
+
+  go-flow-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      additional_contexts:
+        go-flow: ../go-flow
+    image: go-flow-api:latest
+    container_name: go-flow-api-sqlserver
+    restart: unless-stopped
+    depends_on:
+      sqlserver-init:
+        condition: service_completed_successfully
+    ports:
+      - "${FLOW_API_HOST_PORT:-8080}:8080"
+    environment:
+      FLOW_API_ADDR: ":8080"
+      FLOW_API_DSN: "sqlserver://sa:${MSSQL_SA_PASSWORD:-YourStrong!Passw0rd}@sqlserver:1433?database=EXAMPLE_DB&trustServerCertificate=true"
+      FLOW_API_BOOTSTRAP_USER: "${FLOW_API_BOOTSTRAP_USER:-admin}"
+      FLOW_API_BOOTSTRAP_PASS: "${FLOW_API_BOOTSTRAP_PASS:-Admin123!}"
+      FLOW_API_BOOTSTRAP_PERM: "${FLOW_API_BOOTSTRAP_PERM:-all}"
+      FLOW_SECURE_KEY: "${FLOW_SECURE_KEY:-}"
+      FLOW_API_DEBUG: "${FLOW_API_DEBUG:-false}"
+
+volumes:
+  sqlserver_data:

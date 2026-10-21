@@ -1,0 +1,18 @@
+# Git and IDE metadata
+.git
+.gitignore
+.vscode
+.idea
+
+# Local compiled binaries and test artifacts
+*.exe
+*.out
+*.test
+go-flowAPI
+
+# Local SQLite database files
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3

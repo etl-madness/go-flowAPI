@@ -1,0 +1,49 @@
+# Docker Compose with PostgreSQL 16 + automated schema provisioning
+# Usage:
+#   docker compose -f docker-compose.postgres.yml up -d --build
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: go-flow-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-flow}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-flowpass}"
+      POSTGRES_DB: "${POSTGRES_DB:-flowdb}"
+    ports:
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/init/postgres-init.sql:/docker-entrypoint-initdb.d/01-postgres-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-flow} -d $${POSTGRES_DB:-flowdb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  go-flow-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      additional_contexts:
+        go-flow: ../go-flow
+    image: go-flow-api:latest
+    container_name: go-flow-api-postgres
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${FLOW_API_HOST_PORT:-8080}:8080"
+    environment:
+      FLOW_API_ADDR: ":8080"
+      FLOW_API_DSN: "postgres://${POSTGRES_USER:-flow}:${POSTGRES_PASSWORD:-flowpass}@postgres:5432/${POSTGRES_DB:-flowdb}?sslmode=disable"
+      FLOW_API_BOOTSTRAP_USER: "${FLOW_API_BOOTSTRAP_USER:-admin}"
+      FLOW_API_BOOTSTRAP_PASS: "${FLOW_API_BOOTSTRAP_PASS:-Admin123!}"
+      FLOW_API_BOOTSTRAP_PERM: "${FLOW_API_BOOTSTRAP_PERM:-all}"
+      FLOW_SECURE_KEY: "${FLOW_SECURE_KEY:-}"
+      FLOW_API_DEBUG: "${FLOW_API_DEBUG:-false}"
+
+volumes:
+  postgres_data:

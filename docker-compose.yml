@@ -1,0 +1,35 @@
+# Default Docker Compose: connects go-flowAPI to an existing/host database via FLOW_API_DSN
+# Usage:
+#   docker compose up -d --build
+#   FLOW_API_DSN="sqlserver://sa:Pass@dbserver.example.com:1433?database=PROTO&trustServerCertificate=true" docker compose up -d --build
+
+services:
+  go-flow-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      additional_contexts:
+        go-flow: ../go-flow
+    image: go-flow-api:latest
+    container_name: go-flow-api
+    restart: unless-stopped
+    ports:
+      - "${FLOW_API_HOST_PORT:-8080}:8080"
+    environment:
+      FLOW_API_ADDR: ":8080"
+      FLOW_API_DSN: "${FLOW_API_DSN:-sqlserver://sa:YourStrong!Passw0rd@dbserver.example.com:1433?database=EXAMPLE_DB&trustServerCertificate=true}"
+      # Optional: leave empty when dbo.flow_api_users is already provisioned
+      #FLOW_API_BOOTSTRAP_USER: "${FLOW_API_BOOTSTRAP_USER:-}"
+      #FLOW_API_BOOTSTRAP_PASS: "${FLOW_API_BOOTSTRAP_PASS:-}"
+      #FLOW_API_BOOTSTRAP_PERM: "${FLOW_API_BOOTSTRAP_PERM:-}"
+      #FLOW_SECURE_KEY: "${FLOW_SECURE_KEY:-}"
+      #FLOW_API_DEBUG: "${FLOW_API_DEBUG:-false}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "dbserver.example.com:host-gateway"
+      - "DBSERVER.EXAMPLE.COM:host-gateway"
+    volumes:
+      - flow_api_data:/data
+
+volumes:
+  flow_api_data:

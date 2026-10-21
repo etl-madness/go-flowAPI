@@ -15,7 +15,7 @@ import (
 //   - MySQL / MariaDB:      "mysql://user:pass@tcp(localhost:3306)/dbname?parseTime=true"
 //   - SQLite:               "sql://sqlite@flow_api.db" or "flow_api.db"
 //   - Oracle:               "oracle://user:pass@localhost:1521/service_name"
-var StartupConnectionString = "sqlserver://sa:Password123!@localhost:1433?database=master&trustServerCertificate=true"
+var StartupConnectionString = "sqlserver://t15p?database=PROTO&trustServerCertificate=true"
 
 // ServerConfig holds the runtime configuration for go-flowAPI.
 type ServerConfig struct {

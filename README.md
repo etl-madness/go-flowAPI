@@ -38,13 +38,41 @@
 
 ## Running `go-flowAPI`
 
-```bash
-# Run using StartupConnectionString in config.go (or override via -dsn / FLOW_API_DSN)
-go run . -addr :8085 -dsn "sqlserver://sa:YourStrong!Passw0rd@localhost:1433?database=master"
+When your database tables (`dbo.flow_api_users`, etc.) and users are already set up, `FLOW_API_BOOTSTRAP_USER`, `FLOW_API_BOOTSTRAP_PASS`, and `FLOW_API_BOOTSTRAP_PERM` are **not required**:
 
-# Run and automatically seed/update an initial admin user with 'all' permissions:
-go run . -addr :8085 -bootstrap-user admin -bootstrap-pass "YourStrong!AdminPass"
+```bash
+# 1. Run from source (uses StartupConnectionString in config.go, or override via -dsn / FLOW_API_DSN)
+go run .
+go run . -addr :8080 -dsn "sqlserver://sa:YourStrong!Passw0rd@localhost:1433?database=PROTO&trustServerCertificate=true"
+
+# 2. Build and run compiled binary
+go build -o go-flowAPI.exe .
+./go-flowAPI.exe -addr :8080 -dsn "sqlserver://sa:YourStrong!Passw0rd@localhost:1433?database=PROTO&trustServerCertificate=true"
+
+# (Optional) Seed/update an initial admin user at startup only if needed:
+go run . -addr :8080 -bootstrap-user admin -bootstrap-pass "YourStrong!AdminPass"
 ```
+
+### Running with Docker Compose
+
+See **[`DOCKER.md`](./DOCKER.md)** for the full Docker Quickstart Guide. Four Docker Compose configurations are included to cover each database backend (defaulting to port `8080`):
+
+```bash
+# 1. Connect to an existing / host database via FLOW_API_DSN (no bootstrap env vars required if users exist)
+FLOW_API_DSN="sqlserver://flow_api:YourStrong!Passw0rd@host.docker.internal:1433?database=PROTO&trustServerCertificate=true" \
+docker compose up -d --build
+
+# 2. SQL Server 2022 container + automatic schema provisioning
+docker compose -f docker-compose.sqlserver.yml up -d --build
+
+# 3. PostgreSQL 16 container + automatic schema provisioning
+docker compose -f docker-compose.postgres.yml up -d --build
+
+# 4. SQLite with persistent Docker volume + automatic schema provisioning
+docker compose -f docker-compose.sqlite.yml up -d --build
+```
+
+> **Note when connecting from Docker to a Windows Host SQL Server**: Unlike native Windows builds (`go run .` / `go-flowAPI.exe`) which can use Windows Integrated Authentication (`sqlserver://HOST:1433?...`), a Linux Docker container requires **SQL Server Authentication** (`sqlserver://username:password@host.docker.internal:1433?...`) with SQL Server Mixed Mode and TCP/IP (port `1433`) enabled. See **[`DOCKER.md`](./DOCKER.md#important-notes-for-connecting-to-a-windows-host-sql-server-from-docker)** for details and SQL login setup.
 
 ### Command-Line Flags & Environment Variables
 

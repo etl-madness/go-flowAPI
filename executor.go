@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -18,29 +19,35 @@ import (
 	"github.com/traefik/yaegi/interp"
 )
 
-// CliOptionsXML mirrors go-flow's <cli_options> XML structure (xsd/options.xsd).
+// CliOptionsXML mirrors go-flow's <cli_options> and <flow_cli_options> XML structures (xsd/options.xsd).
 type CliOptionsXML struct {
-	XMLName         xml.Name `xml:"cli_options"`
-	File            *string  `xml:"file"`
-	Format          *string  `xml:"format"`
-	XSD             *string  `xml:"xsd"`
-	Config          *string  `xml:"config"`
-	Validate        *bool    `xml:"validate"`
-	Preflight       *bool    `xml:"preflight"`
-	Vars            *string  `xml:"vars"`
-	Debug           *bool    `xml:"debug"`
-	GoPath          *string  `xml:"gopath"`
-	XSLT            *string  `xml:"xslt"`
-	Out             *string  `xml:"out"`
-	NodeOutput      *bool    `xml:"node-output"`
-	Encrypted       *bool    `xml:"encrypted"`
-	SecureKey       *string  `xml:"secure-key"`
-	VerifySignature *bool    `xml:"verify-signature"`
-	PublicKey       *string  `xml:"public-key"`
-	Cert            *string  `xml:"cert"`
-	CACert          *string  `xml:"ca-cert"`
-	Keyring         *string  `xml:"keyring"`
-	Signature       *string  `xml:"signature"`
+	File            *string             `xml:"file"`
+	Format          *string             `xml:"format"`
+	XSD             *string             `xml:"xsd"`
+	Config          *string             `xml:"config"`
+	Validate        *bool               `xml:"validate"`
+	Preflight       *bool               `xml:"preflight"`
+	Vars            *string             `xml:"vars"`
+	Debug           *bool               `xml:"debug"`
+	GoPath          *string             `xml:"gopath"`
+	XSLT            *string             `xml:"xslt"`
+	Out             *string             `xml:"out"`
+	NodeOutput      *bool               `xml:"node-output"`
+	Encrypted       *bool               `xml:"encrypted"`
+	SecureKey       *string             `xml:"secure-key"`
+	VerifySignature *bool               `xml:"verify-signature"`
+	PublicKey       *string             `xml:"public-key"`
+	Cert            *string             `xml:"cert"`
+	CACert          *string             `xml:"ca-cert"`
+	Keyring         *string             `xml:"keyring"`
+	Signature       *string             `xml:"signature"`
+	NestedOptions   *CliOptionsXML      `xml:"options"`
+	OptionItems     []cliOptionItemElem `xml:"option"`
+}
+
+type cliOptionItemElem struct {
+	Flag  string `xml:"flag,attr"`
+	Value string `xml:",chardata"`
 }
 
 // ExecutionRequest supports all CLI, Builder, and db_importer execution options,
@@ -134,8 +141,121 @@ func parseExplicitIDRef(ref string) (int64, bool) {
 	return 0, false
 }
 
+// loadSQLResourceURI executes a sql://<driver>@<dsn>#<SQL_QUERY> URI and returns the first column of the first row.
+func loadSQLResourceURI(ctx context.Context, uri string) ([]byte, error) {
+	hashIdx := strings.LastIndex(uri, "#")
+	if hashIdx < 0 {
+		return nil, fmt.Errorf("invalid SQL URI (missing #<SQL_QUERY> fragment)")
+	}
+	dsnPart := strings.TrimSpace(uri[:hashIdx])
+	query := strings.TrimSpace(uri[hashIdx+1:])
+	if dsnPart == "" || query == "" {
+		return nil, fmt.Errorf("invalid SQL URI (empty DSN or query)")
+	}
+
+	db, _, err := OpenDatabase(dsnPart)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	qCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	rows, err := db.QueryContext(qCtx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("SQL resource query returned 0 rows")
+	}
+
+	cols, err := rows.Columns()
+	if err != nil || len(cols) == 0 {
+		return nil, fmt.Errorf("SQL resource query returned no columns")
+	}
+
+	vals := make([]any, len(cols))
+	ptrs := make([]any, len(cols))
+	for i := range vals {
+		ptrs[i] = &vals[i]
+	}
+	if err := rows.Scan(ptrs...); err != nil {
+		return nil, err
+	}
+
+	switch v := vals[0].(type) {
+	case []byte:
+		return v, nil
+	case string:
+		return []byte(v), nil
+	case nil:
+		return nil, fmt.Errorf("SQL resource query returned NULL")
+	default:
+		return []byte(fmt.Sprintf("%v", v)), nil
+	}
+}
+
+// resolveConnectionString expands {{var}} and {{.var}} placeholders in a database connection string
+// using variables defined in the pipeline XML, config overrides, VarsRaw, and Vars map.
+func resolveConnectionString(dsn string, varConfigs []flow.VariableConfig, varsRaw string, varsMap map[string]string) string {
+	resolved := strings.TrimSpace(dsn)
+	if !strings.Contains(resolved, "{{") {
+		return resolved
+	}
+
+	lookup := make(map[string]string, len(varConfigs)+len(varsMap)+8)
+	for _, vc := range varConfigs {
+		name := strings.TrimSpace(vc.Name)
+		if name != "" {
+			lookup[name] = vc.Value
+		}
+	}
+	if strings.TrimSpace(varsRaw) != "" {
+		for _, pair := range strings.Split(varsRaw, ",") {
+			if kv := strings.SplitN(strings.TrimSpace(pair), "=", 2); len(kv) == 2 {
+				k := strings.TrimSpace(kv[0])
+				if k != "" {
+					lookup[k] = strings.TrimSpace(kv[1])
+				}
+			}
+		}
+	}
+	for k, v := range varsMap {
+		trimmedKey := strings.TrimSpace(k)
+		if trimmedKey != "" {
+			lookup[trimmedKey] = v
+		}
+	}
+
+	for pass := 0; pass < 3; pass++ {
+		changed := false
+		for k, v := range lookup {
+			p1 := "{{" + k + "}}"
+			p2 := "{{." + k + "}}"
+			if strings.Contains(resolved, p1) {
+				resolved = strings.ReplaceAll(resolved, p1, v)
+				changed = true
+			}
+			if strings.Contains(resolved, p2) {
+				resolved = strings.ReplaceAll(resolved, p2, v)
+				changed = true
+			}
+		}
+		if !changed || !strings.Contains(resolved, "{{") {
+			break
+		}
+	}
+	return resolved
+}
+
 // resolveArtifactBytes loads XML content from inline XML, the startup database by table ID or Name
-// (TablePipelineContent / TableOptionsContent / TableConfigContent), or local file fallback,
+// (TablePipelineContent / TableOptionsContent / TableConfigContent), sql://#query URI, or local file fallback,
 // and handles decryption & signature verification.
 func (s *APIServer) resolveArtifactBytes(ctx context.Context, artifactType string, artifactID int64, nameOrPath, inlineXML string, req *ExecutionRequest) ([]byte, string, error) {
 	key := resolveKey(req.SecureKey, req.KeyFile)
@@ -148,7 +268,11 @@ func (s *APIServer) resolveArtifactBytes(ctx context.Context, artifactType strin
 
 	if strings.TrimSpace(inlineXML) != "" {
 		rawBytes = []byte(inlineXML)
-		sourceLabel = "inline:" + artifactType
+		if trimmedName := strings.TrimSpace(nameOrPath); trimmedName != "" {
+			sourceLabel = trimmedName
+		} else {
+			sourceLabel = "inline:" + artifactType
+		}
 	} else if artifactID > 0 {
 		rec, dbErr := s.GetArtifactByID(ctx, artifactType, artifactID, false, "")
 		if dbErr != nil {
@@ -158,7 +282,15 @@ func (s *APIServer) resolveArtifactBytes(ctx context.Context, artifactType strin
 		sourceLabel = fmt.Sprintf("db://%s/id/%d(%s)", artifactType, rec.ID, rec.Name)
 	} else if strings.TrimSpace(nameOrPath) != "" {
 		ref := strings.TrimSpace(nameOrPath)
-		if explicitID, ok := parseExplicitIDRef(ref); ok {
+		lowerRef := strings.ToLower(ref)
+		if (strings.HasPrefix(lowerRef, "sql://") || strings.HasPrefix(lowerRef, "db://")) && strings.Contains(ref, "#") {
+			sqlBytes, sqlErr := loadSQLResourceURI(ctx, ref)
+			if sqlErr != nil {
+				return nil, "", fmt.Errorf("failed resolving %s from SQL URI: %w", artifactType, sqlErr)
+			}
+			rawBytes = sqlBytes
+			sourceLabel = RedactDSN(ref)
+		} else if explicitID, ok := parseExplicitIDRef(ref); ok {
 			rec, dbErr := s.GetArtifactByID(ctx, artifactType, explicitID, false, "")
 			if dbErr != nil {
 				return nil, "", fmt.Errorf("failed resolving %s with ID %d from database: %w", artifactType, explicitID, dbErr)
@@ -288,66 +420,178 @@ func (s *APIServer) applyOptionsXMLToRequest(ctx context.Context, req *Execution
 		return optLabel, fmt.Errorf("invalid options XML in %s: %w", optLabel, err)
 	}
 
+	active := &opts
+	if opts.NestedOptions != nil {
+		active = opts.NestedOptions
+	}
+
+	applyFlagValue := func(flagName, rawVal string) {
+		val := strings.TrimSpace(rawVal)
+		switch strings.ToLower(strings.TrimLeft(strings.TrimSpace(flagName), "-")) {
+		case "file", "f":
+			if req.File == "" && req.FileXML == "" && req.PipelineID <= 0 && val != "" {
+				req.File = val
+			}
+		case "format":
+			if req.Format == "" && val != "" {
+				req.Format = val
+			}
+		case "xsd":
+			if req.XSD == "" && val != "" {
+				req.XSD = val
+			}
+		case "config", "c":
+			if req.Config == "" && req.ConfigXML == "" && req.ConfigID <= 0 && val != "" {
+				req.Config = val
+			}
+		case "validate":
+			if !req.Validate {
+				if b, err := strconv.ParseBool(val); err == nil {
+					req.Validate = b
+				}
+			}
+		case "preflight":
+			if !req.Preflight {
+				if b, err := strconv.ParseBool(val); err == nil {
+					req.Preflight = b
+				}
+			}
+		case "vars":
+			if req.VarsRaw == "" && val != "" {
+				req.VarsRaw = val
+			}
+		case "debug":
+			if !req.Debug {
+				if b, err := strconv.ParseBool(val); err == nil {
+					req.Debug = b
+				}
+			}
+		case "gopath":
+			if req.GoPath == "" && val != "" {
+				req.GoPath = val
+			}
+		case "xslt":
+			if req.XSLT == "" && val != "" {
+				req.XSLT = val
+			}
+		case "out":
+			if req.Out == "" && val != "" {
+				req.Out = val
+			}
+		case "node-output", "node_output":
+			if !req.NodeOutput {
+				if b, err := strconv.ParseBool(val); err == nil {
+					req.NodeOutput = b
+				}
+			}
+		case "encrypted":
+			if !req.Encrypted {
+				if b, err := strconv.ParseBool(val); err == nil {
+					req.Encrypted = b
+				}
+			}
+		case "secure-key", "secure_key":
+			if req.SecureKey == "" && val != "" {
+				req.SecureKey = val
+			}
+		case "verify-signature", "verify_signature":
+			if !req.VerifySignature {
+				if b, err := strconv.ParseBool(val); err == nil {
+					req.VerifySignature = b
+				}
+			}
+		case "public-key", "public_key":
+			if req.PublicKey == "" && val != "" {
+				req.PublicKey = val
+			}
+		case "cert":
+			if req.Cert == "" && val != "" {
+				req.Cert = val
+			}
+		case "ca-cert", "ca_cert":
+			if req.CACert == "" && val != "" {
+				req.CACert = val
+			}
+		case "keyring":
+			if req.Keyring == "" && val != "" {
+				req.Keyring = val
+			}
+		case "signature":
+			if req.Signature == "" && val != "" {
+				req.Signature = val
+			}
+		}
+	}
+
 	// Apply XML defaults where request fields were not explicitly set
-	if req.File == "" && req.FileXML == "" && req.PipelineID <= 0 && opts.File != nil {
-		req.File = strings.TrimSpace(*opts.File)
+	if req.File == "" && req.FileXML == "" && req.PipelineID <= 0 && active.File != nil {
+		req.File = strings.TrimSpace(*active.File)
 	}
-	if req.Format == "" && opts.Format != nil {
-		req.Format = strings.TrimSpace(*opts.Format)
+	if req.Format == "" && active.Format != nil {
+		req.Format = strings.TrimSpace(*active.Format)
 	}
-	if req.XSD == "" && opts.XSD != nil {
-		req.XSD = strings.TrimSpace(*opts.XSD)
+	if req.XSD == "" && active.XSD != nil {
+		req.XSD = strings.TrimSpace(*active.XSD)
 	}
-	if req.Config == "" && req.ConfigXML == "" && req.ConfigID <= 0 && opts.Config != nil {
-		req.Config = strings.TrimSpace(*opts.Config)
+	if req.Config == "" && req.ConfigXML == "" && req.ConfigID <= 0 && active.Config != nil {
+		req.Config = strings.TrimSpace(*active.Config)
 	}
-	if !req.Validate && opts.Validate != nil {
-		req.Validate = *opts.Validate
+	if !req.Validate && active.Validate != nil {
+		req.Validate = *active.Validate
 	}
-	if !req.Preflight && opts.Preflight != nil {
-		req.Preflight = *opts.Preflight
+	if !req.Preflight && active.Preflight != nil {
+		req.Preflight = *active.Preflight
 	}
-	if req.VarsRaw == "" && opts.Vars != nil {
-		req.VarsRaw = strings.TrimSpace(*opts.Vars)
+	if req.VarsRaw == "" && active.Vars != nil {
+		req.VarsRaw = strings.TrimSpace(*active.Vars)
 	}
-	if !req.Debug && opts.Debug != nil {
-		req.Debug = *opts.Debug
+	if !req.Debug && active.Debug != nil {
+		req.Debug = *active.Debug
 	}
-	if req.GoPath == "" && opts.GoPath != nil {
-		req.GoPath = strings.TrimSpace(*opts.GoPath)
+	if req.GoPath == "" && active.GoPath != nil {
+		req.GoPath = strings.TrimSpace(*active.GoPath)
 	}
-	if req.XSLT == "" && opts.XSLT != nil {
-		req.XSLT = strings.TrimSpace(*opts.XSLT)
+	if req.XSLT == "" && active.XSLT != nil {
+		req.XSLT = strings.TrimSpace(*active.XSLT)
 	}
-	if req.Out == "" && opts.Out != nil {
-		req.Out = strings.TrimSpace(*opts.Out)
+	if req.Out == "" && active.Out != nil {
+		req.Out = strings.TrimSpace(*active.Out)
 	}
-	if !req.NodeOutput && opts.NodeOutput != nil {
-		req.NodeOutput = *opts.NodeOutput
+	if !req.NodeOutput && active.NodeOutput != nil {
+		req.NodeOutput = *active.NodeOutput
 	}
-	if !req.Encrypted && opts.Encrypted != nil {
-		req.Encrypted = *opts.Encrypted
+	if !req.Encrypted && active.Encrypted != nil {
+		req.Encrypted = *active.Encrypted
 	}
-	if req.SecureKey == "" && opts.SecureKey != nil {
-		req.SecureKey = strings.TrimSpace(*opts.SecureKey)
+	if req.SecureKey == "" && active.SecureKey != nil {
+		req.SecureKey = strings.TrimSpace(*active.SecureKey)
 	}
-	if !req.VerifySignature && opts.VerifySignature != nil {
-		req.VerifySignature = *opts.VerifySignature
+	if !req.VerifySignature && active.VerifySignature != nil {
+		req.VerifySignature = *active.VerifySignature
 	}
-	if req.PublicKey == "" && opts.PublicKey != nil {
-		req.PublicKey = strings.TrimSpace(*opts.PublicKey)
+	if req.PublicKey == "" && active.PublicKey != nil {
+		req.PublicKey = strings.TrimSpace(*active.PublicKey)
 	}
-	if req.Cert == "" && opts.Cert != nil {
-		req.Cert = strings.TrimSpace(*opts.Cert)
+	if req.Cert == "" && active.Cert != nil {
+		req.Cert = strings.TrimSpace(*active.Cert)
 	}
-	if req.CACert == "" && opts.CACert != nil {
-		req.CACert = strings.TrimSpace(*opts.CACert)
+	if req.CACert == "" && active.CACert != nil {
+		req.CACert = strings.TrimSpace(*active.CACert)
 	}
-	if req.Keyring == "" && opts.Keyring != nil {
-		req.Keyring = strings.TrimSpace(*opts.Keyring)
+	if req.Keyring == "" && active.Keyring != nil {
+		req.Keyring = strings.TrimSpace(*active.Keyring)
 	}
-	if req.Signature == "" && opts.Signature != nil {
-		req.Signature = strings.TrimSpace(*opts.Signature)
+	if req.Signature == "" && active.Signature != nil {
+		req.Signature = strings.TrimSpace(*active.Signature)
+	}
+
+	for _, item := range opts.OptionItems {
+		applyFlagValue(item.Flag, item.Value)
+	}
+	if opts.NestedOptions != nil {
+		for _, item := range opts.NestedOptions.OptionItems {
+			applyFlagValue(item.Flag, item.Value)
+		}
 	}
 
 	return optLabel, nil
@@ -533,17 +777,34 @@ func (s *APIServer) ExecutePipeline(ctx context.Context, req ExecutionRequest, o
 		opts.Unrestricted = false
 	})
 
-	// Configure database logging sink (uses pipeline's log_db if defined, otherwise defaults to API startup DB)
+	// Configure database logging sink (uses pipeline's log_db / logg_db if defined and reachable, otherwise defaults to API startup DB)
 	logDB := s.db
 	logDialect := s.dialect
 	var closeLogDB bool
 
 	for i := len(dbConfigs) - 1; i >= 0; i-- {
-		if dbConfigs[i].Name == "log_db" {
-			if customDB, customDialect, openErr := OpenDatabase(dbConfigs[i].ConnectionString); openErr == nil {
-				logDB = customDB
-				logDialect = customDialect
-				closeLogDB = true
+		dbName := strings.TrimSpace(dbConfigs[i].Name)
+		if strings.EqualFold(dbName, "log_db") || strings.EqualFold(dbName, "logg_db") {
+			expandedDSN := resolveConnectionString(dbConfigs[i].ConnectionString, varConfigs, req.VarsRaw, req.Vars)
+			if strings.TrimSpace(expandedDSN) != "" && !strings.Contains(expandedDSN, "{{") {
+				customDB, customDialect, openErr := OpenDatabaseWithDriver(expandedDSN, dbConfigs[i].Driver)
+				if openErr != nil {
+					log.Printf("WARNING: failed opening pipeline %s (%s): %v — falling back to API startup database", dbName, RedactDSN(expandedDSN), openErr)
+				} else {
+					pingCtx, pingCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+					pingErr := customDB.PingContext(pingCtx)
+					pingCancel()
+					if pingErr != nil {
+						log.Printf("WARNING: failed connecting to pipeline %s (%s): %v — falling back to API startup database", dbName, RedactDSN(expandedDSN), pingErr)
+						_ = customDB.Close()
+					} else {
+						logDB = customDB
+						logDialect = customDialect
+						closeLogDB = true
+					}
+				}
+			} else if strings.Contains(expandedDSN, "{{") {
+				log.Printf("WARNING: pipeline %s connection string %q has unresolved variable placeholder — falling back to API startup database", dbName, RedactDSN(expandedDSN))
 			}
 			break
 		}
@@ -563,8 +824,13 @@ func (s *APIServer) ExecutePipeline(ctx context.Context, req ExecutionRequest, o
 	scriptResults, execErr := executor.Execute(ctx, nodes)
 	finishedAt := time.Now().UTC()
 
+	logCtx, logCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer logCancel()
+
 	if req.NodeOutput {
-		_ = dbSink.RecordNodeOutputs(ctx, scriptResults)
+		if err := dbSink.RecordNodeOutputs(logCtx, scriptResults); err != nil {
+			log.Printf("WARNING: failed recording node outputs for run: %v", err)
+		}
 	}
 
 	runID, statusStr, errClassStr, errMsgStr := dbSink.RunDetails()
@@ -606,7 +872,9 @@ func (s *APIServer) ExecutePipeline(ctx context.Context, req ExecutionRequest, o
 		ErrorClass:      errClassStr,
 		ErrorMessage:    errMsgStr,
 	}
-	_ = LogRunSummaryToDB(ctx, logDB, logDialect, summary)
+	if err := LogRunSummaryToDB(logCtx, logDB, logDialect, summary); err != nil {
+		log.Printf("WARNING: failed logging run summary (%s) to pipeline_runs: %v", runID, err)
+	}
 
 	resp := &ExecutionResponse{
 		RunID:           runID,
