@@ -48,8 +48,8 @@ func (s *APIServer) Handler() http.Handler {
 	mux.HandleFunc("/docs/", s.handleSwaggerUI)
 	mux.HandleFunc("/api/v1/openapi.json", s.handleOpenAPISpec)
 
-	// Health check (BasicAuth protected with any valid permission)
-	mux.HandleFunc("/api/v1/health", s.RequirePermission(PermReadOnly, s.handleHealth))
+	// Health check (publicly accessible; does not require BasicAuth)
+	mux.HandleFunc("/api/v1/health", s.handleHealth)
 
 	// Artifact CRUD & File Upload Routes (/api/v1/artifacts/{type} and /api/v1/upload/{type})
 	mux.HandleFunc("/api/v1/artifacts/", s.handleArtifactsRouter)
@@ -87,6 +87,13 @@ func (s *APIServer) Handler() http.Handler {
 func (s *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	start := time.Now().UTC()
 	user := UserFromContext(r.Context())
+	if user == nil {
+		if u, p, ok := r.BasicAuth(); ok && strings.TrimSpace(u) != "" {
+			if authUser, err := s.AuthenticateUser(r.Context(), u, p); err == nil {
+				user = authUser
+			}
+		}
+	}
 	username := ""
 	perm := ""
 	if user != nil {
@@ -128,7 +135,7 @@ func (s *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleArtifactsRouter dispatches /api/v1/artifacts/{type}[/{name}[/export]] with appropriate RBAC checks:
-//   - GET requests require PermReadOnly (which also allows PermWrite, PermUpload, PermAll)
+//   - GET requests require PermReadOnly (which also allows PermExecutionOnly, PermWrite, PermUpload, PermAll)
 //   - POST, PUT, DELETE requests require PermWrite (which allows PermWrite, PermUpload, PermAll)
 func (s *APIServer) handleArtifactsRouter(w http.ResponseWriter, r *http.Request) {
 	requiredPerm := PermWrite

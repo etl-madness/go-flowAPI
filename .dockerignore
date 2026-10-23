@@ -3,7 +3,9 @@
 .gitignore
 .vscode
 .idea
-
+.private/*
+.private
+.env
 # Local compiled binaries and test artifacts
 *.exe
 *.out

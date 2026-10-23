@@ -814,6 +814,11 @@ func (s *APIServer) ExecutePipeline(ctx context.Context, req ExecutionRequest, o
 	}
 
 	dbSink := NewDatabaseSink(logDB, logDialect, req.NodeOutput, req.Debug || s.cfg.Debug)
+	dbSink.SetRegistry(registry)
+	dbSink.RegisterNodes(flowNodes)
+	if len(preflightNodes) > 0 {
+		dbSink.RegisterNodes(preflightNodes)
+	}
 	var sinks []flow.EventSink
 	sinks = append(sinks, dbSink)
 	if onEvent != nil {
@@ -853,6 +858,7 @@ func (s *APIServer) ExecutePipeline(ctx context.Context, req ExecutionRequest, o
 		osUser = authUser.Username
 	}
 
+	dbSPID, dbUser, appName := dbSink.SessionIdentity()
 	summary := RunSummaryRecord{
 		RunID:           runID,
 		FilePath:        fileLabel,
@@ -864,9 +870,9 @@ func (s *APIServer) ExecutePipeline(ctx context.Context, req ExecutionRequest, o
 		TaskCount:       len(nodes),
 		UserName:        osUser,
 		OSUserName:      osUser,
-		DBUserName:      dbSink.dbUser,
-		SPID:            dbSink.spid,
-		ApplicationName: dbSink.appName,
+		DBUserName:      dbUser,
+		SPID:            dbSPID,
+		ApplicationName: appName,
 		Hostname:        hostname,
 		OptionsPath:     optionsLabel,
 		ErrorClass:      errClassStr,

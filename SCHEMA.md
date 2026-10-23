@@ -575,7 +575,7 @@ CREATE TABLE flow_api_users (
 
 | Permission Value | Allowed Operations |
 | :--- | :--- |
-| `execution-only` | `POST /api/v1/execute`, `POST /api/v1/execute/stream`, `POST /api/v1/validate` |
+| `execution-only` | `POST /api/v1/execute`, `POST /api/v1/execute/stream`, `POST /api/v1/validate`, plus all `read-only` operations |
 | `read-only` | `GET /api/v1/artifacts/...`, `GET /api/v1/logs/runs`, `GET /api/v1/logs/events`, `GET /api/v1/logs/api-events` |
 | `write` or `upload` | `POST /api/v1/artifacts/{type}/upload`, `POST/PUT/DELETE/GET /api/v1/artifacts/{type}...` |
 | `all` | Full access to all endpoints (Read, Write/Upload, Execute, `/api/v1/databases/test`, `/api/v1/users`) |

@@ -13,6 +13,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/etl-madness/flow"
 )
 
 func setupTestServer(t *testing.T) (*APIServer, *httptest.Server, *sql.DB) {
@@ -180,11 +183,21 @@ func TestRoleBasedPermissions(t *testing.T) {
 	_, ts, _ := setupTestServer(t)
 	client := ts.Client()
 
-	// 1. Unauthenticated request -> 401
+	// 1. Unauthenticated GET /api/v1/health -> 200 (public), while protected route -> 401
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/health", nil)
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("GET /api/v1/health failed: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for unauthenticated GET /api/v1/health, got %d", resp.StatusCode)
+	}
+
+	req, _ = http.NewRequest(http.MethodGet, ts.URL+"/api/v1/artifacts/pipeline", nil)
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("GET /api/v1/artifacts/pipeline failed: %v", err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
@@ -238,7 +251,7 @@ func TestRoleBasedPermissions(t *testing.T) {
 		t.Fatalf("expected 403 when upload_user attempts execute, got %d", resp.StatusCode)
 	}
 
-	// 4. exec_user (execution-only) CANNOT read artifacts directly or write, CAN execute
+	// 4. exec_user (execution-only) CAN read artifacts and execute, CANNOT write/upload
 	req, _ = http.NewRequest(http.MethodGet, ts.URL+"/api/v1/artifacts/pipeline/test_pipe", nil)
 	req.SetBasicAuth("exec_user", "exec_pass")
 	resp, err = client.Do(req)
@@ -246,8 +259,19 @@ func TestRoleBasedPermissions(t *testing.T) {
 		t.Fatalf("GET /api/v1/artifacts/pipeline/test_pipe failed: %v", err)
 	}
 	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 when exec_user reads artifact, got %d", resp.StatusCode)
+	}
+
+	req, _ = http.NewRequest(http.MethodPost, ts.URL+"/api/v1/artifacts/pipeline", strings.NewReader(createBody))
+	req.SetBasicAuth("exec_user", "exec_pass")
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("POST /api/v1/artifacts/pipeline by exec_user failed: %v", err)
+	}
+	resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("expected 403 when exec_user attempts artifact read, got %d", resp.StatusCode)
+		t.Fatalf("expected 403 when exec_user attempts artifact write, got %d", resp.StatusCode)
 	}
 
 	// exec_user executes test_pipe with node_output enabled
@@ -548,5 +572,186 @@ func mustJSONString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
 }
+
+func TestDatabaseSink_PerNodeSessionIdentityAndCrossDB(t *testing.T) {
+	_, _, db := setupTestServer(t)
+	ctx := context.Background()
+
+	sink := NewDatabaseSink(db, "sqlite", false, false)
+	sink.SetSessionIdentity(1000, "log_user", "log_app")
+	sink.SetDBSessionIdentity("source_db", 2000, "src_user", "src_app")
+	sink.SetDBSessionIdentity("target_db", 3000, "tgt_user", "tgt_app")
+
+	nodes := []flow.PipelineNode{
+		{
+			Kind: flow.NodeSQL,
+			SQL: &flow.SQLElement{
+				ID:     "fetch_step",
+				DBName: "source_db",
+			},
+		},
+		{
+			Kind: flow.NodeSQL,
+			SQL: &flow.SQLElement{
+				ID:     "insert_step",
+				DBName: "target_db",
+			},
+		},
+		{
+			Kind: flow.NodeSQLBulk,
+			SQLBulk: &flow.SQLBulkElement{
+				ID:       "cross_db_bulk",
+				DBName:   "source_db",
+				TargetDB: "target_db",
+			},
+		},
+		{
+			Kind: flow.NodeSQLBulk,
+			SQLBulk: &flow.SQLBulkElement{
+				ID:       "same_db_bulk",
+				DBName:   "source_db",
+				TargetDB: "source_db",
+			},
+		},
+		{
+			Kind: flow.NodeScript,
+			Script: &flow.ScriptItem{
+				ID: "transform_script",
+			},
+		},
+		{
+			Kind:        flow.NodeGroup,
+			GroupID:     "tx_group",
+			Transaction: true,
+			DBName:      "source_db",
+		},
+	}
+	sink.RegisterNodes(nodes)
+
+	now := time.Now().UTC()
+	events := []flow.ExecutionEvent{
+		{
+			RunID:      "run-ident-1",
+			Sequence:   1,
+			OccurredAt: now,
+			Type:       flow.EventRunStarted,
+		},
+		{
+			RunID:      "run-ident-1",
+			Sequence:   2,
+			OccurredAt: now,
+			Type:       flow.EventNodeFinished,
+			NodeKind:   "sql",
+			NodeID:     "fetch_step",
+			NodePath:   "sql[0]",
+			Status:     flow.RunStatusSucceeded,
+		},
+		{
+			RunID:      "run-ident-1",
+			Sequence:   3,
+			OccurredAt: now,
+			Type:       flow.EventNodeFinished,
+			NodeKind:   "sql",
+			NodeID:     "insert_step",
+			NodePath:   "sql[1]",
+			Status:     flow.RunStatusSucceeded,
+		},
+		{
+			RunID:      "run-ident-1",
+			Sequence:   4,
+			OccurredAt: now,
+			Type:       flow.EventNodeFinished,
+			NodeKind:   "sql_bulk",
+			NodeID:     "cross_db_bulk",
+			NodePath:   "sql_bulk[2]",
+			Status:     flow.RunStatusSucceeded,
+		},
+		{
+			RunID:      "run-ident-1",
+			Sequence:   5,
+			OccurredAt: now,
+			Type:       flow.EventNodeFinished,
+			NodeKind:   "sql_bulk",
+			NodeID:     "same_db_bulk",
+			NodePath:   "sql_bulk[3]",
+			Status:     flow.RunStatusSucceeded,
+		},
+		{
+			RunID:      "run-ident-1",
+			Sequence:   6,
+			OccurredAt: now,
+			Type:       flow.EventNodeFinished,
+			NodeKind:   "script",
+			NodeID:     "transform_script",
+			NodePath:   "script[4]",
+			Status:     flow.RunStatusSucceeded,
+		},
+		{
+			RunID:      "run-ident-1",
+			Sequence:   7,
+			OccurredAt: now,
+			Type:       flow.EventNodeFinished,
+			NodeKind:   "group",
+			NodeID:     "tx_group",
+			NodePath:   "group[5]",
+			Status:     flow.RunStatusSucceeded,
+		},
+	}
+
+	for _, ev := range events {
+		if err := sink.Emit(ctx, ev); err != nil {
+			t.Fatalf("Emit failed for seq %d: %v", ev.Sequence, err)
+		}
+	}
+
+	type evtRow struct {
+		seq     int
+		nodeID  string
+		dbUser  string
+		spid    string
+		appName string
+	}
+	rows, err := db.QueryContext(ctx, "SELECT sequence_num, node_id, db_user_name, spid, application_name FROM pipeline_events WHERE run_id = 'run-ident-1' ORDER BY sequence_num ASC")
+	if err != nil {
+		t.Fatalf("failed querying pipeline_events: %v", err)
+	}
+	defer rows.Close()
+
+	var recorded []evtRow
+	for rows.Next() {
+		var r evtRow
+		if err := rows.Scan(&r.seq, &r.nodeID, &r.dbUser, &r.spid, &r.appName); err != nil {
+			t.Fatalf("failed scanning row: %v", err)
+		}
+		recorded = append(recorded, r)
+	}
+
+	if len(recorded) != 7 {
+		t.Fatalf("expected 7 events, got %d", len(recorded))
+	}
+
+	if recorded[0].spid != "1000" || recorded[0].appName != "log_app" || recorded[0].dbUser != "log_user" {
+		t.Errorf("event 1 (run.started) expected log_db identity, got %+v", recorded[0])
+	}
+	if recorded[1].spid != "2000" || recorded[1].appName != "src_app" || recorded[1].dbUser != "src_user" {
+		t.Errorf("event 2 (fetch_step) expected source_db identity, got %+v", recorded[1])
+	}
+	if recorded[2].spid != "3000" || recorded[2].appName != "tgt_app" || recorded[2].dbUser != "tgt_user" {
+		t.Errorf("event 3 (insert_step) expected target_db identity, got %+v", recorded[2])
+	}
+	if recorded[3].spid != "2000->3000" || recorded[3].appName != "tgt_app" || recorded[3].dbUser != "src_user->tgt_user" {
+		t.Errorf("event 4 (cross_db_bulk) expected target appName ('tgt_app') and cross-db spid/user, got %+v", recorded[3])
+	}
+	if recorded[4].spid != "2000" || recorded[4].appName != "src_app" || recorded[4].dbUser != "src_user" {
+		t.Errorf("event 5 (same_db_bulk) expected source_db identity ('src_app'), got %+v", recorded[4])
+	}
+	if recorded[5].spid != "1000" || recorded[5].appName != "log_app" || recorded[5].dbUser != "log_user" {
+		t.Errorf("event 6 (transform_script) expected log_db fallback, got %+v", recorded[5])
+	}
+	if recorded[6].spid != "1000" || recorded[6].appName != "log_app" || recorded[6].dbUser != "log_user" {
+		t.Errorf("event 7 (tx_group) expected log_db identity for non-sql/sql_bulk node, got %+v", recorded[6])
+	}
+}
+
 
 

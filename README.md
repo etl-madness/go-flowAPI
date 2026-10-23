@@ -16,7 +16,7 @@
    - Oracle (`oracle://`)
 4. **Database-Backed BasicAuth & Role Permissioning (`auth.go`)**:
    - Authenticates against `TableAPIUsers` (`dbo.flow_api_users`) and enforces permissions:
-     - `execution-only`: Execute and validate pipelines (`POST /api/v1/execute`, `POST /api/v1/execute/stream`, `POST /api/v1/validate`)
+     - `execution-only`: Execute and validate pipelines (`POST /api/v1/execute`, `POST /api/v1/execute/stream`, `POST /api/v1/validate`) and read/list/export artifacts & query logs
      - `read-only`: Read/list/export artifacts and query telemetry & audit logs (`GET /api/v1/...`)
      - `write` or `upload`: Upload files and create/update/delete/read artifacts (`/api/v1/upload/...`, `/api/v1/artifacts/...`)
      - `all`: Full access across all endpoints including user management (`/api/v1/users`) and DB connectivity testing (`/api/v1/db/test`)
@@ -96,7 +96,7 @@ docker compose -f docker-compose.sqlite.yml up -d --build
 | :--- | :--- | :--- |
 | `GET /swagger/` (or `/docs`) | Public (Authorize in UI) | Interactive Swagger UI with BasicAuth support |
 | `GET /swagger/doc.json` (or `/api/v1/openapi.json`) | Public | OpenAPI 3.0.3 JSON specification |
-| `GET /api/v1/health` | `read-only`, `write`/`upload`, or `all` | Health check and database driver/schema status |
+| `GET /api/v1/health` | Public (No BasicAuth required) | Health check and database driver/schema status |
 | `POST /api/v1/upload/{type}` | `write`, `upload`, or `all` | Upload `.xml`/`.json` file (`multipart/form-data` or raw body) into `pipelines`, `options`, or `configs` |
 | `GET /api/v1/artifacts/{type}` | `read-only`, `write`, `upload`, or `all` | List artifacts (`pipelines`, `options`, `configs`) |
 | `GET /api/v1/artifacts/{type}/{name}` | `read-only`, `write`, `upload`, or `all` | Fetch artifact by name (use `?decrypt=true` to decrypt) |

@@ -141,7 +141,7 @@ func (s *APIServer) BuildOpenAPISpec(r *http.Request) map[string]any {
 				"All `/api/v1/*` endpoints require HTTP Basic Authentication against `dbo.flow_api_users` (`TableAPIUsers`).\n\n" +
 				"| Permission Role | Capabilities |\n" +
 				"| :--- | :--- |\n" +
-				"| `execution-only` | Execute and validate pipelines (`/api/v1/execute`, `/api/v1/execute/stream`, `/api/v1/validate`) |\n" +
+				"| `execution-only` | Execute and validate pipelines (`/api/v1/execute`, `/api/v1/execute/stream`, `/api/v1/validate`) plus read/list/export artifacts and query logs |\n" +
 				"| `read-only` | Read/list/export artifacts and query run, event, and audit logs |\n" +
 				"| `write` / `upload` | Upload files and create, update, delete, or read artifacts |\n" +
 				"| `all` | Full administrative access to all endpoints including `/api/v1/users` and `/api/v1/databases/test` |",
@@ -168,8 +168,9 @@ func (s *APIServer) BuildOpenAPISpec(r *http.Request) map[string]any {
 				"get": map[string]any{
 					"tags":        []string{"System"},
 					"summary":     "Health check and active database session identity",
-					"description": "Returns server status, database dialect, session SPID/user/application_name, and configured table names. Requires `read-only`, `write`, `upload`, or `all` permission.",
+					"description": "Returns server status, database dialect, session SPID/user/application_name, and configured table names. Publicly accessible without BasicAuth (if BasicAuth credentials are supplied, `authenticated_as` and `permission` are also populated).",
 					"operationId": "getHealth",
+					"security":    []map[string]any{},
 					"responses": map[string]any{
 						"200": map[string]any{
 							"description": "Server and database health details",
@@ -179,8 +180,6 @@ func (s *APIServer) BuildOpenAPISpec(r *http.Request) map[string]any {
 								},
 							},
 						},
-						"401": map[string]any{"$ref": "#/components/responses/Unauthorized"},
-						"403": map[string]any{"$ref": "#/components/responses/Forbidden"},
 					},
 				},
 			},

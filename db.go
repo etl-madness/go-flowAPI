@@ -156,44 +156,56 @@ func defaultApplicationName() string {
 
 // FetchDatabaseSessionIdentity queries the active database connection for its SPID/PID,
 // authenticated database user, and session application name across all 5 supported engines.
-func FetchDatabaseSessionIdentity(ctx context.Context, db *sql.DB, dialect string) (spid int64, dbUser string, appName string, err error) {
+func FetchDatabaseSessionIdentity(ctx context.Context, querier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}, dialect string) (spid int64, dbUser string, appName string, err error) {
 	defaultApp := defaultApplicationName()
-	if db == nil {
+	if querier == nil {
 		return int64(os.Getpid()), "", defaultApp, nil
 	}
 
-	switch strings.ToLower(dialect) {
-	case "sqlserver", "azuresql":
+	normDriver := strings.ToLower(strings.TrimSpace(dialect))
+	switch {
+	case strings.Contains(normDriver, "sqlserver") || strings.Contains(normDriver, "mssql") || strings.Contains(normDriver, "azuresql") || strings.Contains(normDriver, "azuread"):
 		var pid sql.NullInt64
 		var u, a sql.NullString
-		err = db.QueryRowContext(ctx, "SELECT CAST(@@SPID AS BIGINT), CAST(SYSTEM_USER AS NVARCHAR(256)), CAST(ISNULL(APP_NAME(), '') AS NVARCHAR(256))").Scan(&pid, &u, &a)
+		err = querier.QueryRowContext(ctx, "SELECT CAST(@@SPID AS BIGINT), CAST(SYSTEM_USER AS NVARCHAR(256)), CAST(ISNULL(APP_NAME(), '') AS NVARCHAR(256))").Scan(&pid, &u, &a)
 		spid = pid.Int64
 		dbUser = strings.TrimSpace(u.String)
 		appName = strings.TrimSpace(a.String)
-	case "postgres":
+	case strings.Contains(normDriver, "postgres") || strings.Contains(normDriver, "pq") || strings.Contains(normDriver, "pgx"):
 		var pid sql.NullInt64
 		var u, a sql.NullString
-		err = db.QueryRowContext(ctx, "SELECT CAST(pg_backend_pid() AS BIGINT), CAST(CURRENT_USER AS TEXT), COALESCE(current_setting('application_name', true), '')").Scan(&pid, &u, &a)
+		err = querier.QueryRowContext(ctx, "SELECT CAST(pg_backend_pid() AS BIGINT), CAST(CURRENT_USER AS TEXT), COALESCE(current_setting('application_name', true), '')").Scan(&pid, &u, &a)
 		spid = pid.Int64
 		dbUser = strings.TrimSpace(u.String)
 		appName = strings.TrimSpace(a.String)
-	case "mysql":
-		var pid sql.NullInt64
-		var u sql.NullString
-		err = db.QueryRowContext(ctx, "SELECT CAST(CONNECTION_ID() AS UNSIGNED), CURRENT_USER()").Scan(&pid, &u)
-		spid = pid.Int64
-		dbUser = strings.TrimSpace(u.String)
-	case "oracle":
+	case strings.Contains(normDriver, "mysql") || strings.Contains(normDriver, "mariadb"):
 		var pid sql.NullInt64
 		var u, a sql.NullString
-		err = db.QueryRowContext(ctx, "SELECT TO_NUMBER(SYS_CONTEXT('USERENV', 'SID')), SYS_CONTEXT('USERENV', 'SESSION_USER'), COALESCE(SYS_CONTEXT('USERENV', 'MODULE'), SYS_CONTEXT('USERENV', 'CLIENT_PROGRAM_NAME'), '') FROM DUAL").Scan(&pid, &u, &a)
+		err = querier.QueryRowContext(ctx, "SELECT CAST(CONNECTION_ID() AS UNSIGNED), CURRENT_USER(), COALESCE(@@session.program_name, '')").Scan(&pid, &u, &a)
+		if err != nil {
+			err = querier.QueryRowContext(ctx, "SELECT CAST(CONNECTION_ID() AS UNSIGNED), CURRENT_USER()").Scan(&pid, &u)
+		}
 		spid = pid.Int64
 		dbUser = strings.TrimSpace(u.String)
 		appName = strings.TrimSpace(a.String)
-	case "sqlite", "sqlite3":
-		return int64(os.Getpid()), "sqlite", defaultApp, nil
+	case strings.Contains(normDriver, "oracle") || strings.Contains(normDriver, "ora") || strings.Contains(normDriver, "godror"):
+		var pid sql.NullInt64
+		var u, a sql.NullString
+		err = querier.QueryRowContext(ctx, "SELECT TO_NUMBER(SYS_CONTEXT('USERENV', 'SID')), SYS_CONTEXT('USERENV', 'SESSION_USER'), COALESCE(SYS_CONTEXT('USERENV', 'MODULE'), SYS_CONTEXT('USERENV', 'CLIENT_PROGRAM_NAME'), '') FROM DUAL").Scan(&pid, &u, &a)
+		spid = pid.Int64
+		dbUser = strings.TrimSpace(u.String)
+		appName = strings.TrimSpace(a.String)
+	case strings.Contains(normDriver, "sqlite"):
+		userName, _ := runtimeIdentity()
+		if userName == "" {
+			userName = "sqlite"
+		}
+		return int64(os.Getpid()), userName, defaultApp, nil
 	default:
-		return int64(os.Getpid()), "", defaultApp, nil
+		userName, _ := runtimeIdentity()
+		return int64(os.Getpid()), userName, defaultApp, nil
 	}
 
 	if appName == "" {

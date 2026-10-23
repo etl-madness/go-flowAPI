@@ -47,7 +47,7 @@ func UserFromContext(ctx context.Context) *APIUser {
 
 // HasPermission checks if the user's permission string grants the required capability.
 // Supported role values in TableAPIUsers.permission:
-//   - "execution-only" (or "execution_only", "execute"): can execute/validate pipelines
+//   - "execution-only" (or "execution_only", "execute"): can execute/validate pipelines and read/list/export artifacts & logs
 //   - "read-only"      (or "read_only", "read"):        can read/list/export artifacts and query logs
 //   - "write" / "upload" (or "write-only", "read-write"): can upload/create/update/delete/read artifacts
 //   - "all"            (or "admin", "*"):               full access to all endpoints
@@ -66,8 +66,8 @@ func (u *APIUser) HasPermission(required string) bool {
 		}
 		switch reqNorm {
 		case PermReadOnly:
-			// Both "read-only" and "write"/"upload" can read artifacts
-			if tok == PermReadOnly || tok == PermWrite || tok == PermUpload {
+			// "read-only", "execution-only", and "write"/"upload" can read artifacts and logs
+			if tok == PermReadOnly || tok == PermExecutionOnly || tok == PermWrite || tok == PermUpload {
 				return true
 			}
 		case PermWrite, PermUpload:

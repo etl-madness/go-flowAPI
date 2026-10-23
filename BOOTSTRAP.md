@@ -257,7 +257,7 @@ curl -u "admin:ChangeMe!StrongAdminPass2026" \
 | Permission | Allowed Endpoints |
 | :--- | :--- |
 | **`all`** | Full access to **all** endpoints: Artifact CRUD, File Upload, Pipeline Execution/Validation, Telemetry/Audit Logs, Database Connectivity Test (`POST /api/v1/databases/test`), and User Management (`GET/POST/DELETE /api/v1/users`). |
-| **`execution-only`** | `POST /api/v1/execute`, `POST /api/v1/execute/stream`, `POST /api/v1/validate` |
-| **`read-only`** | `GET /api/v1/health`, `GET /api/v1/artifacts/{type}...`, `GET /api/v1/runs`, `GET /api/v1/events`, `GET /api/v1/audit` |
+| **`execution-only`** | `POST /api/v1/execute`, `POST /api/v1/execute/stream`, `POST /api/v1/validate`, plus all `read-only` operations (`GET /api/v1/artifacts/{type}...`, `GET /api/v1/runs`, `GET /api/v1/events`, `GET /api/v1/audit`) |
+| **`read-only`** | `GET /api/v1/artifacts/{type}...`, `GET /api/v1/runs`, `GET /api/v1/events`, `GET /api/v1/audit` |
 | **`write`** / **`upload`** | All `read-only` artifact operations plus `POST /api/v1/upload/{type}`, `POST /api/v1/artifacts/{type}/upload`, `POST/PUT/DELETE /api/v1/artifacts/{type}...` |
 | **Combined** | Comma-separated combinations such as `"read-only,execution-only"` or `"upload,execution-only"` are also supported. |

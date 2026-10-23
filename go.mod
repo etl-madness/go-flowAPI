@@ -5,7 +5,7 @@ go 1.26.5
 replace github.com/etl-madness/go-flow => ../go-flow
 
 require (
-	github.com/etl-madness/flow v1.3.3
+	github.com/etl-madness/flow v1.3.4
 	github.com/etl-madness/go-flow v0.0.0-00010101000000-000000000000
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/lestrrat-go/helium v0.7.0
@@ -62,6 +62,7 @@ require (
 	github.com/xuri/efp v0.0.1 // indirect
 	github.com/xuri/excelize/v2 v2.11.0 // indirect
 	github.com/xuri/nfp v0.0.2-0.20250530014748-2ddeb826f9a9 // indirect
+	github.com/yuin/gopher-lua v1.1.2 // indirect
 	go.etcd.io/bbolt v1.5.0 // indirect
 	go.etcd.io/etcd/api/v3 v3.7.1 // indirect
 	go.etcd.io/etcd/client/pkg/v3 v3.7.1 // indirect
