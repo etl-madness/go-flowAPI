@@ -88,10 +88,8 @@ func (s *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	start := time.Now().UTC()
 	user := UserFromContext(r.Context())
 	if user == nil {
-		if u, p, ok := r.BasicAuth(); ok && strings.TrimSpace(u) != "" {
-			if authUser, err := s.AuthenticateUser(r.Context(), u, p); err == nil {
-				user = authUser
-			}
+		if authUser, _, hasCreds, err := s.AuthenticateRequest(r); hasCreds && err == nil {
+			user = authUser
 		}
 	}
 	username := ""

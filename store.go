@@ -357,7 +357,10 @@ func (s *APIServer) UpsertAPIUser(ctx context.Context, username, rawPassword, pe
 	}
 
 	var passwordHash string
-	if strings.HasPrefix(rawPassword, "$2a$") || strings.HasPrefix(rawPassword, "$2b$") || strings.HasPrefix(strings.ToLower(rawPassword), "sha256:") {
+	trimmedPass := strings.TrimSpace(rawPassword)
+	if trimmedPass == "" || strings.EqualFold(trimmedPass, "WINDOWS") {
+		passwordHash = "WINDOWS"
+	} else if strings.HasPrefix(rawPassword, "$2a$") || strings.HasPrefix(rawPassword, "$2b$") || strings.HasPrefix(strings.ToLower(rawPassword), "sha256:") {
 		passwordHash = rawPassword
 	} else {
 		var err error

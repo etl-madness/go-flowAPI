@@ -18,6 +18,8 @@ services:
     environment:
       FLOW_API_ADDR: ":8080"
       FLOW_API_DSN: "${FLOW_API_DSN:-sqlserver://sa:YourStrong!Passw0rd@dbserver.example.com:1433?database=EXAMPLE_DB&trustServerCertificate=true}"
+      HOST_USERDOMAIN: "${USERDOMAIN:-}"
+      HOST_USERNAME: "${USERNAME:-}"
       # Optional: leave empty when dbo.flow_api_users is already provisioned
       #FLOW_API_BOOTSTRAP_USER: "${FLOW_API_BOOTSTRAP_USER:-}"
       #FLOW_API_BOOTSTRAP_PASS: "${FLOW_API_BOOTSTRAP_PASS:-}"

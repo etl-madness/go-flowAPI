@@ -4,9 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"os/user"
 	"strings"
 	"time"
 
@@ -20,6 +24,11 @@ const (
 	PermWrite         = "write"
 	PermUpload        = "upload"
 	PermAll           = "all"
+
+	WindowsIntegratedAuthMarker = "__WINDOWS_INTEGRATED__"
+	WindowsAutoHostUserMarker   = "__AUTO_HOST__"
+	HeaderWindowsUser           = "X-Flow-Windows-User"
+	HeaderWindowsGroups         = "X-Flow-Windows-Groups"
 )
 
 // APIUser represents a row in TableAPIUsers (dbo.flow_api_users).
@@ -75,7 +84,8 @@ func (u *APIUser) HasPermission(required string) bool {
 				return true
 			}
 		case PermExecutionOnly:
-			if tok == PermExecutionOnly {
+			// "execution-only" and "write" can execute pipelines
+			if tok == PermExecutionOnly || tok == PermWrite {
 				return true
 			}
 		case PermAll:
@@ -96,10 +106,56 @@ func normalizePermToken(p string) string {
 		return PermExecutionOnly
 	case "read-only", "read_only", "read", "readonly", "viewer":
 		return PermReadOnly
-	case "write", "upload", "write-only", "write_only", "upload-only", "upload_only", "read-write", "editor":
+	case "upload", "upload-only", "upload_only":
+		return PermUpload
+	case "write", "write-only", "write_only", "read-write", "editor":
 		return PermWrite
 	default:
 		return s
+	}
+}
+
+func permRank(p string) int {
+	best := 0
+	for _, part := range strings.Split(p, ",") {
+		switch normalizePermToken(part) {
+		case PermAll:
+			if 5 > best {
+				best = 5
+			}
+		case PermWrite:
+			if 4 > best {
+				best = 4
+			}
+		case PermUpload:
+			if 3 > best {
+				best = 3
+			}
+		case PermExecutionOnly:
+			if 2 > best {
+				best = 2
+			}
+		case PermReadOnly:
+			if 1 > best {
+				best = 1
+			}
+		}
+	}
+	return best
+}
+
+func rankToPerm(rank int) string {
+	switch rank {
+	case 5:
+		return PermAll
+	case 4:
+		return PermWrite
+	case 3:
+		return PermUpload
+	case 2:
+		return PermExecutionOnly
+	default:
+		return PermReadOnly
 	}
 }
 
@@ -127,7 +183,7 @@ func ValidatePermissionString(perm string) error {
 //  3. Constant-time plaintext comparison (using SHA-256 digests so length is not leaked)
 func VerifyPassword(storedHash, candidate string) bool {
 	stored := strings.TrimSpace(storedHash)
-	if stored == "" {
+	if stored == "" || strings.EqualFold(stored, "WINDOWS") || strings.EqualFold(stored, WindowsIntegratedAuthMarker) {
 		return false
 	}
 
@@ -194,6 +250,226 @@ func (s *APIServer) AuthenticateUser(ctx context.Context, username, password str
 	return &user, nil
 }
 
+func isContainerOrAutoUser(u string) bool {
+	u = strings.TrimSpace(strings.ToLower(u))
+	if u == "" || u == strings.ToLower(WindowsAutoHostUserMarker) || u == "app" || u == "root" || u == "flow" || u == "nonroot" {
+		return true
+	}
+	for _, suffix := range []string{`\app`, `\root`, `\flow`, `/app`, `/root`, `/flow`} {
+		if strings.HasSuffix(u, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveWindowsUserAndGroups resolves the active host Windows identity when windowsUser is "__AUTO_HOST__"
+// or a Linux container service account (e8be6e800f93\app), and enriches windowsGroups with the user's
+// Windows / Active Directory group memberships from the host OS.
+func resolveWindowsUserAndGroups(windowsUser string, windowsGroups []string) (string, []string) {
+	windowsUser = strings.TrimSpace(windowsUser)
+	var targetOSUser *user.User
+
+	if isContainerOrAutoUser(windowsUser) {
+		if envWin := strings.TrimSpace(os.Getenv("FLOW_WINDOWS_USER")); envWin != "" {
+			windowsUser = envWin
+		} else if hostUser := strings.TrimSpace(os.Getenv("HOST_USERNAME")); hostUser != "" {
+			hostDom := strings.TrimSpace(os.Getenv("HOST_USERDOMAIN"))
+			if hostDom != "" {
+				windowsUser = hostDom + `\` + hostUser
+			} else {
+				windowsUser = hostUser
+			}
+		} else if curr, err := user.Current(); err == nil && curr != nil && !isContainerOrAutoUser(curr.Username) {
+			windowsUser = strings.TrimSpace(curr.Username)
+			targetOSUser = curr
+		} else {
+			dom := strings.TrimSpace(os.Getenv("USERDOMAIN"))
+			usr := strings.TrimSpace(os.Getenv("USERNAME"))
+			if usr != "" && !isContainerOrAutoUser(usr) {
+				if dom != "" {
+					windowsUser = dom + `\` + usr
+				} else {
+					windowsUser = usr
+				}
+			}
+		}
+	}
+
+	if targetOSUser == nil && windowsUser != "" {
+		if curr, err := user.Current(); err == nil && curr != nil && strings.EqualFold(strings.TrimSpace(curr.Username), windowsUser) {
+			targetOSUser = curr
+		} else if lookedUp, err := user.Lookup(windowsUser); err == nil && lookedUp != nil {
+			targetOSUser = lookedUp
+		}
+	}
+
+	mergedGroups := make([]string, 0, len(windowsGroups)+16)
+	seen := make(map[string]struct{}, len(windowsGroups)+16)
+	addGroup := func(g string) {
+		g = strings.TrimSpace(g)
+		if g == "" {
+			return
+		}
+		key := strings.ToLower(g)
+		if _, exists := seen[key]; !exists {
+			seen[key] = struct{}{}
+			mergedGroups = append(mergedGroups, g)
+		}
+	}
+
+	for _, g := range windowsGroups {
+		addGroup(g)
+	}
+
+	if targetOSUser != nil {
+		if gids, err := targetOSUser.GroupIds(); err == nil {
+			for _, gid := range gids {
+				for _, qName := range lookupGroupSidQualified(gid) {
+					addGroup(qName)
+				}
+				if grp, err := user.LookupGroupId(gid); err == nil && grp != nil {
+					addGroup(grp.Name)
+				}
+			}
+		}
+	}
+
+	return windowsUser, mergedGroups
+}
+
+// AuthenticateWindowsIdentity matches a Windows user (DOMAIN\user or user) or any of their
+// Windows/AD groups (DOMAIN\group) against active entries in TableAPIUsers.
+func (s *APIServer) AuthenticateWindowsIdentity(ctx context.Context, windowsUser string, windowsGroups []string) (*APIUser, error) {
+	if s.db == nil {
+		return nil, fmt.Errorf("database not initialized")
+	}
+	windowsUser, windowsGroups = resolveWindowsUserAndGroups(windowsUser, windowsGroups)
+	if windowsUser == "" {
+		return nil, fmt.Errorf("windows username is empty")
+	}
+
+	userDomain := ""
+	shortUser := windowsUser
+	if idx := strings.LastIndex(windowsUser, `\`); idx >= 0 && idx+1 < len(windowsUser) {
+		userDomain = windowsUser[:idx]
+		shortUser = windowsUser[idx+1:]
+	}
+
+	users, err := s.ListAPIUsers(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	groupSet := make(map[string]struct{}, len(windowsGroups)*2)
+	for _, g := range windowsGroups {
+		trimmed := strings.TrimSpace(g)
+		if trimmed == "" {
+			continue
+		}
+		groupSet[strings.ToLower(trimmed)] = struct{}{}
+		if slashIdx := strings.LastIndex(trimmed, `\`); slashIdx >= 0 && slashIdx+1 < len(trimmed) {
+			groupSet[strings.ToLower(trimmed[slashIdx+1:])] = struct{}{}
+		} else if userDomain != "" {
+			groupSet[strings.ToLower(userDomain+`\`+trimmed)] = struct{}{}
+		}
+	}
+
+	bestRank := 0
+	var matchedPrincipals []string
+
+	for _, row := range users {
+		rowName := strings.TrimSpace(row.Username)
+		if rowName == "" {
+			continue
+		}
+
+		isDirectUser := strings.EqualFold(rowName, windowsUser) || strings.EqualFold(rowName, shortUser)
+		_, isGroupMatch := groupSet[strings.ToLower(rowName)]
+
+		if !isDirectUser && !isGroupMatch {
+			continue
+		}
+
+		if isDirectUser && !row.IsActive {
+			return nil, fmt.Errorf("windows user %q is disabled in %s", windowsUser, TableAPIUsers)
+		}
+		if !row.IsActive {
+			continue
+		}
+
+		matchedPrincipals = append(matchedPrincipals, rowName)
+		if r := permRank(row.Permission); r > bestRank {
+			bestRank = r
+		}
+	}
+
+	if bestRank == 0 || len(matchedPrincipals) == 0 {
+		return nil, fmt.Errorf("windows user %q (and their AD/Windows groups) is not registered in %s", windowsUser, TableAPIUsers)
+	}
+
+	resolvedPerm := rankToPerm(bestRank)
+	desc := fmt.Sprintf("Windows Integrated (%s via %s)", windowsUser, strings.Join(matchedPrincipals, ", "))
+
+	return &APIUser{
+		Username:    windowsUser,
+		Permission:  resolvedPerm,
+		IsActive:    true,
+		Description: desc,
+	}, nil
+}
+
+func parseWindowsGroupsHeader(rawHeader string) []string {
+	rawHeader = strings.TrimSpace(rawHeader)
+	if rawHeader == "" {
+		return nil
+	}
+
+	// Support base64-encoded JSON array or newline/comma-separated list
+	if decoded, err := base64.StdEncoding.DecodeString(rawHeader); err == nil && len(decoded) > 0 {
+		var jsonGroups []string
+		if err := json.Unmarshal(decoded, &jsonGroups); err == nil {
+			return jsonGroups
+		}
+		rawHeader = string(decoded)
+	}
+
+	parts := strings.FieldsFunc(rawHeader, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\r'
+	})
+	var out []string
+	for _, p := range parts {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+// AuthenticateRequest inspects the HTTP request for either Windows Integrated identity/group headers
+// or standard HTTP Basic Auth credentials.
+func (s *APIServer) AuthenticateRequest(r *http.Request) (*APIUser, string, bool, error) {
+	winUserHeader := strings.TrimSpace(r.Header.Get(HeaderWindowsUser))
+	basicUser, basicPass, hasBasic := r.BasicAuth()
+
+	if winUserHeader != "" || (hasBasic && basicPass == WindowsIntegratedAuthMarker) {
+		winUser := winUserHeader
+		if winUser == "" {
+			winUser = strings.TrimSpace(basicUser)
+		}
+		groups := parseWindowsGroupsHeader(r.Header.Get(HeaderWindowsGroups))
+		user, err := s.AuthenticateWindowsIdentity(r.Context(), winUser, groups)
+		return user, winUser, true, err
+	}
+
+	if !hasBasic || strings.TrimSpace(basicUser) == "" {
+		return nil, "", false, fmt.Errorf("BasicAuth credentials required")
+	}
+
+	user, err := s.AuthenticateUser(r.Context(), basicUser, basicPass)
+	return user, basicUser, true, err
+}
+
 func parseDBBool(v any) bool {
 	switch val := v.(type) {
 	case bool:
@@ -213,31 +489,31 @@ func parseDBBool(v any) bool {
 	}
 }
 
-// RequirePermission wraps an http.HandlerFunc with BasicAuth verification against TableAPIUsers
-// and enforces that the authenticated user holds the required permission scope.
+// RequirePermission wraps an http.HandlerFunc with authentication against TableAPIUsers
+// (supporting both BasicAuth and Windows Integrated user/group matching) and enforces
+// that the authenticated user holds the required permission scope.
 func (s *APIServer) RequirePermission(requiredPerm string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now().UTC()
-		username, password, ok := r.BasicAuth()
-		if !ok || strings.TrimSpace(username) == "" {
+		user, attemptedUser, hasCreds, err := s.AuthenticateRequest(r)
+		if !hasCreds {
 			w.Header().Set("WWW-Authenticate", `Basic realm="go-flowAPI"`)
 			s.logAPIEvent(r.Context(), APIAuditEvent{
 				OccurredAt:   start,
 				EventType:    "auth.missing_credentials",
 				HTTPMethod:   r.Method,
 				Path:         r.URL.Path,
-				AuthUser:     username,
+				AuthUser:     attemptedUser,
 				RemoteAddr:   r.RemoteAddr,
 				StatusCode:   http.StatusUnauthorized,
 				Status:       "UNAUTHORIZED",
 				DurationMs:   time.Since(start).Milliseconds(),
-				ErrorMessage: "BasicAuth credentials required",
+				ErrorMessage: "Authentication credentials required",
 			})
-			writeJSONError(w, http.StatusUnauthorized, "Basic authentication credentials required")
+			writeJSONError(w, http.StatusUnauthorized, "Authentication credentials required")
 			return
 		}
 
-		user, err := s.AuthenticateUser(r.Context(), username, password)
 		if err != nil {
 			w.Header().Set("WWW-Authenticate", `Basic realm="go-flowAPI"`)
 			s.logAPIEvent(r.Context(), APIAuditEvent{
@@ -245,14 +521,14 @@ func (s *APIServer) RequirePermission(requiredPerm string, next http.HandlerFunc
 				EventType:    "auth.failed",
 				HTTPMethod:   r.Method,
 				Path:         r.URL.Path,
-				AuthUser:     username,
+				AuthUser:     attemptedUser,
 				RemoteAddr:   r.RemoteAddr,
 				StatusCode:   http.StatusUnauthorized,
 				Status:       "UNAUTHORIZED",
 				DurationMs:   time.Since(start).Milliseconds(),
-				ErrorMessage: "Invalid username or password",
+				ErrorMessage: err.Error(),
 			})
-			writeJSONError(w, http.StatusUnauthorized, "Invalid username or password")
+			writeJSONError(w, http.StatusUnauthorized, err.Error())
 			return
 		}
 
