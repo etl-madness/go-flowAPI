@@ -393,10 +393,10 @@ func (s *APIServer) UpsertAPIUser(ctx context.Context, username, rawPassword, pe
 	}, nil
 }
 
-// ListAPIUsers lists all users in TableAPIUsers (excluding password hashes).
+// ListAPIUsers lists all users in TableAPIUsers (PasswordHash has json:"-" so it is never serialized to JSON).
 func (s *APIServer) ListAPIUsers(ctx context.Context) ([]APIUser, error) {
 	table := resolveTableName(s.dialect, TableAPIUsers)
-	query := fmt.Sprintf("SELECT username, permission, is_active, COALESCE(description, '') FROM %s ORDER BY username ASC", table)
+	query := fmt.Sprintf("SELECT username, COALESCE(password_hash, ''), permission, is_active, COALESCE(description, '') FROM %s ORDER BY username ASC", table)
 	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
@@ -407,7 +407,7 @@ func (s *APIServer) ListAPIUsers(ctx context.Context) ([]APIUser, error) {
 	for rows.Next() {
 		var u APIUser
 		var activeRaw any
-		if err := rows.Scan(&u.Username, &u.Permission, &activeRaw, &u.Description); err != nil {
+		if err := rows.Scan(&u.Username, &u.PasswordHash, &u.Permission, &activeRaw, &u.Description); err != nil {
 			return nil, err
 		}
 		u.IsActive = parseDBBool(activeRaw)

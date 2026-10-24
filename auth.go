@@ -341,6 +341,13 @@ func resolveWindowsUserAndGroups(windowsUser string, windowsGroups []string) (st
 // AuthenticateWindowsIdentity matches a Windows user (DOMAIN\user or user) or any of their
 // Windows/AD groups (DOMAIN\group) against active entries in TableAPIUsers.
 func (s *APIServer) AuthenticateWindowsIdentity(ctx context.Context, windowsUser string, windowsGroups []string) (*APIUser, error) {
+	return s.AuthenticateWindowsIdentityWithPassword(ctx, windowsUser, "", windowsGroups)
+}
+
+// AuthenticateWindowsIdentityWithPassword matches a Windows user (DOMAIN\user or user) or any of their
+// Windows/AD groups (DOMAIN\group) against active entries in TableAPIUsers, optionally verifying a password
+// if the user row has a stored password hash.
+func (s *APIServer) AuthenticateWindowsIdentityWithPassword(ctx context.Context, windowsUser, password string, windowsGroups []string) (*APIUser, error) {
 	if s.db == nil {
 		return nil, fmt.Errorf("database not initialized")
 	}
@@ -398,6 +405,16 @@ func (s *APIServer) AuthenticateWindowsIdentity(ctx context.Context, windowsUser
 			continue
 		}
 
+		// Only enforce DB password hash when the row is a non-domain local API user and not a DOMAIN\user Windows principal
+		if isDirectUser && password != "" && password != WindowsIntegratedAuthMarker && !strings.Contains(rowName, `\`) && !strings.Contains(windowsUser, `\`) {
+			stored := strings.TrimSpace(row.PasswordHash)
+			if stored != "" && !strings.EqualFold(stored, "WINDOWS") && !strings.EqualFold(stored, WindowsIntegratedAuthMarker) {
+				if !VerifyPassword(stored, password) {
+					return nil, fmt.Errorf("invalid credentials for %q", windowsUser)
+				}
+			}
+		}
+
 		matchedPrincipals = append(matchedPrincipals, rowName)
 		if r := permRank(row.Permission); r > bestRank {
 			bestRank = r
@@ -409,7 +426,7 @@ func (s *APIServer) AuthenticateWindowsIdentity(ctx context.Context, windowsUser
 	}
 
 	resolvedPerm := rankToPerm(bestRank)
-	desc := fmt.Sprintf("Windows Integrated (%s via %s)", windowsUser, strings.Join(matchedPrincipals, ", "))
+	desc := fmt.Sprintf("Windows Identity (%s via %s)", windowsUser, strings.Join(matchedPrincipals, ", "))
 
 	return &APIUser{
 		Username:    windowsUser,
@@ -458,7 +475,10 @@ func (s *APIServer) AuthenticateRequest(r *http.Request) (*APIUser, string, bool
 			winUser = strings.TrimSpace(basicUser)
 		}
 		groups := parseWindowsGroupsHeader(r.Header.Get(HeaderWindowsGroups))
-		user, err := s.AuthenticateWindowsIdentity(r.Context(), winUser, groups)
+		user, err := s.AuthenticateWindowsIdentityWithPassword(r.Context(), winUser, basicPass, groups)
+		if user != nil {
+			winUser = user.Username
+		}
 		return user, winUser, true, err
 	}
 
@@ -467,6 +487,11 @@ func (s *APIServer) AuthenticateRequest(r *http.Request) (*APIUser, string, bool
 	}
 
 	user, err := s.AuthenticateUser(r.Context(), basicUser, basicPass)
+	if err != nil && strings.Contains(basicUser, `\`) && basicPass != "" {
+		if winUser, winErr := s.AuthenticateWindowsIdentityWithPassword(r.Context(), basicUser, basicPass, nil); winErr == nil {
+			return winUser, winUser.Username, true, nil
+		}
+	}
 	return user, basicUser, true, err
 }
 

@@ -19,7 +19,7 @@ private-docker-compose.yml
 # Go workspaces
 go.work
 go.work.sum
-
+*.exe
 # IDEs / Editors
 .vscode/
 .idea/
