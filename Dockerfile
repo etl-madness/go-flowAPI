@@ -40,10 +40,10 @@ COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh \
     && chmod +x /usr/local/bin/docker-entrypoint.sh /app/go-flowAPI
 
-ENV PORT=8080 \
-    FLOW_API_ADDR=:8080
+ENV PORT=5180 \
+    FLOW_API_ADDR=:5180
 
-EXPOSE 8080
+EXPOSE 5180
 VOLUME ["/data"]
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

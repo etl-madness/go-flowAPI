@@ -16,12 +16,32 @@ var ErrArtifactExists = errors.New("artifact already exists")
 
 // ArtifactRecord represents a pipeline, options, or config XML document stored in the database.
 type ArtifactRecord struct {
-	ID          int64  `json:"id,omitempty"`
-	Type        string `json:"type"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Content     string `json:"content,omitempty"`
-	Encrypted   bool   `json:"encrypted"`
+	ID              int64  `json:"id,omitempty"`
+	Type            string `json:"type"`
+	Name            string `json:"name"`
+	Description     string `json:"description"`
+	Content         string `json:"content,omitempty"`
+	Encrypted       bool   `json:"encrypted"`
+	Signed          bool   `json:"signed"`
+	SignatureFormat string `json:"signature_format,omitempty"`
+}
+
+func inspectArtifactSecurity(content string) (encrypted bool, signed bool, sigFormat string) {
+	raw := []byte(strings.TrimSpace(content))
+	if flowcrypto.IsSignedPayload(raw) {
+		signed = true
+		if fmtStr, _, inner, err := flowcrypto.ParseSignedPayload(raw); err == nil {
+			sigFormat = fmtStr
+			if flowcrypto.IsEncryptedPayload(inner) {
+				encrypted = true
+			}
+		}
+		return encrypted, signed, sigFormat
+	}
+	if flowcrypto.IsEncryptedPayload(raw) {
+		encrypted = true
+	}
+	return encrypted, signed, sigFormat
 }
 
 // ResolveArtifactTarget maps an artifact type ("pipeline", "options", "config")
@@ -144,13 +164,16 @@ func (s *APIServer) UpsertArtifact(ctx context.Context, artifactType, name, desc
 	idQuery := fmt.Sprintf("SELECT ID FROM %s WHERE Name = %s", table, Placeholder(s.dialect, 1))
 	_ = s.db.QueryRowContext(ctx, idQuery, name).Scan(&id)
 
+	enc, signed, sigFmt := inspectArtifactSecurity(contentToStore)
 	return &ArtifactRecord{
-		ID:          id,
-		Type:        canonicalType,
-		Name:        name,
-		Description: desc,
-		Content:     contentToStore,
-		Encrypted:   flowcrypto.IsEncryptedPayload([]byte(contentToStore)),
+		ID:              id,
+		Type:            canonicalType,
+		Name:            name,
+		Description:     desc,
+		Content:         contentToStore,
+		Encrypted:       enc,
+		Signed:          signed,
+		SignatureFormat: sigFmt,
 	}, nil
 }
 
@@ -191,10 +214,12 @@ func (s *APIServer) UpdateArtifactByID(ctx context.Context, artifactType string,
 }
 
 func (s *APIServer) finalizeArtifactRecord(rec *ArtifactRecord, table string, decrypt bool, secureKey string) (*ArtifactRecord, error) {
-	isEnc := flowcrypto.IsEncryptedPayload([]byte(rec.Content))
-	rec.Encrypted = isEnc
+	enc, signed, sigFmt := inspectArtifactSecurity(rec.Content)
+	rec.Encrypted = enc
+	rec.Signed = signed
+	rec.SignatureFormat = sigFmt
 
-	if decrypt && isEnc {
+	if decrypt && flowcrypto.IsEncryptedPayload([]byte(rec.Content)) {
 		key := strings.TrimSpace(secureKey)
 		if key == "" {
 			key = s.cfg.DefaultSecureKey
@@ -207,7 +232,12 @@ func (s *APIServer) finalizeArtifactRecord(rec *ArtifactRecord, table string, de
 			return nil, fmt.Errorf("failed decrypting artifact %q (id=%d): %w", rec.Name, rec.ID, err)
 		}
 		rec.Content = string(plain)
-		rec.Encrypted = false
+		encAfter, signedAfter, sigFmtAfter := inspectArtifactSecurity(rec.Content)
+		rec.Encrypted = enc || encAfter
+		rec.Signed = signed || signedAfter
+		if sigFmtAfter != "" {
+			rec.SignatureFormat = sigFmtAfter
+		}
 	}
 
 	return rec, nil
@@ -288,7 +318,7 @@ func (s *APIServer) ListArtifacts(ctx context.Context, artifactType string, incl
 		if err := rows.Scan(&rec.ID, &rec.Name, &rec.Description, &content); err != nil {
 			return nil, err
 		}
-		rec.Encrypted = flowcrypto.IsEncryptedPayload([]byte(content))
+		rec.Encrypted, rec.Signed, rec.SignatureFormat = inspectArtifactSecurity(content)
 		if includeContent {
 			rec.Content = content
 		}

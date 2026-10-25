@@ -254,6 +254,25 @@ func resolveConnectionString(dsn string, varConfigs []flow.VariableConfig, varsR
 	return resolved
 }
 
+// loadInlineOrFileBytes accepts either inline PEM / FLOWSIG / FLOWSIGNED text or a local filesystem path.
+func loadInlineOrFileBytes(val string) ([]byte, error) {
+	trimmed := strings.TrimSpace(val)
+	if trimmed == "" {
+		return nil, nil
+	}
+	if strings.Contains(trimmed, "-----BEGIN ") ||
+		strings.HasPrefix(trimmed, flowcrypto.SignaturePrefixV1) ||
+		strings.HasPrefix(trimmed, flowcrypto.SignedPrefixV1) ||
+		strings.Contains(trimmed, "\n") {
+		return []byte(trimmed), nil
+	}
+	if data, err := os.ReadFile(trimmed); err == nil {
+		return data, nil
+	} else {
+		return nil, err
+	}
+}
+
 // resolveArtifactBytes loads XML content from inline XML, the startup database by table ID or Name
 // (TablePipelineContent / TableOptionsContent / TableConfigContent), sql://#query URI, or local file fallback,
 // and handles decryption & signature verification.
@@ -329,20 +348,20 @@ func (s *APIServer) resolveArtifactBytes(ctx context.Context, artifactType strin
 	var keyOrCertBytes, caCertBytes []byte
 	var err error
 	if req.PublicKey != "" {
-		if keyOrCertBytes, err = os.ReadFile(req.PublicKey); err != nil {
+		if keyOrCertBytes, err = loadInlineOrFileBytes(req.PublicKey); err != nil {
 			return nil, sourceLabel, fmt.Errorf("failed reading public key %s: %w", req.PublicKey, err)
 		}
 	} else if req.Cert != "" {
-		if keyOrCertBytes, err = os.ReadFile(req.Cert); err != nil {
+		if keyOrCertBytes, err = loadInlineOrFileBytes(req.Cert); err != nil {
 			return nil, sourceLabel, fmt.Errorf("failed reading certificate %s: %w", req.Cert, err)
 		}
 	} else if req.Keyring != "" {
-		if keyOrCertBytes, err = os.ReadFile(req.Keyring); err != nil {
+		if keyOrCertBytes, err = loadInlineOrFileBytes(req.Keyring); err != nil {
 			return nil, sourceLabel, fmt.Errorf("failed reading keyring %s: %w", req.Keyring, err)
 		}
 	}
 	if req.CACert != "" {
-		if caCertBytes, err = os.ReadFile(req.CACert); err != nil {
+		if caCertBytes, err = loadInlineOrFileBytes(req.CACert); err != nil {
 			return nil, sourceLabel, fmt.Errorf("failed reading CA certificate %s: %w", req.CACert, err)
 		}
 	}
@@ -361,9 +380,9 @@ func (s *APIServer) resolveArtifactBytes(ctx context.Context, artifactType strin
 			rawBytes = unwrapped
 			verResult = res
 		} else {
-			sigBytes, err := os.ReadFile(req.Signature)
+			sigBytes, err := loadInlineOrFileBytes(req.Signature)
 			if err != nil {
-				return nil, sourceLabel, fmt.Errorf("failed reading signature file %s: %w", req.Signature, err)
+				return nil, sourceLabel, fmt.Errorf("failed reading signature %s: %w", req.Signature, err)
 			}
 			res, err := flowcrypto.VerifyAutoWithCA(rawBytes, sigBytes, keyOrCertBytes, caCertBytes)
 			if err != nil {

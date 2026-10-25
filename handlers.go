@@ -77,6 +77,9 @@ func (s *APIServer) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/users", s.RequirePermission(PermAll, s.handleUsers))
 	mux.HandleFunc("/api/v1/users/", s.RequirePermission(PermAll, s.handleUserByName))
 
+	// Cryptographic & Digital Signature Utility Routes (requires "read-only" or higher)
+	mux.HandleFunc("/api/v1/crypto/", s.RequirePermission(PermReadOnly, s.handleCryptoRouter))
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
@@ -248,12 +251,19 @@ func (s *APIServer) dispatchArtifactRequest(w http.ResponseWriter, r *http.Reque
 				writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON body: %v", err))
 				return
 			}
+			secKey := strings.TrimSpace(body.SecureKey)
+			if secKey == "" {
+				secKey = strings.TrimSpace(r.URL.Query().Get("secure_key"))
+				if secKey == "" {
+					secKey = strings.TrimSpace(r.Header.Get("X-Flow-Secure-Key"))
+				}
+			}
 			var rec *ArtifactRecord
 			var err error
 			if body.Upsert || r.URL.Query().Get("upsert") == "true" {
-				rec, err = s.UpsertArtifact(r.Context(), artifactType, body.Name, body.Description, body.resolvedContent(), body.resolvedEncrypted(), body.SecureKey)
+				rec, err = s.UpsertArtifact(r.Context(), artifactType, body.Name, body.Description, body.resolvedContent(), body.resolvedEncrypted(), secKey)
 			} else {
-				rec, err = s.CreateArtifact(r.Context(), artifactType, body.Name, body.Description, body.resolvedContent(), body.resolvedEncrypted(), body.SecureKey)
+				rec, err = s.CreateArtifact(r.Context(), artifactType, body.Name, body.Description, body.resolvedContent(), body.resolvedEncrypted(), secKey)
 			}
 			if err != nil {
 				code := http.StatusInternalServerError
@@ -332,7 +342,14 @@ func (s *APIServer) dispatchArtifactRequest(w http.ResponseWriter, r *http.Reque
 				writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON body: %v", err))
 				return
 			}
-			rec, err := s.UpdateArtifactByID(r.Context(), artifactType, idVal, body.Description, body.resolvedContent(), body.resolvedEncrypted(), body.SecureKey)
+			secKey := strings.TrimSpace(body.SecureKey)
+			if secKey == "" {
+				secKey = strings.TrimSpace(r.URL.Query().Get("secure_key"))
+				if secKey == "" {
+					secKey = strings.TrimSpace(r.Header.Get("X-Flow-Secure-Key"))
+				}
+			}
+			rec, err := s.UpdateArtifactByID(r.Context(), artifactType, idVal, body.Description, body.resolvedContent(), body.resolvedEncrypted(), secKey)
 			if err != nil {
 				code := http.StatusInternalServerError
 				if errors.Is(err, ErrArtifactNotFound) {
@@ -420,7 +437,14 @@ func (s *APIServer) dispatchArtifactRequest(w http.ResponseWriter, r *http.Reque
 			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON body: %v", err))
 			return
 		}
-		rec, err := s.UpdateArtifact(r.Context(), artifactType, name, body.Description, body.resolvedContent(), body.resolvedEncrypted(), body.SecureKey)
+		secKey := strings.TrimSpace(body.SecureKey)
+		if secKey == "" {
+			secKey = strings.TrimSpace(r.URL.Query().Get("secure_key"))
+			if secKey == "" {
+				secKey = strings.TrimSpace(r.Header.Get("X-Flow-Secure-Key"))
+			}
+		}
+		rec, err := s.UpdateArtifact(r.Context(), artifactType, name, body.Description, body.resolvedContent(), body.resolvedEncrypted(), secKey)
 		if err != nil {
 			code := http.StatusInternalServerError
 			if errors.Is(err, ErrArtifactNotFound) {
