@@ -26,7 +26,7 @@ Before adding a user, make sure the required database tables from **[`SCHEMA.md`
 ```bash
 go run . \
   -dsn "sqlserver://sa:Password123!@localhost:1433?database=master&trustServerCertificate=true" \
-  -addr ":8080" \
+  -addr ":5180" \
   -bootstrap-user "admin" \
   -bootstrap-pass "ChangeMe!StrongAdminPass2026" \
   -bootstrap-perm "all"
@@ -38,7 +38,7 @@ go run . \
 
 ```bash
 export FLOW_API_DSN="sqlserver://sa:Password123!@localhost:1433?database=master&trustServerCertificate=true"
-export FLOW_API_ADDR=":8080"
+export FLOW_API_ADDR=":5180"
 export FLOW_API_BOOTSTRAP_USER="admin"
 export FLOW_API_BOOTSTRAP_PASS="ChangeMe!StrongAdminPass2026"
 export FLOW_API_BOOTSTRAP_PERM="all"
@@ -52,13 +52,13 @@ go run .
 $env:FLOW_API_DSN = "sqlserver://sa:Password123!@localhost:1433?database=master&trustServerCertificate=true"
 $env:FLOW_API_BOOTSTRAP_USER = "admin"
 $env:FLOW_API_BOOTSTRAP_PASS = "ChangeMe!StrongAdminPass2026"
-go run . -addr :8080
+go run . -addr :5180
 ```
 
 When the server starts, you will see:
 ```text
 [go-flowAPI] bootstrapped API user "admin" with permission="all" in dbo.flow_api_users
-[go-flowAPI] listening on :8080 (dialect=sqlserver, defaultSchema="dbo.", swagger=http://localhost:8080/swagger/)
+[go-flowAPI] listening on :5180 (dialect=sqlserver, defaultSchema="dbo.", swagger=http://localhost:5180/swagger/)
 ```
 
 ---
@@ -174,7 +174,7 @@ WHEN NOT MATCHED THEN
 ## Step 3: Verify via Swagger UI or CLI
 
 ### 1. Using Interactive Swagger UI
-1. Open **`http://localhost:8080/swagger/`** (or `http://localhost:8080/docs`) in your browser.
+1. Open **`http://localhost:5180/swagger/`** (or `http://localhost:5180/docs`) in your browser.
 2. Click the **"Authorize"** button in the top-right corner.
 3. Enter your bootstrap `username` (`admin`) and `password`, then click **Authorize**.
 4. Expand **`GET /api/v1/health`** or **`GET /api/v1/users`**, click **Try it out**, and click **Execute**.
@@ -183,7 +183,7 @@ WHEN NOT MATCHED THEN
 ```bash
 # Verify health and confirm permission="all"
 curl -u "admin:ChangeMe!StrongAdminPass2026" \
-  http://localhost:8080/api/v1/health
+  http://localhost:5180/api/v1/health
 ```
 
 Expected response:
@@ -217,7 +217,7 @@ Once your initial `all`-permission user is active, you can create least-privileg
 ```bash
 # 1. Create an execution-only service account
 curl -u "admin:ChangeMe!StrongAdminPass2026" \
-  -X POST http://localhost:8080/api/v1/users \
+  -X POST http://localhost:5180/api/v1/users \
   -H "Content-Type: application/json" \
   -d '{
     "username": "runner_svc",
@@ -229,7 +229,7 @@ curl -u "admin:ChangeMe!StrongAdminPass2026" \
 
 # 2. Create a read-only auditor account
 curl -u "admin:ChangeMe!StrongAdminPass2026" \
-  -X POST http://localhost:8080/api/v1/users \
+  -X POST http://localhost:5180/api/v1/users \
   -H "Content-Type: application/json" \
   -d '{
     "username": "auditor",
@@ -241,7 +241,7 @@ curl -u "admin:ChangeMe!StrongAdminPass2026" \
 
 # 3. Create an artifact uploader/writer account
 curl -u "admin:ChangeMe!StrongAdminPass2026" \
-  -X POST http://localhost:8080/api/v1/users \
+  -X POST http://localhost:5180/api/v1/users \
   -H "Content-Type: application/json" \
   -d '{
     "username": "publisher",

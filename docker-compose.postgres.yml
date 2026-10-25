@@ -35,9 +35,9 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "${FLOW_API_HOST_PORT:-8080}:8080"
+      - "${FLOW_API_HOST_PORT:-5180}:5180"
     environment:
-      FLOW_API_ADDR: ":8080"
+      FLOW_API_ADDR: ":5180"
       FLOW_API_DSN: "postgres://${POSTGRES_USER:-flow}:${POSTGRES_PASSWORD:-flowpass}@postgres:5432/${POSTGRES_DB:-flowdb}?sslmode=disable"
       FLOW_API_BOOTSTRAP_USER: "${FLOW_API_BOOTSTRAP_USER:-admin}"
       FLOW_API_BOOTSTRAP_PASS: "${FLOW_API_BOOTSTRAP_PASS:-Admin123!}"

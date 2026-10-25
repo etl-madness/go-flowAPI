@@ -44,8 +44,8 @@ docker compose -f docker-compose.sqlite.yml up -d --build
 docker compose -f docker-compose.sqlite.yml logs -f
 ```
 
-- **API Base URL**: `http://localhost:8080`
-- **Swagger UI**: `http://localhost:8080/swagger/`
+- **API Base URL**: `http://localhost:5180`
+- **Swagger UI**: `http://localhost:5180/swagger/`
 - **Default Admin Credentials**: `admin` / `Admin123!` (`all` permissions)
 - **Stop**: `docker compose -f docker-compose.sqlite.yml down` (add `-v` to wipe the SQLite volume)
 
@@ -63,8 +63,8 @@ docker compose -f docker-compose.postgres.yml up -d --build
 docker compose -f docker-compose.postgres.yml logs -f go-flow-api
 ```
 
-- **API Base URL**: `http://localhost:8080`
-- **Swagger UI**: `http://localhost:8080/swagger/`
+- **API Base URL**: `http://localhost:5180`
+- **Swagger UI**: `http://localhost:5180/swagger/`
 - **PostgreSQL Host Port**: `localhost:5432` (User: `flow`, Password: `flowpass`, DB: `flowdb`)
 - **Default Admin Credentials**: `admin` / `Admin123!`
 - **Stop**: `docker compose -f docker-compose.postgres.yml down` (add `-v` to wipe PostgreSQL data)
@@ -83,8 +83,8 @@ docker compose -f docker-compose.sqlserver.yml up -d --build
 docker compose -f docker-compose.sqlserver.yml logs -f
 ```
 
-- **API Base URL**: `http://localhost:8080`
-- **Swagger UI**: `http://localhost:8080/swagger/`
+- **API Base URL**: `http://localhost:5180`
+- **Swagger UI**: `http://localhost:5180/swagger/`
 - **SQL Server Host Port**: `localhost:1433` (User: `sa`, Password: `YourStrong!Passw0rd`, DB: `PROTO`)
 - **Default Admin Credentials**: `admin` / `Admin123!`
 - **Stop**: `docker compose -f docker-compose.sqlserver.yml down` (add `-v` to wipe SQL Server data)
@@ -149,7 +149,7 @@ All compose files support overriding ports, credentials, and settings via shell 
 
 ```dotenv
 # Port exposed on the host machine
-FLOW_API_HOST_PORT=8085
+FLOW_API_HOST_PORT=5180
 
 # Initial BasicAuth administrator seeded at startup
 FLOW_API_BOOTSTRAP_USER=admin
@@ -178,20 +178,20 @@ POSTGRES_HOST_PORT=5432
 Once your chosen stack is running:
 
 ### 1. Open Interactive Swagger UI
-Navigate to **[`http://localhost:8080/swagger/`](http://localhost:8080/swagger/)** in your browser:
+Navigate to **[`http://localhost:5180/swagger/`](http://localhost:5180/swagger/)** in your browser:
 1. Click the **"Authorize"** button in the top-right corner.
 2. Enter username `admin` and password `Admin123!` (or your custom `FLOW_API_BOOTSTRAP_PASS`).
 3. Click **Authorize** -> **Close**, then test any endpoint directly from the browser.
 
 ### 2. Check Health & Database Session Identity via `curl`
 ```bash
-curl -u admin:Admin123! http://localhost:8080/api/v1/health
+curl -u admin:Admin123! http://localhost:5180/api/v1/health
 ```
 
 ### 3. Test Database Connectivity
 ```bash
 curl -u admin:Admin123! \
-  -X POST http://localhost:8080/api/v1/db/test \
+  -X POST http://localhost:5180/api/v1/db/test \
   -H "Content-Type: application/json" \
   -d '{}'
 ```
@@ -201,11 +201,11 @@ curl -u admin:Admin123! \
 # Upload a pipeline XML file
 curl -u admin:Admin123! \
   -F "file=@my_pipeline.xml" \
-  "http://localhost:8080/api/v1/upload/pipelines?name=demo_pipeline"
+  "http://localhost:5180/api/v1/upload/pipelines?name=demo_pipeline"
 
 # Execute the uploaded pipeline with node_output capture
 curl -u admin:Admin123! \
-  -X POST http://localhost:8080/api/v1/execute \
+  -X POST http://localhost:5180/api/v1/execute \
   -H "Content-Type: application/json" \
   -d '{
     "file": "db:demo_pipeline",
@@ -228,7 +228,7 @@ docker build --build-context go-flow=../go-flow -t go-flow-api:latest .
 # Run against an existing database (where tables & users are already set up)
 docker run -d \
   --name go-flow-api \
-  -p 8080:8080 \
+  -p 5180:5180 \
   --add-host=host.docker.internal:host-gateway \
   -e FLOW_API_DSN="sqlserver://sa:YourStrong!Passw0rd@host.docker.internal:1433?database=PROTO&trustServerCertificate=true" \
   go-flow-api:latest
@@ -236,7 +236,7 @@ docker run -d \
 # Or run with a fresh SQLite persistent volume (and optional initial user bootstrap)
 docker run -d \
   --name go-flow-api-sqlite \
-  -p 8080:8080 \
+  -p 5180:5180 \
   -e FLOW_API_DSN="sqlite:///data/flow_api.db" \
   -e FLOW_API_BOOTSTRAP_USER="admin" \
   -e FLOW_API_BOOTSTRAP_PASS="Admin123!" \

@@ -1,11 +1,11 @@
 -- SQL Server Initialization Script for go-flowAPI
-IF DB_ID('PROTO') IS NULL
+IF DB_ID('EXAMPLE_DB') IS NULL
 BEGIN
-    CREATE DATABASE [PROTO];
+    CREATE DATABASE [EXAMPLE_DB];
 END
 GO
 
-USE [PROTO];
+USE [EXAMPLE_DB];
 GO
 
 -- 1. Pipeline Content Table (compatible with go-flow & db_importer)

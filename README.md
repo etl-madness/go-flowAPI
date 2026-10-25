@@ -130,13 +130,13 @@ docker compose -f docker-compose.sqlite.yml up -d --build
 ```bash
 curl -u publisher:publisher-secret-pass \
   -F "file=@my_pipeline.xml" \
-  "http://localhost:8085/api/v1/upload/pipelines?name=daily_etl"
+  "http://localhost:5180/api/v1/upload/pipelines?name=daily_etl"
 ```
 
 ### 2. Execute a Pipeline with `node_output` Logging (`execution-only` / `all`)
 ```bash
 curl -u runner_svc:runner-secret-pass \
-  -X POST http://localhost:8085/api/v1/execute \
+  -X POST http://localhost:5180/api/v1/execute \
   -H "Content-Type: application/json" \
   -d '{
     "file": "db:daily_etl",
@@ -153,15 +153,15 @@ curl -u runner_svc:runner-secret-pass \
 ```bash
 # Synchronous execution of pipeline ID=1 from dbo.flow_pipeline_content
 curl -u runner_svc:runner-secret-pass \
-  -X POST "http://localhost:8085/api/v1/execute/pipeline/1?format=json&node_output=true"
+  -X POST "http://localhost:5180/api/v1/execute/pipeline/1?format=json&node_output=true"
 
 # Synchronous execution of saved CLI options ID=2 from dbo.flow_options_content
 curl -u runner_svc:runner-secret-pass \
-  -X POST "http://localhost:8085/api/v1/execute/options/2"
+  -X POST "http://localhost:5180/api/v1/execute/options/2"
 
 # Live SSE streaming execution of pipeline ID=1
 curl -N -u runner_svc:runner-secret-pass \
-  -X POST "http://localhost:8085/api/v1/execute/stream/pipeline/1" \
+  -X POST "http://localhost:5180/api/v1/execute/stream/pipeline/1" \
   -H "Content-Type: application/json" \
   -d '{"node_output": true, "vars": {"ENV": "staging"}}'
 ```
@@ -169,6 +169,6 @@ curl -N -u runner_svc:runner-secret-pass \
 ### 4. Query Pipeline Events & `node_output` (`read-only` / `all`)
 ```bash
 curl -u auditor:auditor-secret-pass \
-  "http://localhost:8085/api/v1/events?limit=20"
+  "http://localhost:5180/api/v1/events?limit=20"
 ```
 

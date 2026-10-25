@@ -14,9 +14,9 @@ services:
     container_name: go-flow-api
     restart: unless-stopped
     ports:
-      - "${FLOW_API_HOST_PORT:-8080}:8080"
+      - "${FLOW_API_HOST_PORT:-5180}:5180"
     environment:
-      FLOW_API_ADDR: ":8080"
+      FLOW_API_ADDR: ":5180"
       FLOW_API_DSN: "${FLOW_API_DSN:-sqlserver://sa:YourStrong!Passw0rd@dbserver.example.com:1433?database=EXAMPLE_DB&trustServerCertificate=true}"
       HOST_USERDOMAIN: "${USERDOMAIN:-}"
       HOST_USERNAME: "${USERNAME:-}"
