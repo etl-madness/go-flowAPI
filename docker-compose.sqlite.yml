@@ -7,8 +7,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      additional_contexts:
-        go-flow: ../go-flow
     image: go-flow-api:latest
     container_name: go-flow-api-sqlite
     restart: unless-stopped

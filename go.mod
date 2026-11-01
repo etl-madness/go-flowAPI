@@ -2,11 +2,8 @@ module github.com/etl-madness/go-flowAPI
 
 go 1.26.5
 
-replace github.com/etl-madness/go-flow => ../go-flow
-
 require (
-	github.com/etl-madness/flow v1.3.4
-	github.com/etl-madness/go-flow v0.0.0-00010101000000-000000000000
+	github.com/etl-madness/flow v1.3.5
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/lestrrat-go/helium v0.7.0
 	github.com/lib/pq v1.12.3

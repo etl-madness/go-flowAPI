@@ -1,21 +1,11 @@
 # syntax=docker/dockerfile:1
 
-# Stage 0: Placeholder stage overridden by `additional_contexts: go-flow: ../go-flow`
-# in docker-compose*.yml (or `--build-context go-flow=../go-flow` with `docker build`).
-FROM scratch AS go-flow
-
 # Stage 1: Build go-flowAPI binary
 FROM golang:1.26-alpine AS builder
 
 ENV GOTOOLCHAIN=auto
 RUN apk add --no-cache git ca-certificates
 
-WORKDIR /src
-
-# Copy local ../go-flow module required by go.mod replace directive
-COPY --from=go-flow . /src/go-flow/
-
-# Copy go-flowAPI module files and download dependencies
 WORKDIR /src/go-flowAPI
 COPY go.mod go.sum ./
 RUN go mod download

@@ -1,6 +1,9 @@
-# `go-flowAPI` — CRUD, File Upload, Execution & Telemetry API for `go-flow`
+# `go-flowAPI` — CRUD, File Upload, Execution & Telemetry API for `Flow Ecosystem`
 
 `go-flowAPI` is a unified REST API for managing `go-flow` database artifacts (`pipelines`, `options`, `configs`), uploading XML/JSON files to the database, executing pipelines with full CLI/Builder parity (including SSE live streaming and `node_output` logging), and auditing all API and pipeline events.
+
+**Online Documentation:** [https://etl-madness.github.io/flow-docs/](https://etl-madness.github.io/flow-docs/)
+
 
 ## Key Features
 
@@ -43,11 +46,11 @@ When your database tables (`dbo.flow_api_users`, etc.) and users are already set
 ```bash
 # 1. Run from source (uses StartupConnectionString in config.go, or override via -dsn / FLOW_API_DSN)
 go run .
-go run . -addr :8080 -dsn "sqlserver://sa:YourStrong!Passw0rd@localhost:1433?database=PROTO&trustServerCertificate=true"
+go run . -addr :8080 -dsn "sqlserver://sa:YourStrong!Passw0rd@localhost:1433?database=EXAMPLE_DB&trustServerCertificate=true"
 
 # 2. Build and run compiled binary
 go build -o go-flowAPI.exe .
-./go-flowAPI.exe -addr :8080 -dsn "sqlserver://sa:YourStrong!Passw0rd@localhost:1433?database=PROTO&trustServerCertificate=true"
+./go-flowAPI.exe -addr :8080 -dsn "sqlserver://sa:YourStrong!Passw0rd@localhost:1433?database=EXAMPLE_DB&trustServerCertificate=true"
 
 # (Optional) Seed/update an initial admin user at startup only if needed:
 go run . -addr :8080 -bootstrap-user admin -bootstrap-pass "YourStrong!AdminPass"
@@ -59,7 +62,7 @@ See **[`DOCKER.md`](./DOCKER.md)** for the full Docker Quickstart Guide. Four Do
 
 ```bash
 # 1. Connect to an existing / host database via FLOW_API_DSN (no bootstrap env vars required if users exist)
-FLOW_API_DSN="sqlserver://flow_api:YourStrong!Passw0rd@host.docker.internal:1433?database=PROTO&trustServerCertificate=true" \
+FLOW_API_DSN="sqlserver://flow_api:YourStrong!Passw0rd@host.docker.internal:1433?database=EXAMPLE_DB&trustServerCertificate=true" \
 docker compose up -d --build
 
 # 2. SQL Server 2022 container + automatic schema provisioning

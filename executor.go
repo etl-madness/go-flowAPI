@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/etl-madness/flow"
-	"github.com/etl-madness/go-flow/pkg/flowcrypto"
+	"github.com/etl-madness/flow/flowcrypto"
 	"github.com/lestrrat-go/helium"
 	"github.com/lestrrat-go/helium/xslt3"
 	"github.com/traefik/yaegi/interp"

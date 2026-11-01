@@ -18,3 +18,4 @@ go-flowAPI
 *.db-wal
 *.sqlite
 *.sqlite3
+private-docker-compose.yml

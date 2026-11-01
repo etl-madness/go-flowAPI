@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/etl-madness/go-flow/pkg/flowcrypto"
+	"github.com/etl-madness/flow/flowcrypto"
 )
 
 type cryptoKeygenRequest struct {
