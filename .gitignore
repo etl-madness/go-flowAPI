@@ -28,3 +28,7 @@ go.work.sum
 *.njsproj
 *.sln
 *.sw?
+
+# SonarQube local config
+run-sonarqube.ps1
+sonar-project.properties
