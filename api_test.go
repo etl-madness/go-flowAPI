@@ -3,13 +3,18 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -755,3 +760,1028 @@ func TestDatabaseSink_PerNodeSessionIdentityAndCrossDB(t *testing.T) {
 
 
 
+
+func doAuthJSON(t *testing.T, client *http.Client, method, url, username, password string, body any, headers map[string]string) (int, []byte) {
+	t.Helper()
+	var reader io.Reader
+	if body != nil {
+		switch v := body.(type) {
+		case string:
+			reader = strings.NewReader(v)
+		case []byte:
+			reader = bytes.NewReader(v)
+		default:
+			b, err := json.Marshal(v)
+			if err != nil {
+				t.Fatalf("failed marshaling body: %v", err)
+			}
+			reader = bytes.NewReader(b)
+		}
+	}
+	req, err := http.NewRequest(method, url, reader)
+	if err != nil {
+		t.Fatalf("NewRequest failed: %v", err)
+	}
+	if username != "" || password != "" {
+		req.SetBasicAuth(username, password)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s failed: %v", method, url, err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, b
+}
+
+func TestCryptoEndpointsComprehensive(t *testing.T) {
+	_, ts, _ := setupTestServer(t)
+	client := ts.Client()
+
+	// 1. Method not allowed & unknown crypto endpoint
+	code, _ := doAuthJSON(t, client, http.MethodGet, ts.URL+"/api/v1/crypto/keygen", "read_user", "read_pass", nil, nil)
+	if code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 for GET crypto, got %d", code)
+	}
+	code, _ = doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/crypto/unknown", "read_user", "read_pass", `{}`, nil)
+	if code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown crypto endpoint, got %d", code)
+	}
+
+	// Invalid JSON bodies across all 5 endpoints
+	for _, ep := range []string{"keygen", "encrypt", "decrypt", "sign", "verify"} {
+		c, _ := doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/crypto/"+ep, "read_user", "read_pass", `{invalid`, nil)
+		if c != http.StatusBadRequest {
+			t.Fatalf("expected 400 for invalid JSON on %s, got %d", ep, c)
+		}
+	}
+
+	// 2. Keygen across all algorithms (AES, PGP, RSA-2048, ECDSA-P256, ECDSA-P384, ED25519) + GenerateCert
+	var aesKey string
+	{
+		c, b := doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/crypto/keygen", "read_user", "read_pass", map[string]any{
+			"algorithm":   "AES-256",
+			"byte_length": 32,
+		}, nil)
+		if c != http.StatusOK {
+			t.Fatalf("AES keygen failed (%d): %s", c, string(b))
+		}
+		var kr cryptoKeygenResponse
+		_ = json.Unmarshal(b, &kr)
+		if kr.SecureKey == "" || kr.Algorithm != "AES-256-GCM" {
+			t.Fatalf("unexpected AES keygen response: %+v", kr)
+		}
+		aesKey = kr.SecureKey
+	}
+
+	var pgpPriv, pgpPub string
+	{
+		c, b := doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/crypto/keygen", "read_user", "read_pass", map[string]any{
+			"algorithm": "PGP",
+		}, nil)
+		if c != http.StatusOK {
+			t.Fatalf("PGP keygen failed (%d): %s", c, string(b))
+		}
+		var kr cryptoKeygenResponse
+		_ = json.Unmarshal(b, &kr)
+		pgpPriv, pgpPub = kr.PrivateKeyPEM, kr.PublicKeyPEM
+		if pgpPriv == "" || pgpPub == "" || kr.Fingerprint == "" {
+			t.Fatalf("unexpected PGP keygen response: %+v", kr)
+		}
+	}
+
+	var rsaPriv, rsaPub, rsaCert string
+	for _, alg := range []string{"", "ECDSA-P256", "ECDSA-P384", "ED25519"} {
+		c, b := doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/crypto/keygen", "read_user", "read_pass", map[string]any{
+			"algorithm":     alg,
+			"common_name":   "Test Signer",
+			"validity_days": 30,
+			"generate_cert": true,
+		}, nil)
+		if c != http.StatusOK {
+			t.Fatalf("keygen(%q) failed (%d): %s", alg, c, string(b))
+		}
+		var kr cryptoKeygenResponse
+		_ = json.Unmarshal(b, &kr)
+		if kr.PrivateKeyPEM == "" || kr.PublicKeyPEM == "" || kr.CertificatePEM == "" {
+			t.Fatalf("expected keys and cert for alg %q", alg)
+		}
+		if alg == "" {
+			rsaPriv, rsaPub, rsaCert = kr.PrivateKeyPEM, kr.PublicKeyPEM, kr.CertificatePEM
+		}
+	}
+
+	// 3. Encrypt & Decrypt
+	c, encBytes := doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/crypto/encrypt", "read_user", "read_pass", map[string]any{
+		"content":    samplePipelineXML,
+		"secure_key": aesKey,
+	}, nil)
+	if c != http.StatusOK {
+		t.Fatalf("encrypt failed (%d): %s", c, string(encBytes))
+	}
+	var encMap map[string]any
+	_ = json.Unmarshal(encBytes, &encMap)
+	cipherText, _ := encMap["content"].(string)
+
+	c, decBytes := doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/crypto/decrypt", "read_user", "read_pass", map[string]any{
+		"content": cipherText,
+	}, map[string]string{"X-Flow-Secure-Key": aesKey})
+	if c != http.StatusOK {
+		t.Fatalf("decrypt failed (%d): %s", c, string(decBytes))
+	}
+	if !strings.Contains(string(decBytes), "HelloNode") {
+		t.Fatalf("decrypted text missing HelloNode: %s", string(decBytes))
+	}
+
+	// Decrypt error with bad key
+	c, _ = doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/crypto/decrypt", "read_user", "read_pass", map[string]any{
+		"content":    cipherText,
+		"secure_key": "wrong-key-value",
+	}, nil)
+	if c != http.StatusBadRequest {
+		t.Fatalf("expected 400 for bad decrypt key, got %d", c)
+	}
+
+	// 4. Sign & Verify: OPENSSL (wrapped, detached, encrypt-then-sign, sign-then-encrypt), PKCS7, PGP
+	// Missing content or private key
+	c, _ = doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/crypto/sign", "read_user", "read_pass", map[string]any{"content": ""}, nil)
+	if c != http.StatusBadRequest {
+		t.Fatalf("expected 400 for empty sign content, got %d", c)
+	}
+	c, _ = doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/crypto/sign", "read_user", "read_pass", map[string]any{"content": "abc"}, nil)
+	if c != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing private key, got %d", c)
+	}
+
+	// 4a. OPENSSL sign with encrypt-then-sign & wrap=true
+	c, signRespBytes := doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/crypto/sign", "read_user", "read_pass", map[string]any{
+		"content":         samplePipelineXML,
+		"scheme":          "OPENSSL",
+		"private_key_pem": rsaPriv,
+		"wrap":            true,
+		"encrypt_mode":    "encrypt-then-sign",
+		"secure_key":      aesKey,
+	}, nil)
+	if c != http.StatusOK {
+		t.Fatalf("OPENSSL encrypt-then-sign failed (%d): %s", c, string(signRespBytes))
+	}
+	var srOpenSSL cryptoSignResponse
+	_ = json.Unmarshal(signRespBytes, &srOpenSSL)
+
+	// Verify wrapped without public key -> returns Valid:false with message
+	c, verNoKeyBytes := doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/crypto/verify", "read_user", "read_pass", map[string]any{
+		"content":    srOpenSSL.SignedPayload,
+		"secure_key": aesKey,
+	}, nil)
+	if c != http.StatusOK || !strings.Contains(string(verNoKeyBytes), "no public_key_pem") {
+		t.Fatalf("expected unwrapped message when no key provided, got (%d): %s", c, string(verNoKeyBytes))
+	}
+
+	// Verify wrapped with public key
+	c, verOpenSSLBytes := doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/crypto/verify", "read_user", "read_pass", map[string]any{
+		"content":        srOpenSSL.SignedPayload,
+		"public_key_pem": rsaPub,
+		"secure_key":     aesKey,
+	}, nil)
+	if c != http.StatusOK {
+		t.Fatalf("verify OPENSSL failed (%d): %s", c, string(verOpenSSLBytes))
+	}
+	var vrOpenSSL cryptoVerifyResponse
+	_ = json.Unmarshal(verOpenSSLBytes, &vrOpenSSL)
+	if !vrOpenSSL.Valid || !vrOpenSSL.Encrypted || !strings.Contains(vrOpenSSL.UnwrappedContent, "HelloNode") {
+		t.Fatalf("unexpected verify response: %+v", vrOpenSSL)
+	}
+
+	// 4b. PKCS7 sign-then-encrypt & verify with cert_pem + ca_cert_pem
+	// First check PKCS7 missing cert_pem returns 400
+	c, _ = doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/crypto/sign", "read_user", "read_pass", map[string]any{
+		"content":         samplePipelineXML,
+		"scheme":          "PKCS7",
+		"private_key_pem": rsaPriv,
+	}, nil)
+	if c != http.StatusBadRequest {
+		t.Fatalf("expected 400 when PKCS7 missing cert_pem, got %d", c)
+	}
+
+	c, pkcs7Bytes := doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/crypto/sign", "read_user", "read_pass", map[string]any{
+		"content":         samplePipelineXML,
+		"scheme":          "PKCS7",
+		"private_key_pem": rsaPriv,
+		"cert_pem":        rsaCert,
+		"wrap":            true,
+		"encrypt_mode":    "sign-then-encrypt",
+		"secure_key":      aesKey,
+	}, nil)
+	if c != http.StatusOK {
+		t.Fatalf("PKCS7 sign-then-encrypt failed (%d): %s", c, string(pkcs7Bytes))
+	}
+	var srPKCS7 cryptoSignResponse
+	_ = json.Unmarshal(pkcs7Bytes, &srPKCS7)
+
+	c, verPKCS7Bytes := doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/crypto/verify", "read_user", "read_pass", map[string]any{
+		"content":     srPKCS7.SignedPayload,
+		"cert_pem":    rsaCert,
+		"ca_cert_pem": rsaCert,
+		"secure_key":  aesKey,
+	}, nil)
+	if c != http.StatusOK {
+		t.Fatalf("verify PKCS7 failed (%d): %s", c, string(verPKCS7Bytes))
+	}
+	var vrPKCS7 cryptoVerifyResponse
+	_ = json.Unmarshal(verPKCS7Bytes, &vrPKCS7)
+	if !vrPKCS7.Valid || vrPKCS7.Subject == "" || vrPKCS7.Fingerprint == "" {
+		t.Fatalf("expected valid PKCS7 verification with certificate metadata, got: %+v", vrPKCS7)
+	}
+
+	// 4c. PGP sign (wrap=false, detached) & verify with keyring_pem
+	c, pgpSignBytes := doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/crypto/sign", "read_user", "read_pass", map[string]any{
+		"content":         samplePipelineXML,
+		"scheme":          "PGP",
+		"private_key_pem": pgpPriv,
+		"wrap":            false,
+	}, nil)
+	if c != http.StatusOK {
+		t.Fatalf("PGP sign failed (%d): %s", c, string(pgpSignBytes))
+	}
+	var srPGP cryptoSignResponse
+	_ = json.Unmarshal(pgpSignBytes, &srPGP)
+
+	c, verPGPBytes := doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/crypto/verify", "read_user", "read_pass", map[string]any{
+		"content":     samplePipelineXML,
+		"signature":   srPGP.DetachedSignature,
+		"keyring_pem": pgpPub,
+	}, nil)
+	if c != http.StatusOK {
+		t.Fatalf("PGP verify failed (%d): %s", c, string(verPGPBytes))
+	}
+	var vrPGP cryptoVerifyResponse
+	_ = json.Unmarshal(verPGPBytes, &vrPGP)
+	if !vrPGP.Valid {
+		t.Fatalf("expected valid PGP detached verification, got: %+v", vrPGP)
+	}
+
+	// Verify unsigned payload without signature -> Valid:false
+	c, verUnsigned := doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/crypto/verify", "read_user", "read_pass", map[string]any{
+		"content": "plain unsigned content",
+	}, nil)
+	if c != http.StatusOK || !strings.Contains(string(verUnsigned), "not wrapped") {
+		t.Fatalf("unexpected unsigned verify response (%d): %s", c, string(verUnsigned))
+	}
+
+	// Verify empty content -> 400
+	c, _ = doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/crypto/verify", "read_user", "read_pass", map[string]any{
+		"content": "",
+	}, nil)
+	if c != http.StatusBadRequest {
+		t.Fatalf("expected 400 for empty verify content, got %d", c)
+	}
+}
+
+func TestAuthAndWindowsIdentityComprehensive(t *testing.T) {
+	apiSrv, ts, _ := setupTestServer(t)
+	client := ts.Client()
+	ctx := context.Background()
+
+	// 1. Permission ranking, token normalization, validation, and VerifyPassword variants
+	for _, perm := range []string{"all", "admin", "*", "full", "write", "editor", "upload", "upload-only", "execution-only", "runner", "read-only", "viewer", "read-only,execution-only"} {
+		if err := ValidatePermissionString(perm); err != nil {
+			t.Fatalf("expected %q to be valid, got: %v", perm, err)
+		}
+		r := permRank(perm)
+		if r <= 0 || rankToPerm(r) == "" {
+			t.Fatalf("expected positive rank for %q, got %d", perm, r)
+		}
+	}
+	if rankToPerm(0) != PermReadOnly {
+		t.Fatalf("expected default rankToPerm(0) to be read-only")
+	}
+	if err := ValidatePermissionString(""); err == nil {
+		t.Fatalf("expected error for empty permission")
+	}
+	if err := ValidatePermissionString("invalid-perm"); err == nil {
+		t.Fatalf("expected error for invalid-perm")
+	}
+
+	// VerifyPassword with SHA256, plaintext, bcrypt, and WINDOWS marker
+	sum := sha256.Sum256([]byte("secret123"))
+	shaHash := "sha256:" + hex.EncodeToString(sum[:])
+	if !VerifyPassword(shaHash, "secret123") || VerifyPassword(shaHash, "wrong") {
+		t.Fatalf("SHA256 VerifyPassword failed")
+	}
+	if !VerifyPassword("plain_secret", "plain_secret") || VerifyPassword("plain_secret", "wrong") {
+		t.Fatalf("plaintext VerifyPassword failed")
+	}
+	if VerifyPassword("WINDOWS", "WINDOWS") || VerifyPassword(WindowsIntegratedAuthMarker, "any") || VerifyPassword("", "any") {
+		t.Fatalf("expected false for WINDOWS/empty stored hash")
+	}
+
+	// parseDBBool variants
+	for _, v := range []any{true, int64(1), int(1), []byte("true"), "yes", "1", "t", "y"} {
+		if !parseDBBool(v) {
+			t.Fatalf("expected parseDBBool(%v) == true", v)
+		}
+	}
+	for _, v := range []any{false, int64(0), int(0), []byte("0"), "no", nil, 3.14} {
+		if parseDBBool(v) {
+			t.Fatalf("expected parseDBBool(%v) == false", v)
+		}
+	}
+
+	// 2. Windows groups header parsing (CSV, JSON base64, raw base64)
+	if g := parseWindowsGroupsHeader(""); g != nil {
+		t.Fatalf("expected nil for empty groups header")
+	}
+	gCSV := parseWindowsGroupsHeader("CORP\\Admins, CORP\\ETL_Runners;Group3\nGroup4")
+	if len(gCSV) != 4 {
+		t.Fatalf("expected 4 groups from CSV header, got %v", gCSV)
+	}
+	b64JSON := base64.StdEncoding.EncodeToString([]byte(`["CORP\\Developers","CORP\\Admins"]`))
+	if gJSON := parseWindowsGroupsHeader(b64JSON); len(gJSON) != 2 {
+		t.Fatalf("expected 2 groups from base64 JSON, got %v", gJSON)
+	}
+	b64Raw := base64.StdEncoding.EncodeToString([]byte("CORP\\GroupA,CORP\\GroupB"))
+	if gRaw := parseWindowsGroupsHeader(b64Raw); len(gRaw) != 2 {
+		t.Fatalf("expected 2 groups from base64 text, got %v", gRaw)
+	}
+
+	// 3. Container/auto user detection & resolveWindowsUserAndGroups
+	for _, u := range []string{"", WindowsAutoHostUserMarker, "app", "root", `container\app`, `/root`} {
+		if !isContainerOrAutoUser(u) {
+			t.Fatalf("expected %q to be detected as container/auto user", u)
+		}
+	}
+	if isContainerOrAutoUser(`CORP\alice`) {
+		t.Fatalf("expected CORP\\alice not to be container user")
+	}
+
+	t.Setenv("FLOW_WINDOWS_USER", `CORP\env_win_user`)
+	resolvedU, resolvedG := resolveWindowsUserAndGroups(WindowsAutoHostUserMarker, []string{"CORP\\Group1", "CORP\\group1", ""})
+	if resolvedU != `CORP\env_win_user` || len(resolvedG) < 1 {
+		t.Fatalf("unexpected resolved user/groups: %q, %v", resolvedU, resolvedG)
+	}
+	t.Setenv("FLOW_WINDOWS_USER", "")
+	t.Setenv("HOST_USERNAME", "host_bob")
+	t.Setenv("HOST_USERDOMAIN", "CORPDOM")
+	resolvedU2, _ := resolveWindowsUserAndGroups("root", nil)
+	if resolvedU2 != `CORPDOM\host_bob` {
+		t.Fatalf("expected CORPDOM\\host_bob, got %q", resolvedU2)
+	}
+	t.Setenv("HOST_USERNAME", "")
+	t.Setenv("HOST_USERDOMAIN", "")
+
+	// Also test current OS user resolution
+	if curr, err := user.Current(); err == nil && curr != nil {
+		_, _ = resolveWindowsUserAndGroups(curr.Username, nil)
+	}
+	_ = lookupGroupSidQualified("S-1-1-0") // Everyone SID on Windows
+	_ = lookupGroupSidQualified("invalid-sid")
+
+	// 4. Register Windows user & AD group in TableAPIUsers and authenticate via headers & BasicAuth
+	_, err := apiSrv.UpsertAPIUser(ctx, `CORP\ETL_Admins`, "WINDOWS", "all", "AD Group", true)
+	if err != nil {
+		t.Fatalf("UpsertAPIUser AD group failed: %v", err)
+	}
+	_, err = apiSrv.UpsertAPIUser(ctx, `CORP\disabled_win`, "WINDOWS", "read-only", "Disabled AD User", false)
+	if err != nil {
+		t.Fatalf("UpsertAPIUser disabled user failed: %v", err)
+	}
+	_, err = apiSrv.UpsertAPIUser(ctx, `local_win_pass`, "local_pass_123", "write", "Local user with password", true)
+	if err != nil {
+		t.Fatalf("UpsertAPIUser local_win_pass failed: %v", err)
+	}
+
+	// Authenticate via AuthenticateWindowsIdentity
+	winU, err := apiSrv.AuthenticateWindowsIdentity(ctx, `CORP\jane`, []string{`ETL_Admins`})
+	if err != nil || winU == nil || winU.Permission != PermAll {
+		t.Fatalf("AuthenticateWindowsIdentity via group failed: %v, %+v", err, winU)
+	}
+
+	// Disabled Windows user
+	if _, err := apiSrv.AuthenticateWindowsIdentity(ctx, `CORP\disabled_win`, nil); err == nil {
+		t.Fatalf("expected error for disabled Windows user")
+	}
+
+	// Unregistered Windows user
+	if _, err := apiSrv.AuthenticateWindowsIdentity(ctx, `CORP\stranger`, []string{`CORP\UnknownGroup`}); err == nil {
+		t.Fatalf("expected error for unregistered Windows user")
+	}
+
+	// Local user with password via AuthenticateWindowsIdentityWithPassword
+	if _, err := apiSrv.AuthenticateWindowsIdentityWithPassword(ctx, "local_win_pass", "wrong_pass", nil); err == nil {
+		t.Fatalf("expected error for wrong password on local_win_pass")
+	}
+	if u, err := apiSrv.AuthenticateWindowsIdentityWithPassword(ctx, "local_win_pass", "local_pass_123", nil); err != nil || u == nil {
+		t.Fatalf("expected success for local_win_pass, got %v", err)
+	}
+
+	// HTTP request with X-Flow-Windows-User and X-Flow-Windows-Groups headers
+	code, healthBytes := doAuthJSON(t, client, http.MethodGet, ts.URL+"/api/v1/health", "", "", nil, map[string]string{
+		HeaderWindowsUser:   `CORP\jane`,
+		HeaderWindowsGroups: `CORP\ETL_Admins`,
+	})
+	if code != http.StatusOK || !strings.Contains(string(healthBytes), `CORP\\jane`) {
+		t.Fatalf("expected health check to report CORP\\jane, got (%d): %s", code, string(healthBytes))
+	}
+
+	// HTTP request with BasicAuth using WindowsIntegratedAuthMarker
+	code, _ = doAuthJSON(t, client, http.MethodGet, ts.URL+"/api/v1/users", `CORP\jane`, WindowsIntegratedAuthMarker, nil, map[string]string{
+		HeaderWindowsGroups: `CORP\ETL_Admins`,
+	})
+	if code != http.StatusOK {
+		t.Fatalf("expected 200 for /api/v1/users with WindowsIntegratedAuthMarker, got %d", code)
+	}
+
+	// HTTP request with DOMAIN\user and regular password fallback in AuthenticateRequest
+	_, _ = apiSrv.UpsertAPIUser(ctx, `CORP\direct_domain_user`, "WINDOWS", "read-only", "Direct domain user", true)
+	code, _ = doAuthJSON(t, client, http.MethodGet, ts.URL+"/api/v1/runs", `CORP\direct_domain_user`, "any_domain_pass", nil, nil)
+	if code != http.StatusOK {
+		t.Fatalf("expected 200 for direct_domain_user fallback, got %d", code)
+	}
+}
+
+func TestStoreHandlersAndUsersCRUD(t *testing.T) {
+	apiSrv, ts, _ := setupTestServer(t)
+	client := ts.Client()
+
+	// Verify Router() alias
+	if apiSrv.Router() == nil {
+		t.Fatalf("expected Router() to return non-nil handler")
+	}
+
+	// 1. DecodeUploadedBytes: UTF-8 BOM, UTF-16LE, UTF-16BE
+	utf8BOM := append([]byte{0xEF, 0xBB, 0xBF}, []byte("<Flow/>")...)
+	if got := DecodeUploadedBytes(utf8BOM); got != "<Flow/>" {
+		t.Fatalf("UTF-8 BOM decode failed: %q", got)
+	}
+	utf16LE := []byte{0xFF, 0xFE, '<', 0, 'F', 0, 'l', 0, 'o', 0, 'w', 0, '/', 0, '>', 0}
+	if got := DecodeUploadedBytes(utf16LE); got != "<Flow/>" {
+		t.Fatalf("UTF-16LE decode failed: %q", got)
+	}
+	utf16BE := []byte{0xFE, 0xFF, 0, '<', 0, 'F', 0, 'l', 0, 'o', 0, 'w', 0, '/', 0, '>'}
+	if got := DecodeUploadedBytes(utf16BE); got != "<Flow/>" {
+		t.Fatalf("UTF-16BE decode failed: %q", got)
+	}
+
+	// 2. Raw upload via /api/v1/upload/pipeline
+	code, upBytes := doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/upload/pipeline?name=raw_uploaded&description=raw_desc", "upload_user", "upload_pass", samplePipelineXML, nil)
+	if code != http.StatusCreated {
+		t.Fatalf("expected 201 for raw upload, got %d: %s", code, string(upBytes))
+	}
+	var upRec ArtifactRecord
+	_ = json.Unmarshal(upBytes, &upRec)
+
+	// Upload method not allowed & invalid type
+	if c, _ := doAuthJSON(t, client, http.MethodGet, ts.URL+"/api/v1/upload/pipeline", "upload_user", "upload_pass", nil, nil); c != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 for GET /api/v1/upload/pipeline, got %d", c)
+	}
+	if c, _ := doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/upload/invalid_type", "upload_user", "upload_pass", samplePipelineXML, nil); c != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid upload type, got %d", c)
+	}
+
+	// 3. ListArtifacts (with and without include_content)
+	code, listBytes := doAuthJSON(t, client, http.MethodGet, ts.URL+"/api/v1/artifacts/pipeline?include_content=true", "read_user", "read_pass", nil, nil)
+	if code != http.StatusOK || !strings.Contains(string(listBytes), "raw_uploaded") {
+		t.Fatalf("list artifacts failed (%d): %s", code, string(listBytes))
+	}
+
+	// Duplicate Create (409 Conflict)
+	code, _ = doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/artifacts/pipeline", "write_user", "write_pass", map[string]any{
+		"name":        "raw_uploaded",
+		"xml_content": samplePipelineXML,
+	}, nil)
+	if code != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict for duplicate create, got %d", code)
+	}
+
+	// 4. UpdateArtifact by name & by ID
+	code, _ = doAuthJSON(t, client, http.MethodPut, ts.URL+"/api/v1/artifacts/pipeline/raw_uploaded", "write_user", "write_pass", map[string]any{
+		"description": "updated_by_name",
+		"xml_content": samplePipelineXML,
+	}, nil)
+	if code != http.StatusOK {
+		t.Fatalf("expected 200 updating by name, got %d", code)
+	}
+
+	code, _ = doAuthJSON(t, client, http.MethodPut, fmt.Sprintf("%s/api/v1/artifacts/pipeline/id/%d", ts.URL, upRec.ID), "write_user", "write_pass", map[string]any{
+		"description": "", // empty description preserves existing
+		"content":     samplePipelineXML,
+	}, nil)
+	if code != http.StatusOK {
+		t.Fatalf("expected 200 updating by ID, got %d", code)
+	}
+
+	// 5. Export by name & by ID
+	code, expBytes := doAuthJSON(t, client, http.MethodGet, ts.URL+"/api/v1/artifacts/pipeline/raw_uploaded/export", "read_user", "read_pass", nil, nil)
+	if code != http.StatusOK || !strings.Contains(string(expBytes), "HelloNode") {
+		t.Fatalf("export by name failed (%d): %s", code, string(expBytes))
+	}
+	code, expIDBytes := doAuthJSON(t, client, http.MethodGet, fmt.Sprintf("%s/api/v1/artifacts/pipeline/id/%d/export", ts.URL, upRec.ID), "read_user", "read_pass", nil, nil)
+	if code != http.StatusOK || !strings.Contains(string(expIDBytes), "HelloNode") {
+		t.Fatalf("export by ID failed (%d): %s", code, string(expIDBytes))
+	}
+
+	// 6. Delete by ID & by name + 404 checks
+	code, _ = doAuthJSON(t, client, http.MethodDelete, fmt.Sprintf("%s/api/v1/artifacts/pipeline/id/%d", ts.URL, upRec.ID), "write_user", "write_pass", nil, nil)
+	if code != http.StatusOK {
+		t.Fatalf("delete by ID failed: %d", code)
+	}
+	// Deleting again should return 404
+	code, _ = doAuthJSON(t, client, http.MethodDelete, fmt.Sprintf("%s/api/v1/artifacts/pipeline/id/%d", ts.URL, upRec.ID), "write_user", "write_pass", nil, nil)
+	if code != http.StatusNotFound {
+		t.Fatalf("expected 404 deleting already deleted ID, got %d", code)
+	}
+
+	// Create another to delete by name
+	_, _ = doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/artifacts/options", "write_user", "write_pass", map[string]any{
+		"name":    "temp_opt",
+		"content": "<cli_options/>",
+	}, nil)
+	code, _ = doAuthJSON(t, client, http.MethodDelete, ts.URL+"/api/v1/artifacts/options/temp_opt", "write_user", "write_pass", nil, nil)
+	if code != http.StatusOK {
+		t.Fatalf("delete by name failed: %d", code)
+	}
+	code, _ = doAuthJSON(t, client, http.MethodDelete, ts.URL+"/api/v1/artifacts/options/temp_opt", "write_user", "write_pass", nil, nil)
+	if code != http.StatusNotFound {
+		t.Fatalf("expected 404 deleting non-existent name, got %d", code)
+	}
+
+	// 7. Validate endpoints (/api/v1/validate and /api/v1/validate/{type}/{id})
+	_, cfgBytes := doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/artifacts/config", "write_user", "write_pass", map[string]any{
+		"name":    "val_cfg",
+		"content": samplePipelineXML,
+	}, nil)
+	var cfgRec ArtifactRecord
+	_ = json.Unmarshal(cfgBytes, &cfgRec)
+
+	code, valBytes := doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/validate", "exec_user", "exec_pass", map[string]any{
+		"file_xml": samplePipelineXML,
+		"format":   "markdown",
+	}, nil)
+	if code != http.StatusOK || !strings.Contains(string(valBytes), "valid") {
+		t.Fatalf("POST /api/v1/validate failed (%d): %s", code, string(valBytes))
+	}
+
+	code, _ = doAuthJSON(t, client, http.MethodPost, fmt.Sprintf("%s/api/v1/validate/config/%d", ts.URL, cfgRec.ID), "exec_user", "exec_pass", nil, nil)
+	if code != http.StatusOK {
+		t.Fatalf("POST /api/v1/validate/config/%d failed: %d", cfgRec.ID, code)
+	}
+
+	// Invalid XML validation -> 422
+	code, _ = doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/validate", "exec_user", "exec_pass", map[string]any{
+		"file_xml": "<Flow><Broken",
+	}, nil)
+	if code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 for broken XML validation, got %d", code)
+	}
+
+	// 8. Users CRUD (/api/v1/users and /api/v1/users/{username}) & Databases test (/api/v1/databases/test)
+	activeFalse := false
+	code, _ = doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/users", "admin_user", "admin_pass", map[string]any{
+		"username":    "temp_svc_user",
+		"password":    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+		"permission":  "read-only",
+		"description": "Temp user",
+		"is_active":   &activeFalse,
+	}, nil)
+	if code != http.StatusCreated {
+		t.Fatalf("expected 201 creating user, got %d", code)
+	}
+
+	code, usersBytes := doAuthJSON(t, client, http.MethodGet, ts.URL+"/api/v1/users", "admin_user", "admin_pass", nil, nil)
+	if code != http.StatusOK || !strings.Contains(string(usersBytes), "temp_svc_user") {
+		t.Fatalf("GET /api/v1/users failed (%d): %s", code, string(usersBytes))
+	}
+
+	code, _ = doAuthJSON(t, client, http.MethodDelete, ts.URL+"/api/v1/users/temp_svc_user", "admin_user", "admin_pass", nil, nil)
+	if code != http.StatusOK {
+		t.Fatalf("DELETE /api/v1/users/temp_svc_user failed: %d", code)
+	}
+	code, _ = doAuthJSON(t, client, http.MethodDelete, ts.URL+"/api/v1/users/temp_svc_user", "admin_user", "admin_pass", nil, nil)
+	if code != http.StatusNotFound {
+		t.Fatalf("expected 404 deleting non-existent user, got %d", code)
+	}
+
+	// Databases test endpoint
+	code, dbTestBytes := doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/databases/test", "admin_user", "admin_pass", map[string]any{
+		"dsn": "", // uses startup DB
+	}, nil)
+	if code != http.StatusOK || !strings.Contains(string(dbTestBytes), `"connected":true`) {
+		t.Fatalf("POST /api/v1/databases/test failed (%d): %s", code, string(dbTestBytes))
+	}
+
+	// Query runs endpoint (/api/v1/runs)
+	code, runsBytes := doAuthJSON(t, client, http.MethodGet, ts.URL+"/api/v1/runs?status=succeeded&limit=10", "read_user", "read_pass", nil, nil)
+	if code != http.StatusOK || !strings.Contains(string(runsBytes), `"runs"`) {
+		t.Fatalf("GET /api/v1/runs failed (%d): %s", code, string(runsBytes))
+	}
+
+	// Query audit events with filters
+	code, _ = doAuthJSON(t, client, http.MethodGet, ts.URL+"/api/v1/audit?event_type=user.upsert&auth_user=admin_user&status=SUCCESS&limit=5", "read_user", "read_pass", nil, nil)
+	if code != http.StatusOK {
+		t.Fatalf("GET /api/v1/audit with filters failed: %d", code)
+	}
+}
+
+func TestExecutorAdvancedFeatures(t *testing.T) {
+	apiSrv, ts, _ := setupTestServer(t)
+	client := ts.Client()
+	ctx := context.Background()
+
+	// 1. formatScriptResults across all formats
+	sampleResults := []flow.ScriptResult{
+		{ScriptID: "Step1", ReturnCode: 0, Duration: "10ms", ResultsString: "line1\nline2"},
+	}
+	for _, fmtName := range []string{"json", "jsonpretty", "markdown", "text", "csv", "unknown"} {
+		out := formatScriptResults(fmtName, sampleResults)
+		if out == "" {
+			t.Fatalf("formatScriptResults(%q) returned empty string", fmtName)
+		}
+	}
+
+	// 2. resolveConnectionString with {{var}} and {{.var}}
+	varCfgs := []flow.VariableConfig{
+		{Name: "HOST", Value: "db.internal"},
+		{Name: "BASE_DSN", Value: "postgres://{{HOST}}:{{.PORT}}/{{DB}}"},
+	}
+	resolvedDSN := resolveConnectionString("{{BASE_DSN}}", varCfgs, "PORT=5432", map[string]string{"DB": "analytics"})
+	if resolvedDSN != "postgres://db.internal:5432/analytics" {
+		t.Fatalf("unexpected resolvedDSN: %q", resolvedDSN)
+	}
+	if resolveConnectionString("sqlite://plain.db", nil, "", nil) != "sqlite://plain.db" {
+		t.Fatalf("plain DSN should remain unchanged")
+	}
+
+	// 3. loadSQLResourceURI against the test SQLite database
+	_, err := apiSrv.UpsertArtifact(ctx, "pipeline", "sql_uri_pipe", "test sql uri", samplePipelineXML, false, "")
+	if err != nil {
+		t.Fatalf("UpsertArtifact failed: %v", err)
+	}
+	sqlURI := "sql://sqlite@" + strings.TrimPrefix(apiSrv.cfg.ConnectionString, "sqlite://") + "#SELECT PipelineXML FROM flow_pipeline_content WHERE Name = 'sql_uri_pipe'"
+	loadedBytes, err := loadSQLResourceURI(ctx, sqlURI)
+	if err != nil || !strings.Contains(string(loadedBytes), "HelloNode") {
+		t.Fatalf("loadSQLResourceURI failed: %v, %s", err, string(loadedBytes))
+	}
+	if _, err := loadSQLResourceURI(ctx, "invalid_uri_without_hash"); err == nil {
+		t.Fatalf("expected error for SQL URI without #")
+	}
+	if _, err := loadSQLResourceURI(ctx, apiSrv.cfg.ConnectionString+"#SELECT PipelineXML FROM flow_pipeline_content WHERE Name = 'nonexistent'"); err == nil {
+		t.Fatalf("expected error for 0 rows in loadSQLResourceURI")
+	}
+
+	// 4. applyOptionsXMLToRequest with both XML elements and <option flag="..."> items
+	comprehensiveOptionsXML := `<cli_options>
+		<options>
+			<file>sql_uri_pipe</file>
+			<format>jsonpretty</format>
+			<xsd>schema.xsd</xsd>
+			<config>my_cfg</config>
+			<validate>true</validate>
+			<preflight>true</preflight>
+			<vars>A=1,B=2</vars>
+			<debug>true</debug>
+			<gopath>/tmp/go</gopath>
+			<xslt>style.xsl</xslt>
+			<out>out.xml</out>
+			<node-output>true</node-output>
+			<encrypted>true</encrypted>
+			<secure-key>my_sec_key</secure-key>
+			<verify-signature>true</verify-signature>
+			<public-key>pub.pem</public-key>
+			<cert>cert.pem</cert>
+			<ca-cert>ca.pem</ca-cert>
+			<keyring>ring.gpg</keyring>
+			<signature>sig.bin</signature>
+		</options>
+	</cli_options>`
+	req1 := ExecutionRequest{OptionsXML: comprehensiveOptionsXML}
+	if _, err := apiSrv.applyOptionsXMLToRequest(ctx, &req1); err != nil {
+		t.Fatalf("applyOptionsXMLToRequest (elements) failed: %v", err)
+	}
+	if req1.File != "sql_uri_pipe" || req1.Format != "jsonpretty" || !req1.Validate || !req1.Preflight || !req1.NodeOutput || !req1.VerifySignature {
+		t.Fatalf("elements were not applied properly: %+v", req1)
+	}
+
+	flagItemsOptionsXML := `<cli_options>
+		<option flag="--file">sql_uri_pipe</option>
+		<option flag="--format">text</option>
+		<option flag="--xsd">s.xsd</option>
+		<option flag="--config">c.xml</option>
+		<option flag="--validate">true</option>
+		<option flag="--preflight">true</option>
+		<option flag="--vars">K=V</option>
+		<option flag="--debug">true</option>
+		<option flag="--gopath">/go</option>
+		<option flag="--xslt">t.xsl</option>
+		<option flag="--out">o.xml</option>
+		<option flag="--node-output">true</option>
+		<option flag="--encrypted">true</option>
+		<option flag="--secure-key">k</option>
+		<option flag="--verify-signature">true</option>
+		<option flag="--public-key">pk</option>
+		<option flag="--cert">ct</option>
+		<option flag="--ca-cert">ca</option>
+		<option flag="--keyring">kr</option>
+		<option flag="--signature">sg</option>
+	</cli_options>`
+	req2 := ExecutionRequest{OptionsXML: flagItemsOptionsXML}
+	if _, err := apiSrv.applyOptionsXMLToRequest(ctx, &req2); err != nil {
+		t.Fatalf("applyOptionsXMLToRequest (flag items) failed: %v", err)
+	}
+	if req2.File != "sql_uri_pipe" || req2.Format != "text" || req2.Keyring != "kr" || req2.Signature != "sg" {
+		t.Fatalf("flag items were not applied properly: %+v", req2)
+	}
+
+	// 5. XSLT transformation & writeTempFile
+	identityXSLT := `<?xml version="1.0" encoding="UTF-8"?>
+<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+  <xsl:template match="@*|node()">
+    <xsl:copy>
+      <xsl:apply-templates select="@*|node()"/>
+    </xsl:copy>
+  </xsl:template>
+</xsl:stylesheet>`
+	outFile := filepath.Join(t.TempDir(), "xslt_out.xml")
+	transformed, err := transformXMLWithXSLT(ctx, []byte(samplePipelineXML), []byte(identityXSLT), outFile)
+	if err != nil || !strings.Contains(string(transformed), "HelloNode") {
+		t.Fatalf("transformXMLWithXSLT failed: %v", err)
+	}
+
+	// Execute pipeline using SQL URI + config_xml + vars
+	overrideCfgXML := `<?xml version="1.0" encoding="UTF-8"?><Flow><Variables><Variable Name="EXTRA" Value="123"/></Variables></Flow>`
+	code, execBytes := doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/execute?preflight=false&debug=true&vars=FOO=bar", "exec_user", "exec_pass", map[string]any{
+		"file":       sqlURI,
+		"config_xml": overrideCfgXML,
+		"vars":       map[string]string{"DYNAMIC": "yes"},
+		"format":     "text",
+	}, nil)
+	if code != http.StatusOK {
+		t.Fatalf("execute with SQL URI and config_xml failed (%d): %s", code, string(execBytes))
+	}
+}
+
+type mockRowQuerier struct {
+	dialect string
+}
+
+func (m *mockRowQuerier) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	db, _, _ := OpenDatabase("sqlite://:memory:")
+	defer db.Close()
+	return db.QueryRowContext(ctx, "SELECT 42, 'mock_db_user', 'mock_app'")
+}
+
+func TestDBTelemetryAndConfigDialects(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. ParseDSNWithDriver & detectDriverFromDSN across all supported drivers
+	dsnCases := []struct {
+		raw         string
+		hint        string
+		wantDriver  string
+		wantDialect string
+	}{
+		{"sql://postgres@postgres://u:p@localhost:5432/db", "", "postgres", "postgres"},
+		{"db://mysql@u:p@tcp(localhost:3306)/db", "", "mysql", "mysql"},
+		{"sqlserver://localhost:1433?database=master&fedauth=ActiveDirectoryDefault", "", "azuresql", "sqlserver"},
+		{"sqlserver://sa:pass@localhost:1433?database=master", "mssql", "sqlserver", "sqlserver"},
+		{"server=localhost;fedauth=ActiveDirectoryInteractive", "sqlserver", "azuresql", "sqlserver"},
+		{"", "azuresql", "azuresql", "sqlserver"},
+		{"postgres://u:p@localhost/db", "", "postgres", "postgres"},
+		{"mysql://u:p@tcp(localhost:3306)/db", "", "mysql", "mysql"},
+		{"sqlite3://test.db", "", "sqlite", "sqlite"},
+		{":memory:", "", "sqlite", "sqlite"},
+		{"oracle://u:p@localhost:1521/xe", "", "oracle", "oracle"},
+		{"custom_dsn", "custom_drv", "custom_drv", "custom_drv"},
+		{"unknown_unprefixed_dsn", "", "sqlserver", "sqlserver"},
+	}
+	for _, tc := range dsnCases {
+		drv, dialect, _ := ParseDSNWithDriver(tc.raw, tc.hint)
+		if drv != tc.wantDriver || dialect != tc.wantDialect {
+			t.Fatalf("ParseDSNWithDriver(%q, %q) = (%q, %q), want (%q, %q)", tc.raw, tc.hint, drv, dialect, tc.wantDriver, tc.wantDialect)
+		}
+	}
+	_, _, _ = ParseDSN("sqlite://:memory:")
+	if r := RedactDSN("sqlserver://sa:password=Secret123@localhost"); !strings.Contains(r, "[REDACTED]") {
+		t.Fatalf("expected RedactDSN to redact password, got %q", r)
+	}
+
+	// 2. Placeholder, resolveTableName, buildArtifactUpsertQuery, buildUpdateNodeFinishedOutputQuery across dialects
+	for _, d := range []string{"postgres", "sqlserver", "azuresql", "oracle", "mysql", "sqlite"} {
+		_ = Placeholder(d, 1)
+		_ = resolveTableName(d, TablePipelineContent)
+		_ = buildArtifactUpsertQuery(d, "flow_pipeline_content", "PipelineXML")
+		_ = buildUpdateNodeFinishedOutputQuery(d, TablePipelineEvents)
+	}
+
+	// 3. FetchDatabaseSessionIdentity across all dialects using mockRowQuerier
+	_, _, _, _ = FetchDatabaseSessionIdentity(ctx, nil, "sqlserver")
+	mq := &mockRowQuerier{}
+	for _, d := range []string{"sqlserver", "postgres", "mysql", "oracle", "sqlite", "other"} {
+		spid, u, app, err := FetchDatabaseSessionIdentity(ctx, mq, d)
+		if err != nil || spid == 0 || app == "" {
+			t.Fatalf("FetchDatabaseSessionIdentity(%q) failed: spid=%d, user=%q, app=%q, err=%v", d, spid, u, app, err)
+		}
+	}
+
+	// 4. LoadStartupConfig & resolveKey with env vars and key-file
+	keyFile := filepath.Join(t.TempDir(), "secret.key")
+	_ = os.WriteFile(keyFile, []byte("  file-secret-key-123  \n"), 0600)
+	t.Setenv("PORT", "9091")
+	t.Setenv("FLOW_API_DEBUG", "true")
+	t.Setenv("FLOW_API_DSN", "sqlite://:memory:")
+	cfg, err := LoadStartupConfig([]string{"-key-file", keyFile})
+	if err != nil || cfg.DefaultSecureKey != "file-secret-key-123" || cfg.ListenAddr != ":9091" || !cfg.Debug {
+		t.Fatalf("LoadStartupConfig with env/keyfile failed: %+v, err=%v", cfg, err)
+	}
+	t.Setenv("FLOW_SECURE_KEY", "env-sec-key")
+	if k := resolveKey("", ""); k != "env-sec-key" {
+		t.Fatalf("expected env-sec-key, got %q", k)
+	}
+
+	// 5. Telemetry helpers: truncateNodeOutput, nodeIdentityFromAST, getters, parseDBTime
+	longStr := strings.Repeat("a", 200)
+	if tr := truncateNodeOutput(longStr, 50); len(tr) > 50 || !strings.HasSuffix(tr, nodeOutputTruncationSuffix) {
+		t.Fatalf("truncateNodeOutput(50) failed: %q", tr)
+	}
+	if trShort := truncateNodeOutput("hello world", 5); len(trShort) != 5 {
+		t.Fatalf("truncateNodeOutput(5) failed: %q", trShort)
+	}
+
+	allNodeKinds := []flow.PipelineNode{
+		{Kind: flow.NodeKV, KV: &flow.KVElement{ID: "kv1"}},
+		{Kind: flow.NodeKVBulk, KVBulk: &flow.KVBulkElement{ID: "kvb1"}},
+		{Kind: flow.NodeAssert, Assert: &flow.AssertElement{ID: "a1"}},
+		{Kind: flow.NodeSQL, SQL: &flow.SQLElement{ID: "s1"}},
+		{Kind: flow.NodeSQLBulk, SQLBulk: &flow.SQLBulkElement{ID: "sb1"}},
+		{Kind: flow.NodeScript, Script: &flow.ScriptItem{ID: "sc1"}},
+		{Kind: flow.NodeHTTPClient, HTTPClient: &flow.HTTPClientElement{ID: "hc1"}},
+		{Kind: flow.NodeTemplate, Template: &flow.TemplateElement{ID: "t1"}},
+		{Kind: flow.NodeHtmlTemplate, HtmlTemplate: &flow.HtmlTemplateElement{ID: "ht1"}},
+		{Kind: flow.NodeFileSave, FileSave: &flow.FileSaveElement{ID: "fs1"}},
+		{Kind: flow.NodeFileRead, FileRead: &flow.FileReadElement{ID: "fr1"}},
+		{Kind: flow.NodeExcelRead, ExcelRead: &flow.ExcelReadElement{ID: "er1"}},
+		{Kind: flow.NodeExcelWrite, ExcelWrite: &flow.ExcelWriteElement{ID: "ew1"}},
+		{Kind: flow.NodeXMLXPath, XmlXPath: &flow.XmlXPathElement{ID: "xp1"}},
+		{Kind: flow.NodeJSONPath, JsonPath: &flow.JsonPathElement{ID: "jp1"}},
+		{Kind: flow.NodeYAMLPath, YamlPath: &flow.YamlPathElement{ID: "yp1"}},
+		{Kind: flow.NodeGroup, GroupID: "g1", Children: []flow.PipelineNode{{Kind: flow.NodeKV}}, ElseNodes: []flow.PipelineNode{{Kind: flow.NodeAssert}}},
+		{Kind: flow.NodeParallel, GroupID: "p1"},
+		{Kind: flow.NodeIf, GroupID: "if1"},
+		{Kind: flow.NodeForEach, GroupID: "fe1"},
+		{Kind: flow.NodeWhile, GroupID: "w1"},
+		{Kind: flow.NodeKind(999)},
+	}
+	sink := NewDatabaseSink(nil, "postgres", true, true)
+	sink.RegisterNodes(allNodeKinds)
+	sink.RegisterNodeTarget("custom_node", NodeDBTarget{NodeKind: "sql", DBName: "{{DB_VAR}}"})
+	reg := flow.NewRegistry()
+	reg.SetVar("DB_VAR", "resolved_db")
+	sink.SetRegistry(reg)
+	if got := sink.resolveDBName("{{DB_VAR}}"); got != "resolved_db" {
+		t.Fatalf("resolveDBName failed: %q", got)
+	}
+	if sink.SPID() == 0 || sink.SSPID() == 0 || sink.ApplicationName() == "" {
+		t.Fatalf("unexpected sink identity getters")
+	}
+	_ = sink.DBUser()
+
+	// Time & scalar conversions
+	for _, tsRaw := range []any{
+		time.Now(),
+		[]byte("2026-11-07T19:00:00Z"),
+		"2026-11-07 19:00:00",
+		"invalid-time",
+		nil,
+	} {
+		_ = parseDBTime(tsRaw)
+	}
+	_ = toString([]byte("bytes"))
+	_ = toString(123)
+	_ = toInt64(int(5))
+	_ = toInt64(int32(5))
+	_ = toInt64("not-an-int")
+}
+
+func TestRemainingCoverageBranches(t *testing.T) {
+	apiSrv, ts, _ := setupTestServer(t)
+	client := ts.Client()
+	ctx := context.Background()
+
+	// 1. QueryPipelineRuns without status filter so all columns of recorded runs are scanned
+	// First run a pipeline so pipeline_runs is populated
+	_, _ = doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/execute?pipeline_id=1", "exec_user", "exec_pass", map[string]any{
+		"file_xml": samplePipelineXML,
+	}, nil)
+	code, runsBytes := doAuthJSON(t, client, http.MethodGet, ts.URL+"/api/v1/runs", "read_user", "read_pass", nil, nil)
+	if code != http.StatusOK || !strings.Contains(string(runsBytes), `"runs"`) {
+		t.Fatalf("GET /api/v1/runs failed (%d): %s", code, string(runsBytes))
+	}
+
+	// 2. writeTempFile & loadInlineOrFileBytes from file
+	tmpPath, err := writeTempFile("test-*.xml", []byte(samplePipelineXML))
+	if err != nil {
+		t.Fatalf("writeTempFile failed: %v", err)
+	}
+	defer os.Remove(tmpPath)
+	fileData, err := loadInlineOrFileBytes(tmpPath)
+	if err != nil || len(fileData) == 0 {
+		t.Fatalf("loadInlineOrFileBytes from file failed: %v", err)
+	}
+	_, _ = loadInlineOrFileBytes("")
+	_, _ = loadInlineOrFileBytes("/nonexistent/path/file.pem")
+
+	// 3. Execute pipeline from local file path & with custom log_db
+	pipeWithLogDB := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<Flow>
+  <Databases>
+    <Database Name="log_db" Driver="sqlite" ConnectionString=%q />
+  </Databases>
+  <Node Name="StepLog">
+    <Script Language="go"><![CDATA[
+package main
+import "fmt"
+func main() { fmt.Print("ok") }
+]]></Script>
+  </Node>
+</Flow>`, apiSrv.cfg.ConnectionString)
+	code, _ = doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/execute", "exec_user", "exec_pass", map[string]any{
+		"file_xml": pipeWithLogDB,
+	}, nil)
+	if code != http.StatusOK {
+		t.Fatalf("execute with log_db failed: %d", code)
+	}
+
+	// Execute by local file path
+	code, _ = doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/execute", "exec_user", "exec_pass", map[string]any{
+		"file": tmpPath,
+	}, nil)
+	if code != http.StatusOK {
+		t.Fatalf("execute by local file path failed: %d", code)
+	}
+
+	// 4. getOrFetchSessionIdentity with active registry DB handle
+	sink := NewDatabaseSink(apiSrv.db, "sqlite", true, false)
+	reg := flow.NewRegistry()
+	_ = reg.InitDatabases([]flow.DatabaseConfig{
+		{Name: "work_db", Driver: "sqlite", ConnectionString: ":memory:"},
+		{Name: "log_db", Driver: "sqlite", ConnectionString: ":memory:"},
+	})
+	defer reg.CloseDatabases()
+	sink.SetRegistry(reg)
+	if ident, err := sink.getOrFetchSessionIdentity(ctx, "work_db"); err != nil || ident.SPID == 0 {
+		t.Fatalf("getOrFetchSessionIdentity(work_db) failed: %+v, %v", ident, err)
+	}
+	if ident, err := sink.getOrFetchSessionIdentity(ctx, "log_db"); err != nil || ident.SPID == 0 {
+		t.Fatalf("getOrFetchSessionIdentity(log_db) failed: %+v, %v", ident, err)
+	}
+
+	// 5. describeExecutionTarget & parsePositiveQueryID branches
+	for _, req := range []ExecutionRequest{
+		{ID: 1},
+		{PipelineID: 2},
+		{OptionsID: 3},
+		{ConfigID: 4},
+		{File: "f.xml"},
+		{Options: "o.xml"},
+		{Config: "c.xml"},
+		{},
+	} {
+		_, _ = describeExecutionTarget(req)
+	}
+	if _, err := parsePositiveQueryID("-5", "id"); err == nil {
+		t.Fatalf("expected error for negative query ID")
+	}
+
+	// 6. BuildOpenAPISpec branches (nil request, custom ListenAddr, X-Forwarded-Proto, /swagger redirect & 404)
+	_ = apiSrv.BuildOpenAPISpec(nil)
+	srvCustom := NewAPIServer(&ServerConfig{ListenAddr: "localhost:8888"}, nil, "sqlite")
+	_ = srvCustom.BuildOpenAPISpec(nil)
+
+	httpsReq, _ := http.NewRequest(http.MethodGet, "http://example.com/api/v1/openapi.json", nil)
+	httpsReq.Header.Set("X-Forwarded-Proto", "https")
+	_ = apiSrv.BuildOpenAPISpec(httpsReq)
+
+	// /swagger redirect, 405, and 404
+	noRedirClient := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	redirResp, err := noRedirClient.Get(ts.URL + "/swagger")
+	if err == nil {
+		redirResp.Body.Close()
+	}
+	c, _ := doAuthJSON(t, client, http.MethodPost, ts.URL+"/swagger/", "", "", nil, nil)
+	if c != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 for POST /swagger/, got %d", c)
+	}
+	c, _ = doAuthJSON(t, client, http.MethodGet, ts.URL+"/swagger/nonexistent", "", "", nil, nil)
+	if c != http.StatusNotFound {
+		t.Fatalf("expected 404 for /swagger/nonexistent, got %d", c)
+	}
+}

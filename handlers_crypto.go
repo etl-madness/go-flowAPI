@@ -208,21 +208,34 @@ func (s *APIServer) handleCryptoKeygen(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *APIServer) handleCryptoEncrypt(w http.ResponseWriter, r *http.Request) {
+func (s *APIServer) decodeCryptoContentRequest(w http.ResponseWriter, r *http.Request, op string) (cryptoEncryptDecryptRequest, string, bool) {
 	var req cryptoEncryptDecryptRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON body: %v", err))
-		return
+		return req, "", false
 	}
-	key := strings.TrimSpace(req.SecureKey)
+	key := s.resolveRequestSecureKey(r, req.SecureKey)
+	if key == "" {
+		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("secure_key is required for %s", op))
+		return req, "", false
+	}
+	return req, key, true
+}
+
+func (s *APIServer) resolveRequestSecureKey(r *http.Request, explicitKey string) string {
+	key := strings.TrimSpace(explicitKey)
 	if key == "" {
 		key = strings.TrimSpace(r.Header.Get("X-Flow-Secure-Key"))
-		if key == "" {
+		if key == "" && s != nil && s.cfg != nil {
 			key = s.cfg.DefaultSecureKey
 		}
 	}
-	if key == "" {
-		writeJSONError(w, http.StatusBadRequest, "secure_key is required for encryption")
+	return key
+}
+
+func (s *APIServer) handleCryptoEncrypt(w http.ResponseWriter, r *http.Request) {
+	req, key, ok := s.decodeCryptoContentRequest(w, r, "encryption")
+	if !ok {
 		return
 	}
 
@@ -238,20 +251,8 @@ func (s *APIServer) handleCryptoEncrypt(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *APIServer) handleCryptoDecrypt(w http.ResponseWriter, r *http.Request) {
-	var req cryptoEncryptDecryptRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON body: %v", err))
-		return
-	}
-	key := strings.TrimSpace(req.SecureKey)
-	if key == "" {
-		key = strings.TrimSpace(r.Header.Get("X-Flow-Secure-Key"))
-		if key == "" {
-			key = s.cfg.DefaultSecureKey
-		}
-	}
-	if key == "" {
-		writeJSONError(w, http.StatusBadRequest, "secure_key is required for decryption")
+	req, key, ok := s.decodeCryptoContentRequest(w, r, "decryption")
+	if !ok {
 		return
 	}
 
@@ -285,13 +286,7 @@ func (s *APIServer) handleCryptoSign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	secKey := strings.TrimSpace(req.SecureKey)
-	if secKey == "" {
-		secKey = strings.TrimSpace(r.Header.Get("X-Flow-Secure-Key"))
-		if secKey == "" {
-			secKey = s.cfg.DefaultSecureKey
-		}
-	}
+	secKey := s.resolveRequestSecureKey(r, req.SecureKey)
 
 	encMode := strings.ToLower(strings.TrimSpace(req.EncryptMode))
 	dataToSign := []byte(req.Content)
@@ -394,13 +389,7 @@ func (s *APIServer) handleCryptoVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	secKey := strings.TrimSpace(req.SecureKey)
-	if secKey == "" {
-		secKey = strings.TrimSpace(r.Header.Get("X-Flow-Secure-Key"))
-		if secKey == "" {
-			secKey = s.cfg.DefaultSecureKey
-		}
-	}
+	secKey := s.resolveRequestSecureKey(r, req.SecureKey)
 
 	wasEncrypted := flowcrypto.IsEncryptedPayload(rawBytes)
 

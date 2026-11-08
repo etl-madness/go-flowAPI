@@ -165,38 +165,28 @@ func FetchDatabaseSessionIdentity(ctx context.Context, querier interface {
 	}
 
 	normDriver := strings.ToLower(strings.TrimSpace(dialect))
+	querySession := func(query string) error {
+		var pid sql.NullInt64
+		var u, a sql.NullString
+		e := querier.QueryRowContext(ctx, query).Scan(&pid, &u, &a)
+		spid = pid.Int64
+		dbUser = strings.TrimSpace(u.String)
+		appName = strings.TrimSpace(a.String)
+		return e
+	}
+
 	switch {
 	case strings.Contains(normDriver, "sqlserver") || strings.Contains(normDriver, "mssql") || strings.Contains(normDriver, "azuresql") || strings.Contains(normDriver, "azuread"):
-		var pid sql.NullInt64
-		var u, a sql.NullString
-		err = querier.QueryRowContext(ctx, "SELECT CAST(@@SPID AS BIGINT), CAST(SYSTEM_USER AS NVARCHAR(256)), CAST(ISNULL(APP_NAME(), '') AS NVARCHAR(256))").Scan(&pid, &u, &a)
-		spid = pid.Int64
-		dbUser = strings.TrimSpace(u.String)
-		appName = strings.TrimSpace(a.String)
+		err = querySession("SELECT CAST(@@SPID AS BIGINT), CAST(SYSTEM_USER AS NVARCHAR(256)), CAST(ISNULL(APP_NAME(), '') AS NVARCHAR(256))")
 	case strings.Contains(normDriver, "postgres") || strings.Contains(normDriver, "pq") || strings.Contains(normDriver, "pgx"):
-		var pid sql.NullInt64
-		var u, a sql.NullString
-		err = querier.QueryRowContext(ctx, "SELECT CAST(pg_backend_pid() AS BIGINT), CAST(CURRENT_USER AS TEXT), COALESCE(current_setting('application_name', true), '')").Scan(&pid, &u, &a)
-		spid = pid.Int64
-		dbUser = strings.TrimSpace(u.String)
-		appName = strings.TrimSpace(a.String)
+		err = querySession("SELECT CAST(pg_backend_pid() AS BIGINT), CAST(CURRENT_USER AS TEXT), COALESCE(current_setting('application_name', true), '')")
 	case strings.Contains(normDriver, "mysql") || strings.Contains(normDriver, "mariadb"):
-		var pid sql.NullInt64
-		var u, a sql.NullString
-		err = querier.QueryRowContext(ctx, "SELECT CAST(CONNECTION_ID() AS UNSIGNED), CURRENT_USER(), COALESCE(@@session.program_name, '')").Scan(&pid, &u, &a)
+		err = querySession("SELECT CAST(CONNECTION_ID() AS UNSIGNED), CURRENT_USER(), COALESCE(@@session.program_name, '')")
 		if err != nil {
-			err = querier.QueryRowContext(ctx, "SELECT CAST(CONNECTION_ID() AS UNSIGNED), CURRENT_USER()").Scan(&pid, &u)
+			err = querySession("SELECT CAST(CONNECTION_ID() AS UNSIGNED), CURRENT_USER(), ''")
 		}
-		spid = pid.Int64
-		dbUser = strings.TrimSpace(u.String)
-		appName = strings.TrimSpace(a.String)
 	case strings.Contains(normDriver, "oracle") || strings.Contains(normDriver, "ora") || strings.Contains(normDriver, "godror"):
-		var pid sql.NullInt64
-		var u, a sql.NullString
-		err = querier.QueryRowContext(ctx, "SELECT TO_NUMBER(SYS_CONTEXT('USERENV', 'SID')), SYS_CONTEXT('USERENV', 'SESSION_USER'), COALESCE(SYS_CONTEXT('USERENV', 'MODULE'), SYS_CONTEXT('USERENV', 'CLIENT_PROGRAM_NAME'), '') FROM DUAL").Scan(&pid, &u, &a)
-		spid = pid.Int64
-		dbUser = strings.TrimSpace(u.String)
-		appName = strings.TrimSpace(a.String)
+		err = querySession("SELECT TO_NUMBER(SYS_CONTEXT('USERENV', 'SID')), SYS_CONTEXT('USERENV', 'SESSION_USER'), COALESCE(SYS_CONTEXT('USERENV', 'MODULE'), SYS_CONTEXT('USERENV', 'CLIENT_PROGRAM_NAME'), '') FROM DUAL")
 	case strings.Contains(normDriver, "sqlite"):
 		userName, _ := runtimeIdentity()
 		if userName == "" {

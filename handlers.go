@@ -194,6 +194,104 @@ func (p *artifactPayload) resolvedEncrypted() bool {
 	return p.Encrypted || p.Encrypt
 }
 
+func extractArtifactQuerySecret(r *http.Request, bodyKey string) (decrypt bool, secKey string) {
+	q := r.URL.Query()
+	decrypt = q.Get("decrypt") == "true" || q.Get("decrypt") == "1"
+	secKey = strings.TrimSpace(bodyKey)
+	if secKey == "" {
+		secKey = strings.TrimSpace(q.Get("secure_key"))
+		if secKey == "" {
+			secKey = strings.TrimSpace(r.Header.Get("X-Flow-Secure-Key"))
+		}
+	}
+	return decrypt, secKey
+}
+
+func artifactErrorStatusCode(err error) int {
+	if errors.Is(err, ErrArtifactNotFound) {
+		return http.StatusNotFound
+	}
+	if errors.Is(err, ErrArtifactExists) {
+		return http.StatusConflict
+	}
+	return http.StatusInternalServerError
+}
+
+func (s *APIServer) serveArtifactExport(w http.ResponseWriter, r *http.Request, authUsername, artifactType, auditTarget string, start time.Time, fetch func(decrypt bool, secKey string) (*ArtifactRecord, error)) {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	decrypt, secKey := extractArtifactQuerySecret(r, "")
+	rec, err := fetch(decrypt, secKey)
+	if err != nil {
+		code := artifactErrorStatusCode(err)
+		s.recordArtifactAudit(r, authUsername, "artifact.export", artifactType, auditTarget, code, "ERROR", start, err.Error())
+		writeJSONError(w, code, err.Error())
+		return
+	}
+	s.recordArtifactAudit(r, authUsername, "artifact.export", artifactType, rec.Name, http.StatusOK, "SUCCESS", start, "")
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", rec.Name+".xml"))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(rec.Content))
+}
+
+func (s *APIServer) serveArtifactItemCRUD(
+	w http.ResponseWriter,
+	r *http.Request,
+	authUsername, artifactType, auditTarget string,
+	start time.Time,
+	getFn func(decrypt bool, secKey string) (*ArtifactRecord, error),
+	updateFn func(desc, content string, enc bool, secKey string) (*ArtifactRecord, error),
+	deleteFn func() error,
+	deleteResp map[string]any,
+) {
+	switch r.Method {
+	case http.MethodGet:
+		decrypt, secKey := extractArtifactQuerySecret(r, "")
+		rec, err := getFn(decrypt, secKey)
+		if err != nil {
+			code := artifactErrorStatusCode(err)
+			s.recordArtifactAudit(r, authUsername, "artifact.read", artifactType, auditTarget, code, "ERROR", start, err.Error())
+			writeJSONError(w, code, err.Error())
+			return
+		}
+		s.recordArtifactAudit(r, authUsername, "artifact.read", artifactType, rec.Name, http.StatusOK, "SUCCESS", start, "")
+		writeJSON(w, http.StatusOK, rec)
+
+	case http.MethodPut:
+		var body artifactPayload
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON body: %v", err))
+			return
+		}
+		_, secKey := extractArtifactQuerySecret(r, body.SecureKey)
+		rec, err := updateFn(body.Description, body.resolvedContent(), body.resolvedEncrypted(), secKey)
+		if err != nil {
+			code := artifactErrorStatusCode(err)
+			s.recordArtifactAudit(r, authUsername, "artifact.update", artifactType, auditTarget, code, "ERROR", start, err.Error())
+			writeJSONError(w, code, err.Error())
+			return
+		}
+		s.recordArtifactAudit(r, authUsername, "artifact.update", artifactType, rec.Name, http.StatusOK, "SUCCESS", start, "")
+		writeJSON(w, http.StatusOK, rec)
+
+	case http.MethodDelete:
+		if err := deleteFn(); err != nil {
+			code := artifactErrorStatusCode(err)
+			s.recordArtifactAudit(r, authUsername, "artifact.delete", artifactType, auditTarget, code, "ERROR", start, err.Error())
+			writeJSONError(w, code, err.Error())
+			return
+		}
+		s.recordArtifactAudit(r, authUsername, "artifact.delete", artifactType, auditTarget, http.StatusOK, "SUCCESS", start, "")
+		writeJSON(w, http.StatusOK, deleteResp)
+
+	default:
+		writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	}
+}
+
 func (s *APIServer) dispatchArtifactRequest(w http.ResponseWriter, r *http.Request) {
 	start := time.Now().UTC()
 	user := UserFromContext(r.Context())
@@ -251,13 +349,7 @@ func (s *APIServer) dispatchArtifactRequest(w http.ResponseWriter, r *http.Reque
 				writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON body: %v", err))
 				return
 			}
-			secKey := strings.TrimSpace(body.SecureKey)
-			if secKey == "" {
-				secKey = strings.TrimSpace(r.URL.Query().Get("secure_key"))
-				if secKey == "" {
-					secKey = strings.TrimSpace(r.Header.Get("X-Flow-Secure-Key"))
-				}
-			}
+			_, secKey := extractArtifactQuerySecret(r, body.SecureKey)
 			var rec *ArtifactRecord
 			var err error
 			if body.Upsert || r.URL.Query().Get("upsert") == "true" {
@@ -266,10 +358,7 @@ func (s *APIServer) dispatchArtifactRequest(w http.ResponseWriter, r *http.Reque
 				rec, err = s.CreateArtifact(r.Context(), artifactType, body.Name, body.Description, body.resolvedContent(), body.resolvedEncrypted(), secKey)
 			}
 			if err != nil {
-				code := http.StatusInternalServerError
-				if errors.Is(err, ErrArtifactExists) {
-					code = http.StatusConflict
-				}
+				code := artifactErrorStatusCode(err)
 				s.recordArtifactAudit(r, authUsername, "artifact.create", artifactType, body.Name, code, "ERROR", start, err.Error())
 				writeJSONError(w, code, err.Error())
 				return
@@ -290,189 +379,50 @@ func (s *APIServer) dispatchArtifactRequest(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		idLabel := fmt.Sprintf("id:%d", idVal)
+		getByID := func(decrypt bool, secKey string) (*ArtifactRecord, error) {
+			return s.GetArtifactByID(r.Context(), artifactType, idVal, decrypt, secKey)
+		}
 		if len(parts) == 4 && strings.ToLower(parts[3]) == "export" {
-			if r.Method != http.MethodGet {
-				writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
-				return
-			}
-			decrypt := r.URL.Query().Get("decrypt") == "true" || r.URL.Query().Get("decrypt") == "1"
-			secKey := r.URL.Query().Get("secure_key")
-			if secKey == "" {
-				secKey = r.Header.Get("X-Flow-Secure-Key")
-			}
-			rec, err := s.GetArtifactByID(r.Context(), artifactType, idVal, decrypt, secKey)
-			if err != nil {
-				code := http.StatusInternalServerError
-				if errors.Is(err, ErrArtifactNotFound) {
-					code = http.StatusNotFound
-				}
-				s.recordArtifactAudit(r, authUsername, "artifact.export", artifactType, idLabel, code, "ERROR", start, err.Error())
-				writeJSONError(w, code, err.Error())
-				return
-			}
-			s.recordArtifactAudit(r, authUsername, "artifact.export", artifactType, rec.Name, http.StatusOK, "SUCCESS", start, "")
-			w.Header().Set("Content-Type", "application/xml; charset=utf-8")
-			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", rec.Name+".xml"))
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(rec.Content))
+			s.serveArtifactExport(w, r, authUsername, artifactType, idLabel, start, getByID)
 			return
 		}
-		switch r.Method {
-		case http.MethodGet:
-			decrypt := r.URL.Query().Get("decrypt") == "true" || r.URL.Query().Get("decrypt") == "1"
-			secKey := r.URL.Query().Get("secure_key")
-			if secKey == "" {
-				secKey = r.Header.Get("X-Flow-Secure-Key")
-			}
-			rec, err := s.GetArtifactByID(r.Context(), artifactType, idVal, decrypt, secKey)
-			if err != nil {
-				code := http.StatusInternalServerError
-				if errors.Is(err, ErrArtifactNotFound) {
-					code = http.StatusNotFound
-				}
-				s.recordArtifactAudit(r, authUsername, "artifact.read", artifactType, idLabel, code, "ERROR", start, err.Error())
-				writeJSONError(w, code, err.Error())
-				return
-			}
-			s.recordArtifactAudit(r, authUsername, "artifact.read", artifactType, rec.Name, http.StatusOK, "SUCCESS", start, "")
-			writeJSON(w, http.StatusOK, rec)
-		case http.MethodPut:
-			var body artifactPayload
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON body: %v", err))
-				return
-			}
-			secKey := strings.TrimSpace(body.SecureKey)
-			if secKey == "" {
-				secKey = strings.TrimSpace(r.URL.Query().Get("secure_key"))
-				if secKey == "" {
-					secKey = strings.TrimSpace(r.Header.Get("X-Flow-Secure-Key"))
-				}
-			}
-			rec, err := s.UpdateArtifactByID(r.Context(), artifactType, idVal, body.Description, body.resolvedContent(), body.resolvedEncrypted(), secKey)
-			if err != nil {
-				code := http.StatusInternalServerError
-				if errors.Is(err, ErrArtifactNotFound) {
-					code = http.StatusNotFound
-				}
-				s.recordArtifactAudit(r, authUsername, "artifact.update", artifactType, idLabel, code, "ERROR", start, err.Error())
-				writeJSONError(w, code, err.Error())
-				return
-			}
-			s.recordArtifactAudit(r, authUsername, "artifact.update", artifactType, rec.Name, http.StatusOK, "SUCCESS", start, "")
-			writeJSON(w, http.StatusOK, rec)
-		case http.MethodDelete:
-			if err := s.DeleteArtifactByID(r.Context(), artifactType, idVal); err != nil {
-				code := http.StatusInternalServerError
-				if errors.Is(err, ErrArtifactNotFound) {
-					code = http.StatusNotFound
-				}
-				s.recordArtifactAudit(r, authUsername, "artifact.delete", artifactType, idLabel, code, "ERROR", start, err.Error())
-				writeJSONError(w, code, err.Error())
-				return
-			}
-			s.recordArtifactAudit(r, authUsername, "artifact.delete", artifactType, idLabel, http.StatusOK, "SUCCESS", start, "")
-			writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "type": artifactType, "id": idVal})
-		default:
-			writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
-		}
+		s.serveArtifactItemCRUD(
+			w, r, authUsername, artifactType, idLabel, start,
+			getByID,
+			func(desc, content string, enc bool, secKey string) (*ArtifactRecord, error) {
+				return s.UpdateArtifactByID(r.Context(), artifactType, idVal, desc, content, enc, secKey)
+			},
+			func() error {
+				return s.DeleteArtifactByID(r.Context(), artifactType, idVal)
+			},
+			map[string]any{"deleted": true, "type": artifactType, "id": idVal},
+		)
 		return
 	}
 
 	name := parts[1]
+	getByName := func(decrypt bool, secKey string) (*ArtifactRecord, error) {
+		return s.GetArtifact(r.Context(), artifactType, name, decrypt, secKey)
+	}
 
 	// Route 3: /api/v1/artifacts/{type}/{name}/export (GET raw XML file download)
 	if len(parts) == 3 && strings.ToLower(parts[2]) == "export" {
-		if r.Method != http.MethodGet {
-			writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
-			return
-		}
-		decrypt := r.URL.Query().Get("decrypt") == "true" || r.URL.Query().Get("decrypt") == "1"
-		secKey := r.URL.Query().Get("secure_key")
-		if secKey == "" {
-			secKey = r.Header.Get("X-Flow-Secure-Key")
-		}
-		rec, err := s.GetArtifact(r.Context(), artifactType, name, decrypt, secKey)
-		if err != nil {
-			code := http.StatusInternalServerError
-			if errors.Is(err, ErrArtifactNotFound) {
-				code = http.StatusNotFound
-			}
-			s.recordArtifactAudit(r, authUsername, "artifact.export", artifactType, name, code, "ERROR", start, err.Error())
-			writeJSONError(w, code, err.Error())
-			return
-		}
-		s.recordArtifactAudit(r, authUsername, "artifact.export", artifactType, name, http.StatusOK, "SUCCESS", start, "")
-		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name+".xml"))
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(rec.Content))
+		s.serveArtifactExport(w, r, authUsername, artifactType, name, start, getByName)
 		return
 	}
 
 	// Route 4: /api/v1/artifacts/{type}/{name} (GET, PUT, DELETE)
-	switch r.Method {
-	case http.MethodGet:
-		decrypt := r.URL.Query().Get("decrypt") == "true" || r.URL.Query().Get("decrypt") == "1"
-		secKey := r.URL.Query().Get("secure_key")
-		if secKey == "" {
-			secKey = r.Header.Get("X-Flow-Secure-Key")
-		}
-		rec, err := s.GetArtifact(r.Context(), artifactType, name, decrypt, secKey)
-		if err != nil {
-			code := http.StatusInternalServerError
-			if errors.Is(err, ErrArtifactNotFound) {
-				code = http.StatusNotFound
-			}
-			s.recordArtifactAudit(r, authUsername, "artifact.read", artifactType, name, code, "ERROR", start, err.Error())
-			writeJSONError(w, code, err.Error())
-			return
-		}
-		s.recordArtifactAudit(r, authUsername, "artifact.read", artifactType, name, http.StatusOK, "SUCCESS", start, "")
-		writeJSON(w, http.StatusOK, rec)
-
-	case http.MethodPut:
-		var body artifactPayload
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON body: %v", err))
-			return
-		}
-		secKey := strings.TrimSpace(body.SecureKey)
-		if secKey == "" {
-			secKey = strings.TrimSpace(r.URL.Query().Get("secure_key"))
-			if secKey == "" {
-				secKey = strings.TrimSpace(r.Header.Get("X-Flow-Secure-Key"))
-			}
-		}
-		rec, err := s.UpdateArtifact(r.Context(), artifactType, name, body.Description, body.resolvedContent(), body.resolvedEncrypted(), secKey)
-		if err != nil {
-			code := http.StatusInternalServerError
-			if errors.Is(err, ErrArtifactNotFound) {
-				code = http.StatusNotFound
-			}
-			s.recordArtifactAudit(r, authUsername, "artifact.update", artifactType, name, code, "ERROR", start, err.Error())
-			writeJSONError(w, code, err.Error())
-			return
-		}
-		s.recordArtifactAudit(r, authUsername, "artifact.update", artifactType, name, http.StatusOK, "SUCCESS", start, "")
-		writeJSON(w, http.StatusOK, rec)
-
-	case http.MethodDelete:
-		if err := s.DeleteArtifact(r.Context(), artifactType, name); err != nil {
-			code := http.StatusInternalServerError
-			if errors.Is(err, ErrArtifactNotFound) {
-				code = http.StatusNotFound
-			}
-			s.recordArtifactAudit(r, authUsername, "artifact.delete", artifactType, name, code, "ERROR", start, err.Error())
-			writeJSONError(w, code, err.Error())
-			return
-		}
-		s.recordArtifactAudit(r, authUsername, "artifact.delete", artifactType, name, http.StatusOK, "SUCCESS", start, "")
-		writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "type": artifactType, "name": name})
-
-	default:
-		writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
-	}
+	s.serveArtifactItemCRUD(
+		w, r, authUsername, artifactType, name, start,
+		getByName,
+		func(desc, content string, enc bool, secKey string) (*ArtifactRecord, error) {
+			return s.UpdateArtifact(r.Context(), artifactType, name, desc, content, enc, secKey)
+		},
+		func() error {
+			return s.DeleteArtifact(r.Context(), artifactType, name)
+		},
+		map[string]any{"deleted": true, "type": artifactType, "name": name},
+	)
 }
 
 func (s *APIServer) handleArtifactUpload(w http.ResponseWriter, r *http.Request, artifactType, authUsername string, start time.Time) {
@@ -564,6 +514,18 @@ func (s *APIServer) recordArtifactAudit(r *http.Request, authUser, evtType, arti
 	})
 }
 
+func parsePositiveQueryID(qVal, paramName string) (int64, error) {
+	v := strings.TrimSpace(qVal)
+	if v == "" {
+		return 0, nil
+	}
+	idVal, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || idVal <= 0 {
+		return 0, fmt.Errorf("invalid %s query parameter %q: must be a positive integer", paramName, v)
+	}
+	return idVal, nil
+}
+
 func parseExecutionRequest(r *http.Request) (ExecutionRequest, error) {
 	var req ExecutionRequest
 	if r.Body != nil && r.ContentLength != 0 {
@@ -578,40 +540,22 @@ func parseExecutionRequest(r *http.Request) (ExecutionRequest, error) {
 			req.ArtifactType = strings.TrimSpace(q.Get("type"))
 		}
 	}
-	if req.ID <= 0 {
-		if v := strings.TrimSpace(q.Get("id")); v != "" {
-			idVal, err := strconv.ParseInt(v, 10, 64)
-			if err != nil || idVal <= 0 {
-				return req, fmt.Errorf("invalid id query parameter %q: must be a positive integer", v)
-			}
-			req.ID = idVal
-		}
+	idTargets := []struct {
+		dest *int64
+		name string
+	}{
+		{&req.ID, "id"},
+		{&req.PipelineID, "pipeline_id"},
+		{&req.OptionsID, "options_id"},
+		{&req.ConfigID, "config_id"},
 	}
-	if req.PipelineID <= 0 {
-		if v := strings.TrimSpace(q.Get("pipeline_id")); v != "" {
-			idVal, err := strconv.ParseInt(v, 10, 64)
-			if err != nil || idVal <= 0 {
-				return req, fmt.Errorf("invalid pipeline_id query parameter %q: must be a positive integer", v)
+	for _, tgt := range idTargets {
+		if *tgt.dest <= 0 {
+			idVal, err := parsePositiveQueryID(q.Get(tgt.name), tgt.name)
+			if err != nil {
+				return req, err
 			}
-			req.PipelineID = idVal
-		}
-	}
-	if req.OptionsID <= 0 {
-		if v := strings.TrimSpace(q.Get("options_id")); v != "" {
-			idVal, err := strconv.ParseInt(v, 10, 64)
-			if err != nil || idVal <= 0 {
-				return req, fmt.Errorf("invalid options_id query parameter %q: must be a positive integer", v)
-			}
-			req.OptionsID = idVal
-		}
-	}
-	if req.ConfigID <= 0 {
-		if v := strings.TrimSpace(q.Get("config_id")); v != "" {
-			idVal, err := strconv.ParseInt(v, 10, 64)
-			if err != nil || idVal <= 0 {
-				return req, fmt.Errorf("invalid config_id query parameter %q: must be a positive integer", v)
-			}
-			req.ConfigID = idVal
+			*tgt.dest = idVal
 		}
 	}
 	if req.File == "" {
@@ -682,6 +626,18 @@ func describeExecutionTarget(req ExecutionRequest) (artifactType, artifactName s
 	return artifactType, artifactName
 }
 
+func parseTypeAndIDPair(typeRaw, idRaw string) (string, int64, error) {
+	_, _, canonicalType, err := ResolveArtifactTarget(typeRaw)
+	if err != nil {
+		return "", 0, err
+	}
+	idVal, err := strconv.ParseInt(strings.TrimSpace(idRaw), 10, 64)
+	if err != nil || idVal <= 0 {
+		return "", 0, fmt.Errorf("invalid artifact ID %q: must be a positive integer", idRaw)
+	}
+	return canonicalType, idVal, nil
+}
+
 // handleExecuteRouter dispatches:
 //   - /api/v1/execute/stream (or /api/v1/execution/stream)
 //   - /api/v1/execute/{type}/{id} (or /api/v1/execution/{type}/{id})
@@ -707,14 +663,9 @@ func (s *APIServer) handleExecuteRouter(w http.ResponseWriter, r *http.Request) 
 	parts := strings.Split(rel, "/")
 	// Pattern 1: /api/v1/execute/stream/{type}/{id}
 	if len(parts) == 3 && strings.EqualFold(parts[0], "stream") {
-		_, _, canonicalType, err := ResolveArtifactTarget(parts[1])
+		canonicalType, idVal, err := parseTypeAndIDPair(parts[1], parts[2])
 		if err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		idVal, err := strconv.ParseInt(strings.TrimSpace(parts[2]), 10, 64)
-		if err != nil || idVal <= 0 {
-			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid artifact ID %q: must be a positive integer", parts[2]))
 			return
 		}
 		s.executeStreamWithTarget(w, r, canonicalType, idVal)
@@ -723,14 +674,9 @@ func (s *APIServer) handleExecuteRouter(w http.ResponseWriter, r *http.Request) 
 
 	// Pattern 2: /api/v1/execute/{type}/{id}/stream
 	if len(parts) == 3 && strings.EqualFold(parts[2], "stream") {
-		_, _, canonicalType, err := ResolveArtifactTarget(parts[0])
+		canonicalType, idVal, err := parseTypeAndIDPair(parts[0], parts[1])
 		if err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		idVal, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
-		if err != nil || idVal <= 0 {
-			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid artifact ID %q: must be a positive integer", parts[1]))
 			return
 		}
 		s.executeStreamWithTarget(w, r, canonicalType, idVal)
@@ -739,14 +685,9 @@ func (s *APIServer) handleExecuteRouter(w http.ResponseWriter, r *http.Request) 
 
 	// Pattern 3: /api/v1/execute/{type}/{id}
 	if len(parts) == 2 {
-		_, _, canonicalType, err := ResolveArtifactTarget(parts[0])
+		canonicalType, idVal, err := parseTypeAndIDPair(parts[0], parts[1])
 		if err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		idVal, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
-		if err != nil || idVal <= 0 {
-			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid artifact ID %q: must be a positive integer", parts[1]))
 			return
 		}
 		s.executeSyncWithTarget(w, r, canonicalType, idVal)
@@ -766,20 +707,58 @@ func (s *APIServer) handleValidateRouter(w http.ResponseWriter, r *http.Request)
 	}
 	parts := strings.Split(rel, "/")
 	if len(parts) == 2 {
-		_, _, canonicalType, err := ResolveArtifactTarget(parts[0])
+		canonicalType, idVal, err := parseTypeAndIDPair(parts[0], parts[1])
 		if err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		idVal, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
-		if err != nil || idVal <= 0 {
-			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid artifact ID %q: must be a positive integer", parts[1]))
 			return
 		}
 		s.validateWithTarget(w, r, canonicalType, idVal)
 		return
 	}
 	writeJSONError(w, http.StatusBadRequest, "expected /api/v1/validate/{type}/{id}")
+}
+
+func authUsernameFromRequest(r *http.Request) string {
+	if user := UserFromContext(r.Context()); user != nil {
+		return user.Username
+	}
+	return ""
+}
+
+func (s *APIServer) prepareExecutionRequest(w http.ResponseWriter, r *http.Request, targetType string, targetID int64, errPrefix string) (ExecutionRequest, string, string, string, time.Time, bool) {
+	start := time.Now().UTC()
+	authUser := authUsernameFromRequest(r)
+	req, err := parseExecutionRequest(r)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid %s request: %v", errPrefix, err))
+		return req, "", "", "", start, false
+	}
+	if targetType != "" {
+		req.ArtifactType = targetType
+	}
+	if targetID > 0 {
+		req.ID = targetID
+	}
+	artType, artName := describeExecutionTarget(req)
+	return req, artType, artName, authUser, start, true
+}
+
+func (s *APIServer) recordExecutionAudit(r *http.Request, evtType, artType, artName, runID, authUser string, statusCode int, status string, start time.Time, errMsg string) {
+	s.logAPIEvent(r.Context(), APIAuditEvent{
+		OccurredAt:   start,
+		EventType:    evtType,
+		HTTPMethod:   r.Method,
+		Path:         r.URL.Path,
+		ArtifactType: artType,
+		ArtifactName: artName,
+		RunID:        runID,
+		AuthUser:     authUser,
+		RemoteAddr:   r.RemoteAddr,
+		StatusCode:   statusCode,
+		Status:       status,
+		DurationMs:   time.Since(start).Milliseconds(),
+		ErrorMessage: errMsg,
+	})
 }
 
 func (s *APIServer) handleExecuteSync(w http.ResponseWriter, r *http.Request) {
@@ -791,43 +770,14 @@ func (s *APIServer) executeSyncWithTarget(w http.ResponseWriter, r *http.Request
 		writeJSONError(w, http.StatusMethodNotAllowed, "Use POST for synchronous execution")
 		return
 	}
-	start := time.Now().UTC()
-	user := UserFromContext(r.Context())
-	authUser := ""
-	if user != nil {
-		authUser = user.Username
-	}
-
-	req, err := parseExecutionRequest(r)
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid execution request: %v", err))
+	req, artType, artName, authUser, start, ok := s.prepareExecutionRequest(w, r, targetType, targetID, "execution")
+	if !ok {
 		return
 	}
-	if targetType != "" {
-		req.ArtifactType = targetType
-	}
-	if targetID > 0 {
-		req.ID = targetID
-	}
-
-	artType, artName := describeExecutionTarget(req)
 
 	resp, execErr := s.ExecutePipeline(r.Context(), req, nil)
 	if resp == nil && execErr != nil {
-		s.logAPIEvent(r.Context(), APIAuditEvent{
-			OccurredAt:   start,
-			EventType:    "pipeline.execute",
-			HTTPMethod:   r.Method,
-			Path:         r.URL.Path,
-			ArtifactType: artType,
-			ArtifactName: artName,
-			AuthUser:     authUser,
-			RemoteAddr:   r.RemoteAddr,
-			StatusCode:   http.StatusBadRequest,
-			Status:       "ERROR",
-			DurationMs:   time.Since(start).Milliseconds(),
-			ErrorMessage: execErr.Error(),
-		})
+		s.recordExecutionAudit(r, "pipeline.execute", artType, artName, "", authUser, http.StatusBadRequest, "ERROR", start, execErr.Error())
 		writeJSONError(w, http.StatusBadRequest, execErr.Error())
 		return
 	}
@@ -841,22 +791,7 @@ func (s *APIServer) executeSyncWithTarget(w http.ResponseWriter, r *http.Request
 		errMsg = execErr.Error()
 	}
 
-	s.logAPIEvent(r.Context(), APIAuditEvent{
-		OccurredAt:   start,
-		EventType:    "pipeline.execute",
-		HTTPMethod:   r.Method,
-		Path:         r.URL.Path,
-		ArtifactType: artType,
-		ArtifactName: artName,
-		RunID:        resp.RunID,
-		AuthUser:     authUser,
-		RemoteAddr:   r.RemoteAddr,
-		StatusCode:   statusCode,
-		Status:       statusLabel,
-		DurationMs:   time.Since(start).Milliseconds(),
-		ErrorMessage: errMsg,
-	})
-
+	s.recordExecutionAudit(r, "pipeline.execute", artType, artName, resp.RunID, authUser, statusCode, statusLabel, start, errMsg)
 	writeJSON(w, statusCode, resp)
 }
 
@@ -869,62 +804,21 @@ func (s *APIServer) validateWithTarget(w http.ResponseWriter, r *http.Request, t
 		writeJSONError(w, http.StatusMethodNotAllowed, "Use POST for /api/v1/validate")
 		return
 	}
-	start := time.Now().UTC()
-	user := UserFromContext(r.Context())
-	authUser := ""
-	if user != nil {
-		authUser = user.Username
-	}
-
-	req, err := parseExecutionRequest(r)
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid validation request: %v", err))
+	req, artType, artName, authUser, start, ok := s.prepareExecutionRequest(w, r, targetType, targetID, "validation")
+	if !ok {
 		return
 	}
-	if targetType != "" {
-		req.ArtifactType = targetType
-	}
-	if targetID > 0 {
-		req.ID = targetID
-	}
 	req.Validate = true
-
-	artType, artName := describeExecutionTarget(req)
+	artType, artName = describeExecutionTarget(req)
 
 	resp, valErr := s.ExecutePipeline(r.Context(), req, nil)
 	if valErr != nil {
-		s.logAPIEvent(r.Context(), APIAuditEvent{
-			OccurredAt:   start,
-			EventType:    "pipeline.validate",
-			HTTPMethod:   r.Method,
-			Path:         r.URL.Path,
-			ArtifactType: artType,
-			ArtifactName: artName,
-			AuthUser:     authUser,
-			RemoteAddr:   r.RemoteAddr,
-			StatusCode:   http.StatusUnprocessableEntity,
-			Status:       "INVALID",
-			DurationMs:   time.Since(start).Milliseconds(),
-			ErrorMessage: valErr.Error(),
-		})
+		s.recordExecutionAudit(r, "pipeline.validate", artType, artName, "", authUser, http.StatusUnprocessableEntity, "INVALID", start, valErr.Error())
 		writeJSONError(w, http.StatusUnprocessableEntity, valErr.Error())
 		return
 	}
 
-	s.logAPIEvent(r.Context(), APIAuditEvent{
-		OccurredAt:   start,
-		EventType:    "pipeline.validate",
-		HTTPMethod:   r.Method,
-		Path:         r.URL.Path,
-		ArtifactType: artType,
-		ArtifactName: artName,
-		RunID:        resp.RunID,
-		AuthUser:     authUser,
-		RemoteAddr:   r.RemoteAddr,
-		StatusCode:   http.StatusOK,
-		Status:       "VALID",
-		DurationMs:   time.Since(start).Milliseconds(),
-	})
+	s.recordExecutionAudit(r, "pipeline.validate", artType, artName, resp.RunID, authUser, http.StatusOK, "VALID", start, "")
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -937,26 +831,10 @@ func (s *APIServer) executeStreamWithTarget(w http.ResponseWriter, r *http.Reque
 		writeJSONError(w, http.StatusMethodNotAllowed, "Use POST or GET for streaming execution")
 		return
 	}
-	start := time.Now().UTC()
-	user := UserFromContext(r.Context())
-	authUser := ""
-	if user != nil {
-		authUser = user.Username
-	}
-
-	req, err := parseExecutionRequest(r)
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid stream request: %v", err))
+	req, artType, artName, authUser, start, ok := s.prepareExecutionRequest(w, r, targetType, targetID, "stream")
+	if !ok {
 		return
 	}
-	if targetType != "" {
-		req.ArtifactType = targetType
-	}
-	if targetID > 0 {
-		req.ID = targetID
-	}
-
-	artType, artName := describeExecutionTarget(req)
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -995,21 +873,7 @@ func (s *APIServer) executeStreamWithTarget(w http.ResponseWriter, r *http.Reque
 	}
 
 	if execErr != nil {
-		s.logAPIEvent(r.Context(), APIAuditEvent{
-			OccurredAt:   start,
-			EventType:    "pipeline.stream",
-			HTTPMethod:   r.Method,
-			Path:         r.URL.Path,
-			ArtifactType: artType,
-			ArtifactName: artName,
-			RunID:        runID,
-			AuthUser:     authUser,
-			RemoteAddr:   r.RemoteAddr,
-			StatusCode:   http.StatusUnprocessableEntity,
-			Status:       "FAILED",
-			DurationMs:   time.Since(start).Milliseconds(),
-			ErrorMessage: execErr.Error(),
-		})
+		s.recordExecutionAudit(r, "pipeline.stream", artType, artName, runID, authUser, http.StatusUnprocessableEntity, "FAILED", start, execErr.Error())
 		sendSSE("done", map[string]any{
 			"type":     "done",
 			"run_id":   runID,
@@ -1020,20 +884,7 @@ func (s *APIServer) executeStreamWithTarget(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	s.logAPIEvent(r.Context(), APIAuditEvent{
-		OccurredAt:   start,
-		EventType:    "pipeline.stream",
-		HTTPMethod:   r.Method,
-		Path:         r.URL.Path,
-		ArtifactType: artType,
-		ArtifactName: artName,
-		RunID:        runID,
-		AuthUser:     authUser,
-		RemoteAddr:   r.RemoteAddr,
-		StatusCode:   http.StatusOK,
-		Status:       "SUCCESS",
-		DurationMs:   time.Since(start).Milliseconds(),
-	})
+	s.recordExecutionAudit(r, "pipeline.stream", artType, artName, runID, authUser, http.StatusOK, "SUCCESS", start, "")
 	sendSSE("done", map[string]any{
 		"type":     "done",
 		"run_id":   runID,
@@ -1045,11 +896,7 @@ func (s *APIServer) executeStreamWithTarget(w http.ResponseWriter, r *http.Reque
 
 func (s *APIServer) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	start := time.Now().UTC()
-	user := UserFromContext(r.Context())
-	authUser := ""
-	if user != nil {
-		authUser = user.Username
-	}
+	authUser := authUsernameFromRequest(r)
 
 	statusFilter := r.URL.Query().Get("status")
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -1066,11 +913,7 @@ func (s *APIServer) handleListRuns(w http.ResponseWriter, r *http.Request) {
 
 func (s *APIServer) handleListEvents(w http.ResponseWriter, r *http.Request) {
 	start := time.Now().UTC()
-	user := UserFromContext(r.Context())
-	authUser := ""
-	if user != nil {
-		authUser = user.Username
-	}
+	authUser := authUsernameFromRequest(r)
 
 	runID := r.URL.Query().Get("run_id")
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -1087,11 +930,7 @@ func (s *APIServer) handleListEvents(w http.ResponseWriter, r *http.Request) {
 
 func (s *APIServer) handleListAPIEvents(w http.ResponseWriter, r *http.Request) {
 	start := time.Now().UTC()
-	user := UserFromContext(r.Context())
-	authUser := ""
-	if user != nil {
-		authUser = user.Username
-	}
+	authUser := authUsernameFromRequest(r)
 
 	evtType := r.URL.Query().Get("event_type")
 	filterUser := r.URL.Query().Get("auth_user")

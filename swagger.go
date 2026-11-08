@@ -109,9 +109,192 @@ func (s *APIServer) handleOpenAPISpec(w http.ResponseWriter, r *http.Request) {
 	_ = enc.Encode(spec)
 }
 
+func oaiRef(target string) map[string]any {
+	return map[string]any{"$ref": target}
+}
+
+func oaiProp(typ string, desc string, example any) map[string]any {
+	m := map[string]any{"type": typ}
+	if desc != "" {
+		m["description"] = desc
+	}
+	if example != nil {
+		m["example"] = example
+	}
+	return m
+}
+
+func oaiBoolProp(defaultVal bool, desc string) map[string]any {
+	m := map[string]any{"type": "boolean", "default": defaultVal}
+	if desc != "" {
+		m["description"] = desc
+	}
+	return m
+}
+
+func oaiEnumProp(typ string, enum []string, defaultVal any, desc string, example any) map[string]any {
+	m := oaiProp(typ, desc, example)
+	m["enum"] = enum
+	if defaultVal != nil {
+		m["default"] = defaultVal
+	}
+	return m
+}
+
+func oaiQueryParam(name, typ, desc string, defVal any) map[string]any {
+	schema := map[string]any{"type": typ}
+	if defVal != nil {
+		schema["default"] = defVal
+	}
+	return map[string]any{
+		"name":        name,
+		"in":          "query",
+		"description": desc,
+		"required":    false,
+		"schema":      schema,
+	}
+}
+
+func oaiJSONBody(schemaRef string, required bool) map[string]any {
+	return map[string]any{
+		"required": required,
+		"content": map[string]any{
+			"application/json": map[string]any{
+				"schema": oaiRef(schemaRef),
+			},
+		},
+	}
+}
+
+func oaiJSONResp(desc string, schema map[string]any) map[string]any {
+	return map[string]any{
+		"description": desc,
+		"content": map[string]any{
+			"application/json": map[string]any{
+				"schema": schema,
+			},
+		},
+	}
+}
+
+func oaiContentResp(desc, mediaType string, schema map[string]any) map[string]any {
+	return map[string]any{
+		"description": desc,
+		"content": map[string]any{
+			mediaType: map[string]any{
+				"schema": schema,
+			},
+		},
+	}
+}
+
+func oaiWithCommonResponses(base map[string]any, codes ...string) map[string]any {
+	codeToRef := map[string]string{
+		"400": "#/components/responses/BadRequest",
+		"401": "#/components/responses/Unauthorized",
+		"403": "#/components/responses/Forbidden",
+		"404": "#/components/responses/NotFound",
+		"409": "#/components/responses/Conflict",
+		"422": "#/components/responses/UnprocessableEntity",
+		"502": "#/components/responses/BadRequest",
+	}
+	for _, c := range codes {
+		if ref, ok := codeToRef[c]; ok {
+			base[c] = oaiRef(ref)
+		}
+	}
+	return base
+}
+
+type oaiOpSpec struct {
+	tag         string
+	summary     string
+	description string
+	operationID string
+	params      []map[string]any
+	body        map[string]any
+	responses   map[string]any
+	noAuth      bool
+}
+
+func buildOAIOp(spec oaiOpSpec) map[string]any {
+	op := map[string]any{
+		"tags":        []string{spec.tag},
+		"summary":     spec.summary,
+		"description": spec.description,
+		"operationId": spec.operationID,
+		"responses":   spec.responses,
+	}
+	if len(spec.params) > 0 {
+		op["parameters"] = spec.params
+	}
+	if spec.body != nil {
+		op["requestBody"] = spec.body
+	}
+	if spec.noAuth {
+		op["security"] = []map[string]any{}
+	}
+	return op
+}
+
+func buildArtifactItemPathItem(paramRef, idSuffix, targetDesc, delKey string, delExample any) map[string]any {
+	baseParams := []map[string]any{
+		oaiRef("#/components/parameters/ArtifactTypeParam"),
+		oaiRef(paramRef),
+	}
+	getParams := append(append([]map[string]any{}, baseParams...),
+		oaiQueryParam("decrypt", "boolean", "Decrypt encrypted payload before returning", false),
+		oaiQueryParam("secure_key", "string", "Optional encryption/decryption passphrase (or pass via `X-Flow-Secure-Key` header)", nil),
+	)
+	errCodesGet := []string{"401", "403", "404"}
+	if idSuffix != "" {
+		errCodesGet = []string{"400", "401", "403", "404"}
+	}
+	return map[string]any{
+		"get": buildOAIOp(oaiOpSpec{
+			tag:         "Artifacts",
+			summary:     "Get a single artifact by " + targetDesc,
+			description: "Fetches an artifact record by " + targetDesc + ". Optionally decrypts encrypted content when `decrypt=true` is passed. Requires `read-only`, `write`, `upload`, or `all` permission.",
+			operationID: "getArtifact" + idSuffix,
+			params:      getParams,
+			responses: oaiWithCommonResponses(map[string]any{
+				"200": oaiJSONResp("Artifact record", oaiRef("#/components/schemas/ArtifactRecord")),
+			}, errCodesGet...),
+		}),
+		"put": buildOAIOp(oaiOpSpec{
+			tag:         "Artifacts",
+			summary:     "Update an existing artifact by " + targetDesc,
+			description: "Updates an existing `pipeline`, `options`, or `config` artifact by " + targetDesc + ". Requires `write`, `upload`, or `all` permission.",
+			operationID: "updateArtifact" + idSuffix,
+			params:      baseParams,
+			body:        oaiJSONBody("#/components/schemas/ArtifactPayload", true),
+			responses: oaiWithCommonResponses(map[string]any{
+				"200": oaiJSONResp("Updated artifact record", oaiRef("#/components/schemas/ArtifactRecord")),
+			}, "400", "401", "403", "404"),
+		}),
+		"delete": buildOAIOp(oaiOpSpec{
+			tag:         "Artifacts",
+			summary:     "Delete an artifact by " + targetDesc,
+			description: "Deletes an artifact by " + targetDesc + ". Requires `write`, `upload`, or `all` permission.",
+			operationID: "deleteArtifact" + idSuffix,
+			params:      baseParams,
+			responses: oaiWithCommonResponses(map[string]any{
+				"200": oaiJSONResp("Artifact deleted", map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"deleted": oaiProp("boolean", "", true),
+						"type":    oaiProp("string", "", "pipeline"),
+						delKey:    oaiProp( map[bool]string{true: "integer", false: "string"}[delKey == "id"], "", delExample),
+					},
+				}),
+			}, "401", "403", "404"),
+		}),
+	}
+}
+
 // BuildOpenAPISpec constructs the OpenAPI 3.0.3 specification for go-flowAPI.
 func (s *APIServer) BuildOpenAPISpec(r *http.Request) map[string]any {
-	serverURL := ""
+	serverURL := "http://localhost:8080"
 	if r != nil && strings.TrimSpace(r.Host) != "" {
 		scheme := "http"
 		if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
@@ -125,8 +308,30 @@ func (s *APIServer) BuildOpenAPISpec(r *http.Request) map[string]any {
 		} else {
 			serverURL = "http://" + addr
 		}
-	} else {
-		serverURL = "http://localhost:8080"
+	}
+
+	typeAndIDParams := []map[string]any{
+		oaiRef("#/components/parameters/ArtifactTypeParam"),
+		oaiRef("#/components/parameters/ArtifactIDParam"),
+	}
+
+	execRespMap := func(okDesc string) map[string]any {
+		return oaiWithCommonResponses(map[string]any{
+			"200": oaiJSONResp(okDesc, oaiRef("#/components/schemas/ExecutionResponse")),
+			"422": oaiJSONResp("Pipeline execution failed", oaiRef("#/components/schemas/ExecutionResponse")),
+		}, "400", "401", "403")
+	}
+
+	sseRespMap := func() map[string]any {
+		return oaiWithCommonResponses(map[string]any{
+			"200": oaiContentResp("SSE event stream (`event: node_event`, `event: done`)", "text/event-stream", oaiProp("string", "", nil)),
+		}, "400", "401", "403")
+	}
+
+	validateRespMap := func(okDesc string) map[string]any {
+		return oaiWithCommonResponses(map[string]any{
+			"200": oaiJSONResp(okDesc, oaiRef("#/components/schemas/ExecutionResponse")),
+		}, "400", "401", "403", "422")
 	}
 
 	return map[string]any{
@@ -147,10 +352,7 @@ func (s *APIServer) BuildOpenAPISpec(r *http.Request) map[string]any {
 				"| `all` | Full administrative access to all endpoints including `/api/v1/users` and `/api/v1/databases/test` |",
 		},
 		"servers": []map[string]any{
-			{
-				"url":         serverURL,
-				"description": "Active go-flowAPI Server",
-			},
+			{"url": serverURL, "description": "Active go-flowAPI Server"},
 		},
 		"security": []map[string]any{
 			{"basicAuth": []string{}},
@@ -165,1003 +367,461 @@ func (s *APIServer) BuildOpenAPISpec(r *http.Request) map[string]any {
 		},
 		"paths": map[string]any{
 			"/api/v1/health": map[string]any{
-				"get": map[string]any{
-					"tags":        []string{"System"},
-					"summary":     "Health check and active database session identity",
-					"description": "Returns server status, database dialect, session SPID/user/application_name, and configured table names. Publicly accessible without BasicAuth (if BasicAuth credentials are supplied, `authenticated_as` and `permission` are also populated).",
-					"operationId": "getHealth",
-					"security":    []map[string]any{},
-					"responses": map[string]any{
-						"200": map[string]any{
-							"description": "Server and database health details",
-							"content": map[string]any{
-								"application/json": map[string]any{
-									"schema": map[string]any{"$ref": "#/components/schemas/HealthResponse"},
-								},
-							},
-						},
+				"get": buildOAIOp(oaiOpSpec{
+					tag:         "System",
+					summary:     "Health check and active database session identity",
+					description: "Returns server status, database dialect, session SPID/user/application_name, and configured table names. Publicly accessible without BasicAuth (if BasicAuth credentials are supplied, `authenticated_as` and `permission` are also populated).",
+					operationID: "getHealth",
+					noAuth:      true,
+					responses: map[string]any{
+						"200": oaiJSONResp("Server and database health details", oaiRef("#/components/schemas/HealthResponse")),
 					},
-				},
+				}),
 			},
 			"/api/v1/artifacts/{type}": map[string]any{
-				"get": map[string]any{
-					"tags":        []string{"Artifacts"},
-					"summary":     "List artifacts by type",
-					"description": "Lists all stored artifacts of the specified type (`pipeline`, `options`, or `config`). Requires `read-only`, `write`, `upload`, or `all` permission.",
-					"operationId": "listArtifacts",
-					"parameters": []map[string]any{
-						{"$ref": "#/components/parameters/ArtifactTypeParam"},
-						{
-							"name":        "include_content",
-							"in":          "query",
-							"description": "When `true` or `1`, includes the full XML `content` in each returned record",
-							"required":    false,
-							"schema":      map[string]any{"type": "boolean", "default": false},
-						},
+				"get": buildOAIOp(oaiOpSpec{
+					tag:         "Artifacts",
+					summary:     "List artifacts by type",
+					description: "Lists all stored artifacts of the specified type (`pipeline`, `options`, or `config`). Requires `read-only`, `write`, `upload`, or `all` permission.",
+					operationID: "listArtifacts",
+					params: []map[string]any{
+						oaiRef("#/components/parameters/ArtifactTypeParam"),
+						oaiQueryParam("include_content", "boolean", "When `true` or `1`, includes the full XML `content` in each returned record", false),
 					},
-					"responses": map[string]any{
-						"200": map[string]any{
-							"description": "List of artifacts",
-							"content": map[string]any{
-								"application/json": map[string]any{
-									"schema": map[string]any{"$ref": "#/components/schemas/ArtifactListResponse"},
-								},
-							},
-						},
-						"400": map[string]any{"$ref": "#/components/responses/BadRequest"},
-						"401": map[string]any{"$ref": "#/components/responses/Unauthorized"},
-						"403": map[string]any{"$ref": "#/components/responses/Forbidden"},
+					responses: oaiWithCommonResponses(map[string]any{
+						"200": oaiJSONResp("List of artifacts", oaiRef("#/components/schemas/ArtifactListResponse")),
+					}, "400", "401", "403"),
+				}),
+				"post": buildOAIOp(oaiOpSpec{
+					tag:         "Artifacts",
+					summary:     "Create (or upsert) an artifact via JSON payload",
+					description: "Creates a new `pipeline`, `options`, or `config` artifact in the database. Set `upsert: true` (in JSON or query param) to overwrite if it already exists. Requires `write`, `upload`, or `all` permission.",
+					operationID: "createArtifact",
+					params: []map[string]any{
+						oaiRef("#/components/parameters/ArtifactTypeParam"),
+						oaiQueryParam("upsert", "boolean", "When `true`, updates the artifact if it already exists instead of returning 409 Conflict", false),
 					},
-				},
-				"post": map[string]any{
-					"tags":        []string{"Artifacts"},
-					"summary":     "Create (or upsert) an artifact via JSON payload",
-					"description": "Creates a new `pipeline`, `options`, or `config` artifact in the database. Set `upsert: true` (in JSON or query param) to overwrite if it already exists. Requires `write`, `upload`, or `all` permission.",
-					"operationId": "createArtifact",
-					"parameters": []map[string]any{
-						{"$ref": "#/components/parameters/ArtifactTypeParam"},
-						{
-							"name":        "upsert",
-							"in":          "query",
-							"description": "When `true`, updates the artifact if it already exists instead of returning 409 Conflict",
-							"required":    false,
-							"schema":      map[string]any{"type": "boolean", "default": false},
-						},
-					},
-					"requestBody": map[string]any{
-						"required": true,
-						"content": map[string]any{
-							"application/json": map[string]any{
-								"schema": map[string]any{"$ref": "#/components/schemas/ArtifactPayload"},
-							},
-						},
-					},
-					"responses": map[string]any{
-						"201": map[string]any{
-							"description": "Artifact created",
-							"content": map[string]any{
-								"application/json": map[string]any{
-									"schema": map[string]any{"$ref": "#/components/schemas/ArtifactRecord"},
-								},
-							},
-						},
-						"400": map[string]any{"$ref": "#/components/responses/BadRequest"},
-						"401": map[string]any{"$ref": "#/components/responses/Unauthorized"},
-						"403": map[string]any{"$ref": "#/components/responses/Forbidden"},
-						"409": map[string]any{"$ref": "#/components/responses/Conflict"},
-					},
-				},
+					body: oaiJSONBody("#/components/schemas/ArtifactPayload", true),
+					responses: oaiWithCommonResponses(map[string]any{
+						"201": oaiJSONResp("Artifact created", oaiRef("#/components/schemas/ArtifactRecord")),
+					}, "400", "401", "403", "409"),
+				}),
 			},
 			"/api/v1/artifacts/{type}/upload": buildUploadPathItem("uploadArtifactViaArtifactsRoute"),
-			"/api/v1/upload/{type}":          buildUploadPathItem("uploadArtifact"),
-			"/api/v1/artifacts/{type}/{name}": map[string]any{
-				"get": map[string]any{
-					"tags":        []string{"Artifacts"},
-					"summary":     "Get a single artifact by name",
-					"description": "Fetches an artifact record by name. Optionally decrypts encrypted content when `decrypt=true` is passed. Requires `read-only`, `write`, `upload`, or `all` permission.",
-					"operationId": "getArtifact",
-					"parameters": []map[string]any{
-						{"$ref": "#/components/parameters/ArtifactTypeParam"},
-						{"$ref": "#/components/parameters/ArtifactNameParam"},
-						{
-							"name":        "decrypt",
-							"in":          "query",
-							"description": "Decrypt encrypted payload before returning",
-							"required":    false,
-							"schema":      map[string]any{"type": "boolean", "default": false},
-						},
-						{
-							"name":        "secure_key",
-							"in":          "query",
-							"description": "Optional encryption/decryption passphrase (or pass via `X-Flow-Secure-Key` header)",
-							"required":    false,
-							"schema":      map[string]any{"type": "string"},
-						},
-					},
-					"responses": map[string]any{
-						"200": map[string]any{
-							"description": "Artifact record",
-							"content": map[string]any{
-								"application/json": map[string]any{
-									"schema": map[string]any{"$ref": "#/components/schemas/ArtifactRecord"},
-								},
-							},
-						},
-						"401": map[string]any{"$ref": "#/components/responses/Unauthorized"},
-						"403": map[string]any{"$ref": "#/components/responses/Forbidden"},
-						"404": map[string]any{"$ref": "#/components/responses/NotFound"},
-					},
-				},
-				"put": map[string]any{
-					"tags":        []string{"Artifacts"},
-					"summary":     "Update an existing artifact by name",
-					"description": "Updates an existing `pipeline`, `options`, or `config` artifact. Requires `write`, `upload`, or `all` permission.",
-					"operationId": "updateArtifact",
-					"parameters": []map[string]any{
-						{"$ref": "#/components/parameters/ArtifactTypeParam"},
-						{"$ref": "#/components/parameters/ArtifactNameParam"},
-					},
-					"requestBody": map[string]any{
-						"required": true,
-						"content": map[string]any{
-							"application/json": map[string]any{
-								"schema": map[string]any{"$ref": "#/components/schemas/ArtifactPayload"},
-							},
-						},
-					},
-					"responses": map[string]any{
-						"200": map[string]any{
-							"description": "Updated artifact record",
-							"content": map[string]any{
-								"application/json": map[string]any{
-									"schema": map[string]any{"$ref": "#/components/schemas/ArtifactRecord"},
-								},
-							},
-						},
-						"400": map[string]any{"$ref": "#/components/responses/BadRequest"},
-						"401": map[string]any{"$ref": "#/components/responses/Unauthorized"},
-						"403": map[string]any{"$ref": "#/components/responses/Forbidden"},
-						"404": map[string]any{"$ref": "#/components/responses/NotFound"},
-					},
-				},
-				"delete": map[string]any{
-					"tags":        []string{"Artifacts"},
-					"summary":     "Delete an artifact by name",
-					"description": "Deletes an artifact from the database. Requires `write`, `upload`, or `all` permission.",
-					"operationId": "deleteArtifact",
-					"parameters": []map[string]any{
-						{"$ref": "#/components/parameters/ArtifactTypeParam"},
-						{"$ref": "#/components/parameters/ArtifactNameParam"},
-					},
-					"responses": map[string]any{
-						"200": map[string]any{
-							"description": "Artifact deleted",
-							"content": map[string]any{
-								"application/json": map[string]any{
-									"schema": map[string]any{
-										"type": "object",
-										"properties": map[string]any{
-											"deleted": map[string]any{"type": "boolean", "example": true},
-											"type":    map[string]any{"type": "string", "example": "pipeline"},
-											"name":    map[string]any{"type": "string", "example": "daily_etl"},
-										},
-									},
-								},
-							},
-						},
-						"401": map[string]any{"$ref": "#/components/responses/Unauthorized"},
-						"403": map[string]any{"$ref": "#/components/responses/Forbidden"},
-						"404": map[string]any{"$ref": "#/components/responses/NotFound"},
-					},
-				},
-			},
+			"/api/v1/upload/{type}":           buildUploadPathItem("uploadArtifact"),
+			"/api/v1/artifacts/{type}/{name}": buildArtifactItemPathItem("#/components/parameters/ArtifactNameParam", "", "name", "name", "daily_etl"),
 			"/api/v1/artifacts/{type}/{name}/export": map[string]any{
-				"get": map[string]any{
-					"tags":        []string{"Artifacts"},
-					"summary":     "Export artifact as raw XML attachment",
-					"description": "Downloads the artifact XML content as an `application/xml` file attachment. Requires `read-only`, `write`, `upload`, or `all` permission.",
-					"operationId": "exportArtifact",
-					"parameters": []map[string]any{
-						{"$ref": "#/components/parameters/ArtifactTypeParam"},
-						{"$ref": "#/components/parameters/ArtifactNameParam"},
-						{
-							"name":        "decrypt",
-							"in":          "query",
-							"description": "Decrypt encrypted payload before exporting",
-							"required":    false,
-							"schema":      map[string]any{"type": "boolean", "default": false},
-						},
-						{
-							"name":        "secure_key",
-							"in":          "query",
-							"description": "Optional decryption passphrase",
-							"required":    false,
-							"schema":      map[string]any{"type": "string"},
-						},
+				"get": buildOAIOp(oaiOpSpec{
+					tag:         "Artifacts",
+					summary:     "Export artifact as raw XML attachment",
+					description: "Downloads the artifact XML content as an `application/xml` file attachment. Requires `read-only`, `write`, `upload`, or `all` permission.",
+					operationID: "exportArtifact",
+					params: []map[string]any{
+						oaiRef("#/components/parameters/ArtifactTypeParam"),
+						oaiRef("#/components/parameters/ArtifactNameParam"),
+						oaiQueryParam("decrypt", "boolean", "Decrypt encrypted payload before exporting", false),
+						oaiQueryParam("secure_key", "string", "Optional decryption passphrase", nil),
 					},
-					"responses": map[string]any{
-						"200": map[string]any{
-							"description": "Raw XML document",
-							"content": map[string]any{
-								"application/xml": map[string]any{
-									"schema": map[string]any{"type": "string"},
-								},
-							},
-						},
-						"401": map[string]any{"$ref": "#/components/responses/Unauthorized"},
-						"403": map[string]any{"$ref": "#/components/responses/Forbidden"},
-						"404": map[string]any{"$ref": "#/components/responses/NotFound"},
-					},
-				},
+					responses: oaiWithCommonResponses(map[string]any{
+						"200": oaiContentResp("Raw XML document", "application/xml", oaiProp("string", "", nil)),
+					}, "401", "403", "404"),
+				}),
 			},
-			"/api/v1/artifacts/{type}/id/{id}": map[string]any{
-				"get": map[string]any{
-					"tags":        []string{"Artifacts"},
-					"summary":     "Get a single artifact by database table ID",
-					"description": "Fetches an artifact record by its database primary key `ID` (`TablePipelineContent`, `TableOptionsContent`, or `TableConfigContent`). Optionally decrypts encrypted content when `decrypt=true` is passed. Requires `read-only`, `write`, `upload`, or `all` permission.",
-					"operationId": "getArtifactByID",
-					"parameters": []map[string]any{
-						{"$ref": "#/components/parameters/ArtifactTypeParam"},
-						{"$ref": "#/components/parameters/ArtifactIDParam"},
-						{
-							"name":        "decrypt",
-							"in":          "query",
-							"description": "Decrypt encrypted payload before returning",
-							"required":    false,
-							"schema":      map[string]any{"type": "boolean", "default": false},
-						},
-						{
-							"name":        "secure_key",
-							"in":          "query",
-							"description": "Optional decryption passphrase (or pass via `X-Flow-Secure-Key` header)",
-							"required":    false,
-							"schema":      map[string]any{"type": "string"},
-						},
-					},
-					"responses": map[string]any{
-						"200": map[string]any{
-							"description": "Artifact record",
-							"content": map[string]any{
-								"application/json": map[string]any{
-									"schema": map[string]any{"$ref": "#/components/schemas/ArtifactRecord"},
-								},
-							},
-						},
-						"400": map[string]any{"$ref": "#/components/responses/BadRequest"},
-						"401": map[string]any{"$ref": "#/components/responses/Unauthorized"},
-						"403": map[string]any{"$ref": "#/components/responses/Forbidden"},
-						"404": map[string]any{"$ref": "#/components/responses/NotFound"},
-					},
-				},
-				"put": map[string]any{
-					"tags":        []string{"Artifacts"},
-					"summary":     "Update an existing artifact by database table ID",
-					"description": "Updates an existing `pipeline`, `options`, or `config` artifact by its database primary key `ID`. Requires `write`, `upload`, or `all` permission.",
-					"operationId": "updateArtifactByID",
-					"parameters": []map[string]any{
-						{"$ref": "#/components/parameters/ArtifactTypeParam"},
-						{"$ref": "#/components/parameters/ArtifactIDParam"},
-					},
-					"requestBody": map[string]any{
-						"required": true,
-						"content": map[string]any{
-							"application/json": map[string]any{
-								"schema": map[string]any{"$ref": "#/components/schemas/ArtifactPayload"},
-							},
-						},
-					},
-					"responses": map[string]any{
-						"200": map[string]any{
-							"description": "Updated artifact record",
-							"content": map[string]any{
-								"application/json": map[string]any{
-									"schema": map[string]any{"$ref": "#/components/schemas/ArtifactRecord"},
-								},
-							},
-						},
-						"400": map[string]any{"$ref": "#/components/responses/BadRequest"},
-						"401": map[string]any{"$ref": "#/components/responses/Unauthorized"},
-						"403": map[string]any{"$ref": "#/components/responses/Forbidden"},
-						"404": map[string]any{"$ref": "#/components/responses/NotFound"},
-					},
-				},
-				"delete": map[string]any{
-					"tags":        []string{"Artifacts"},
-					"summary":     "Delete an artifact by database table ID",
-					"description": "Deletes an artifact by its database primary key `ID`. Requires `write`, `upload`, or `all` permission.",
-					"operationId": "deleteArtifactByID",
-					"parameters": []map[string]any{
-						{"$ref": "#/components/parameters/ArtifactTypeParam"},
-						{"$ref": "#/components/parameters/ArtifactIDParam"},
-					},
-					"responses": map[string]any{
-						"200": map[string]any{
-							"description": "Artifact deleted",
-							"content": map[string]any{
-								"application/json": map[string]any{
-									"schema": map[string]any{
-										"type": "object",
-										"properties": map[string]any{
-											"deleted": map[string]any{"type": "boolean", "example": true},
-											"type":    map[string]any{"type": "string", "example": "pipeline"},
-											"id":      map[string]any{"type": "integer", "example": 1},
-										},
-									},
-								},
-							},
-						},
-						"401": map[string]any{"$ref": "#/components/responses/Unauthorized"},
-						"403": map[string]any{"$ref": "#/components/responses/Forbidden"},
-						"404": map[string]any{"$ref": "#/components/responses/NotFound"},
-					},
-				},
-			},
+			"/api/v1/artifacts/{type}/id/{id}": buildArtifactItemPathItem("#/components/parameters/ArtifactIDParam", "ByID", "database table ID", "id", 1),
 			"/api/v1/execute": map[string]any{
-				"post": map[string]any{
-					"tags":        []string{"Execution"},
-					"summary":     "Execute a pipeline synchronously",
-					"description": "Executes a pipeline loaded from the database by name (`file: \"my_pipeline\"` or `db:my_pipeline`), by database table ID (`id` + `artifact_type`, or `pipeline_id` / `options_id` / `config_id`, or `file: \"id:1\"`), inline XML (`file_xml`), or local path, with optional `config`, `options`, `vars`, `node_output`, encryption, and signature verification. Requires `execution-only` or `all` permission.",
-					"operationId": "executePipeline",
-					"requestBody": map[string]any{
-						"required": true,
-						"content": map[string]any{
-							"application/json": map[string]any{
-								"schema": map[string]any{"$ref": "#/components/schemas/ExecutionRequest"},
-							},
-						},
-					},
-					"responses": map[string]any{
-						"200": map[string]any{
-							"description": "Pipeline executed successfully",
-							"content": map[string]any{
-								"application/json": map[string]any{
-									"schema": map[string]any{"$ref": "#/components/schemas/ExecutionResponse"},
-								},
-							},
-						},
-						"400": map[string]any{"$ref": "#/components/responses/BadRequest"},
-						"401": map[string]any{"$ref": "#/components/responses/Unauthorized"},
-						"403": map[string]any{"$ref": "#/components/responses/Forbidden"},
-						"422": map[string]any{
-							"description": "Pipeline execution failed",
-							"content": map[string]any{
-								"application/json": map[string]any{
-									"schema": map[string]any{"$ref": "#/components/schemas/ExecutionResponse"},
-								},
-							},
-						},
-					},
-				},
+				"post": buildOAIOp(oaiOpSpec{
+					tag:         "Execution",
+					summary:     "Execute a pipeline synchronously",
+					description: "Executes a pipeline loaded from the database by name (`file: \"my_pipeline\"` or `db:my_pipeline`), by database table ID (`id` + `artifact_type`, or `pipeline_id` / `options_id` / `config_id`, or `file: \"id:1\"`), inline XML (`file_xml`), or local path, with optional `config`, `options`, `vars`, `node_output`, encryption, and signature verification. Requires `execution-only` or `all` permission.",
+					operationID: "executePipeline",
+					body:        oaiJSONBody("#/components/schemas/ExecutionRequest", true),
+					responses:   execRespMap("Pipeline executed successfully"),
+				}),
 			},
 			"/api/v1/execute/{type}/{id}": map[string]any{
-				"post": map[string]any{
-					"tags":        []string{"Execution"},
-					"summary":     "Execute an artifact synchronously by artifact type and database table ID",
-					"description": "Executes an artifact stored in `TablePipelineContent` (`type=pipeline`), `TableOptionsContent` (`type=options`), or `TableConfigContent` (`type=config`) by its database primary key `ID`. Optional overrides (`vars`, `config`, `node_output`, `format`, `preflight`, `secure_key`) can be passed via JSON request body or query parameters. Also available at `/api/v1/execution/{type}/{id}`. Requires `execution-only` or `all` permission.",
-					"operationId": "executeByArtifactTypeAndID",
-					"parameters": []map[string]any{
-						{"$ref": "#/components/parameters/ArtifactTypeParam"},
-						{"$ref": "#/components/parameters/ArtifactIDParam"},
-						{
-							"name":        "vars",
-							"in":          "query",
-							"required":    false,
-							"description": "Optional comma-separated KEY=VALUE variable overrides",
-							"schema":      map[string]any{"type": "string"},
-						},
-						{
-							"name":        "node_output",
-							"in":          "query",
-							"required":    false,
-							"description": "Persist per-node stdout/results in `pipeline_events.node_output`",
-							"schema":      map[string]any{"type": "boolean", "default": false},
-						},
-						{
-							"name":        "preflight",
-							"in":          "query",
-							"required":    false,
-							"description": "Execute preflight nodes instead of flow nodes",
-							"schema":      map[string]any{"type": "boolean", "default": false},
-						},
-					},
-					"requestBody": map[string]any{
-						"required": false,
-						"content": map[string]any{
-							"application/json": map[string]any{
-								"schema": map[string]any{"$ref": "#/components/schemas/ExecutionRequest"},
-							},
-						},
-					},
-					"responses": map[string]any{
-						"200": map[string]any{
-							"description": "Artifact executed successfully",
-							"content": map[string]any{
-								"application/json": map[string]any{
-									"schema": map[string]any{"$ref": "#/components/schemas/ExecutionResponse"},
-								},
-							},
-						},
-						"400": map[string]any{"$ref": "#/components/responses/BadRequest"},
-						"401": map[string]any{"$ref": "#/components/responses/Unauthorized"},
-						"403": map[string]any{"$ref": "#/components/responses/Forbidden"},
-						"422": map[string]any{
-							"description": "Pipeline execution failed",
-							"content": map[string]any{
-								"application/json": map[string]any{
-									"schema": map[string]any{"$ref": "#/components/schemas/ExecutionResponse"},
-								},
-							},
-						},
-					},
-				},
+				"post": buildOAIOp(oaiOpSpec{
+					tag:         "Execution",
+					summary:     "Execute an artifact synchronously by artifact type and database table ID",
+					description: "Executes an artifact stored in `TablePipelineContent` (`type=pipeline`), `TableOptionsContent` (`type=options`), or `TableConfigContent` (`type=config`) by its database primary key `ID`. Optional overrides (`vars`, `config`, `node_output`, `format`, `preflight`, `secure_key`) can be passed via JSON request body or query parameters. Also available at `/api/v1/execution/{type}/{id}`. Requires `execution-only` or `all` permission.",
+					operationID: "executeByArtifactTypeAndID",
+					params: append(append([]map[string]any{}, typeAndIDParams...),
+						oaiQueryParam("vars", "string", "Optional comma-separated KEY=VALUE variable overrides", nil),
+						oaiQueryParam("node_output", "boolean", "Persist per-node stdout/results in `pipeline_events.node_output`", false),
+						oaiQueryParam("preflight", "boolean", "Execute preflight nodes instead of flow nodes", false),
+					),
+					body:      oaiJSONBody("#/components/schemas/ExecutionRequest", false),
+					responses: execRespMap("Artifact executed successfully"),
+				}),
 			},
 			"/api/v1/execute/stream": map[string]any{
-				"post": map[string]any{
-					"tags":        []string{"Execution"},
-					"summary":     "Execute a pipeline with live Server-Sent Events (SSE) streaming",
-					"description": "Executes a pipeline and streams real-time `node_event` and final `done` Server-Sent Events (`text/event-stream`). Requires `execution-only` or `all` permission.",
-					"operationId": "executePipelineStream",
-					"requestBody": map[string]any{
-						"required": false,
-						"content": map[string]any{
-							"application/json": map[string]any{
-								"schema": map[string]any{"$ref": "#/components/schemas/ExecutionRequest"},
-							},
-						},
-					},
-					"responses": map[string]any{
-						"200": map[string]any{
-							"description": "SSE event stream (`event: node_event`, `event: done`)",
-							"content": map[string]any{
-								"text/event-stream": map[string]any{
-									"schema": map[string]any{"type": "string"},
-								},
-							},
-						},
-						"400": map[string]any{"$ref": "#/components/responses/BadRequest"},
-						"401": map[string]any{"$ref": "#/components/responses/Unauthorized"},
-						"403": map[string]any{"$ref": "#/components/responses/Forbidden"},
-					},
-				},
+				"post": buildOAIOp(oaiOpSpec{
+					tag:         "Execution",
+					summary:     "Execute a pipeline with live Server-Sent Events (SSE) streaming",
+					description: "Executes a pipeline and streams real-time `node_event` and final `done` Server-Sent Events (`text/event-stream`). Requires `execution-only` or `all` permission.",
+					operationID: "executePipelineStream",
+					body:        oaiJSONBody("#/components/schemas/ExecutionRequest", false),
+					responses:   sseRespMap(),
+				}),
 			},
 			"/api/v1/execute/stream/{type}/{id}": map[string]any{
-				"post": map[string]any{
-					"tags":        []string{"Execution"},
-					"summary":     "Stream execution (SSE) by artifact type and database table ID (POST)",
-					"description": "Executes an artifact stored in `TablePipelineContent` (`pipeline`), `TableOptionsContent` (`options`), or `TableConfigContent` (`config`) by its database primary key `ID` and streams real-time `node_event` and `done` Server-Sent Events (`text/event-stream`). Also available at `/api/v1/execute/{type}/{id}/stream` and `/api/v1/execution/stream/{type}/{id}`. Requires `execution-only` or `all` permission.",
-					"operationId": "executeStreamByArtifactTypeAndIDPost",
-					"parameters": []map[string]any{
-						{"$ref": "#/components/parameters/ArtifactTypeParam"},
-						{"$ref": "#/components/parameters/ArtifactIDParam"},
-					},
-					"requestBody": map[string]any{
-						"required": false,
-						"content": map[string]any{
-							"application/json": map[string]any{
-								"schema": map[string]any{"$ref": "#/components/schemas/ExecutionRequest"},
-							},
-						},
-					},
-					"responses": map[string]any{
-						"200": map[string]any{
-							"description": "SSE event stream (`event: node_event`, `event: done`)",
-							"content": map[string]any{
-								"text/event-stream": map[string]any{
-									"schema": map[string]any{"type": "string"},
-								},
-							},
-						},
-						"400": map[string]any{"$ref": "#/components/responses/BadRequest"},
-						"401": map[string]any{"$ref": "#/components/responses/Unauthorized"},
-						"403": map[string]any{"$ref": "#/components/responses/Forbidden"},
-					},
-				},
-				"get": map[string]any{
-					"tags":        []string{"Execution"},
-					"summary":     "Stream execution (SSE) by artifact type and database table ID (GET)",
-					"description": "Executes an artifact by its type (`pipeline`, `options`, `config`) and database primary key `ID` over a `GET` SSE stream (`text/event-stream`). Optional parameters (`vars`, `node_output`, `preflight`, `secure_key`) can be passed in the query string. Also available at `/api/v1/execute/{type}/{id}/stream`. Requires `execution-only` or `all` permission.",
-					"operationId": "executeStreamByArtifactTypeAndIDGet",
-					"parameters": []map[string]any{
-						{"$ref": "#/components/parameters/ArtifactTypeParam"},
-						{"$ref": "#/components/parameters/ArtifactIDParam"},
-						{
-							"name":        "vars",
-							"in":          "query",
-							"required":    false,
-							"description": "Optional comma-separated KEY=VALUE variable overrides",
-							"schema":      map[string]any{"type": "string"},
-						},
-						{
-							"name":        "node_output",
-							"in":          "query",
-							"required":    false,
-							"description": "Persist per-node stdout/results in `pipeline_events.node_output`",
-							"schema":      map[string]any{"type": "boolean", "default": false},
-						},
-					},
-					"responses": map[string]any{
-						"200": map[string]any{
-							"description": "SSE event stream (`event: node_event`, `event: done`)",
-							"content": map[string]any{
-								"text/event-stream": map[string]any{
-									"schema": map[string]any{"type": "string"},
-								},
-							},
-						},
-						"400": map[string]any{"$ref": "#/components/responses/BadRequest"},
-						"401": map[string]any{"$ref": "#/components/responses/Unauthorized"},
-						"403": map[string]any{"$ref": "#/components/responses/Forbidden"},
-					},
-				},
+				"post": buildOAIOp(oaiOpSpec{
+					tag:         "Execution",
+					summary:     "Stream execution (SSE) by artifact type and database table ID (POST)",
+					description: "Executes an artifact stored in `TablePipelineContent` (`pipeline`), `TableOptionsContent` (`options`), or `TableConfigContent` (`config`) by its database primary key `ID` and streams real-time `node_event` and `done` Server-Sent Events (`text/event-stream`). Also available at `/api/v1/execute/{type}/{id}/stream` and `/api/v1/execution/stream/{type}/{id}`. Requires `execution-only` or `all` permission.",
+					operationID: "executeStreamByArtifactTypeAndIDPost",
+					params:      typeAndIDParams,
+					body:        oaiJSONBody("#/components/schemas/ExecutionRequest", false),
+					responses:   sseRespMap(),
+				}),
+				"get": buildOAIOp(oaiOpSpec{
+					tag:         "Execution",
+					summary:     "Stream execution (SSE) by artifact type and database table ID (GET)",
+					description: "Executes an artifact by its type (`pipeline`, `options`, `config`) and database primary key `ID` over a `GET` SSE stream (`text/event-stream`). Optional parameters (`vars`, `node_output`, `preflight`, `secure_key`) can be passed in the query string. Also available at `/api/v1/execute/{type}/{id}/stream`. Requires `execution-only` or `all` permission.",
+					operationID: "executeStreamByArtifactTypeAndIDGet",
+					params: append(append([]map[string]any{}, typeAndIDParams...),
+						oaiQueryParam("vars", "string", "Optional comma-separated KEY=VALUE variable overrides", nil),
+						oaiQueryParam("node_output", "boolean", "Persist per-node stdout/results in `pipeline_events.node_output`", false),
+					),
+					responses: sseRespMap(),
+				}),
 			},
 			"/api/v1/validate": map[string]any{
-				"post": map[string]any{
-					"tags":        []string{"Execution"},
-					"summary":     "Validate pipeline XML syntax, XSD schema, and AST structure",
-					"description": "Validates a pipeline without executing its nodes (`validate=true`). Requires `execution-only` or `all` permission.",
-					"operationId": "validatePipeline",
-					"requestBody": map[string]any{
-						"required": true,
-						"content": map[string]any{
-							"application/json": map[string]any{
-								"schema": map[string]any{"$ref": "#/components/schemas/ExecutionRequest"},
-							},
-						},
-					},
-					"responses": map[string]any{
-						"200": map[string]any{
-							"description": "Pipeline is valid",
-							"content": map[string]any{
-								"application/json": map[string]any{
-									"schema": map[string]any{"$ref": "#/components/schemas/ExecutionResponse"},
-								},
-							},
-						},
-						"400": map[string]any{"$ref": "#/components/responses/BadRequest"},
-						"401": map[string]any{"$ref": "#/components/responses/Unauthorized"},
-						"403": map[string]any{"$ref": "#/components/responses/Forbidden"},
-						"422": map[string]any{"$ref": "#/components/responses/UnprocessableEntity"},
-					},
-				},
+				"post": buildOAIOp(oaiOpSpec{
+					tag:         "Execution",
+					summary:     "Validate pipeline XML syntax, XSD schema, and AST structure",
+					description: "Validates a pipeline without executing its nodes (`validate=true`). Requires `execution-only` or `all` permission.",
+					operationID: "validatePipeline",
+					body:        oaiJSONBody("#/components/schemas/ExecutionRequest", true),
+					responses:   validateRespMap("Pipeline is valid"),
+				}),
 			},
 			"/api/v1/validate/{type}/{id}": map[string]any{
-				"post": map[string]any{
-					"tags":        []string{"Execution"},
-					"summary":     "Validate an artifact by artifact type and database table ID",
-					"description": "Validates an artifact stored in `TablePipelineContent` (`pipeline`), `TableOptionsContent` (`options`), or `TableConfigContent` (`config`) by its database primary key `ID` without executing nodes. Requires `execution-only` or `all` permission.",
-					"operationId": "validateByArtifactTypeAndID",
-					"parameters": []map[string]any{
-						{"$ref": "#/components/parameters/ArtifactTypeParam"},
-						{"$ref": "#/components/parameters/ArtifactIDParam"},
-					},
-					"requestBody": map[string]any{
-						"required": false,
-						"content": map[string]any{
-							"application/json": map[string]any{
-								"schema": map[string]any{"$ref": "#/components/schemas/ExecutionRequest"},
-							},
-						},
-					},
-					"responses": map[string]any{
-						"200": map[string]any{
-							"description": "Artifact is valid",
-							"content": map[string]any{
-								"application/json": map[string]any{
-									"schema": map[string]any{"$ref": "#/components/schemas/ExecutionResponse"},
-								},
-							},
-						},
-						"400": map[string]any{"$ref": "#/components/responses/BadRequest"},
-						"401": map[string]any{"$ref": "#/components/responses/Unauthorized"},
-						"403": map[string]any{"$ref": "#/components/responses/Forbidden"},
-						"422": map[string]any{"$ref": "#/components/responses/UnprocessableEntity"},
-					},
-				},
+				"post": buildOAIOp(oaiOpSpec{
+					tag:         "Execution",
+					summary:     "Validate an artifact by artifact type and database table ID",
+					description: "Validates an artifact stored in `TablePipelineContent` (`pipeline`), `TableOptionsContent` (`options`), or `TableConfigContent` (`config`) by its database primary key `ID` without executing nodes. Requires `execution-only` or `all` permission.",
+					operationID: "validateByArtifactTypeAndID",
+					params:      typeAndIDParams,
+					body:        oaiJSONBody("#/components/schemas/ExecutionRequest", false),
+					responses:   validateRespMap("Artifact is valid"),
+				}),
 			},
-			"/api/v1/runs":      buildRunsPathItem("listRuns"),
-			"/api/v1/logs/runs": buildRunsPathItem("listLogsRuns"),
-			"/api/v1/events":      buildEventsPathItem("listEvents"),
-			"/api/v1/logs/events": buildEventsPathItem("listLogsEvents"),
+			"/api/v1/runs":            buildRunsPathItem("listRuns"),
+			"/api/v1/logs/runs":       buildRunsPathItem("listLogsRuns"),
+			"/api/v1/events":          buildEventsPathItem("listEvents"),
+			"/api/v1/logs/events":     buildEventsPathItem("listLogsEvents"),
 			"/api/v1/audit":           buildAuditPathItem("listAuditEvents"),
 			"/api/v1/logs/api-events": buildAuditPathItem("listLogsAPIEvents"),
 			"/api/v1/databases/test":  buildDBTestPathItem("testDatabaseConnection"),
 			"/api/v1/db/test":         buildDBTestPathItem("testDBConnectionAlias"),
 			"/api/v1/users": map[string]any{
-				"get": map[string]any{
-					"tags":        []string{"Users"},
-					"summary":     "List all BasicAuth API users",
-					"description": "Lists all users in `TableAPIUsers` (`dbo.flow_api_users`) without password hashes. Requires `all` permission.",
-					"operationId": "listUsers",
-					"responses": map[string]any{
-						"200": map[string]any{
-							"description": "List of API users",
-							"content": map[string]any{
-								"application/json": map[string]any{
-									"schema": map[string]any{
-										"type": "object",
-										"properties": map[string]any{
-											"count": map[string]any{"type": "integer", "example": 1},
-											"users": map[string]any{
-												"type":  "array",
-												"items": map[string]any{"$ref": "#/components/schemas/APIUser"},
-											},
-										},
-									},
-								},
+				"get": buildOAIOp(oaiOpSpec{
+					tag:         "Users",
+					summary:     "List all BasicAuth API users",
+					description: "Lists all users in `TableAPIUsers` (`dbo.flow_api_users`) without password hashes. Requires `all` permission.",
+					operationID: "listUsers",
+					responses: oaiWithCommonResponses(map[string]any{
+						"200": oaiJSONResp("List of API users", map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"count": oaiProp("integer", "", 1),
+								"users": map[string]any{"type": "array", "items": oaiRef("#/components/schemas/APIUser")},
 							},
-						},
-						"401": map[string]any{"$ref": "#/components/responses/Unauthorized"},
-						"403": map[string]any{"$ref": "#/components/responses/Forbidden"},
-					},
-				},
-				"post": map[string]any{
-					"tags":        []string{"Users"},
-					"summary":     "Create or update a BasicAuth API user",
-					"description": "Creates or updates a user in `TableAPIUsers` (`dbo.flow_api_users`). Plaintext passwords are automatically hashed with bcrypt before storage. Requires `all` permission.",
-					"operationId": "upsertUser",
-					"requestBody": map[string]any{
-						"required": true,
-						"content": map[string]any{
-							"application/json": map[string]any{
-								"schema": map[string]any{"$ref": "#/components/schemas/UpsertUserRequest"},
-							},
-						},
-					},
-					"responses": map[string]any{
-						"201": map[string]any{
-							"description": "User created or updated",
-							"content": map[string]any{
-								"application/json": map[string]any{
-									"schema": map[string]any{"$ref": "#/components/schemas/APIUser"},
-								},
-							},
-						},
-						"400": map[string]any{"$ref": "#/components/responses/BadRequest"},
-						"401": map[string]any{"$ref": "#/components/responses/Unauthorized"},
-						"403": map[string]any{"$ref": "#/components/responses/Forbidden"},
-					},
-				},
+						}),
+					}, "401", "403"),
+				}),
+				"post": buildOAIOp(oaiOpSpec{
+					tag:         "Users",
+					summary:     "Create or update a BasicAuth API user",
+					description: "Creates or updates a user in `TableAPIUsers` (`dbo.flow_api_users`). Plaintext passwords are automatically hashed with bcrypt before storage. Requires `all` permission.",
+					operationID: "upsertUser",
+					body:        oaiJSONBody("#/components/schemas/UpsertUserRequest", true),
+					responses: oaiWithCommonResponses(map[string]any{
+						"201": oaiJSONResp("User created or updated", oaiRef("#/components/schemas/APIUser")),
+					}, "400", "401", "403"),
+				}),
 			},
 			"/api/v1/users/{username}": map[string]any{
-				"delete": map[string]any{
-					"tags":        []string{"Users"},
-					"summary":     "Delete a BasicAuth API user",
-					"description": "Deletes a user from `TableAPIUsers` (`dbo.flow_api_users`). Requires `all` permission.",
-					"operationId": "deleteUser",
-					"parameters": []map[string]any{
+				"delete": buildOAIOp(oaiOpSpec{
+					tag:         "Users",
+					summary:     "Delete a BasicAuth API user",
+					description: "Deletes a user from `TableAPIUsers` (`dbo.flow_api_users`). Requires `all` permission.",
+					operationID: "deleteUser",
+					params: []map[string]any{
 						{
 							"name":        "username",
 							"in":          "path",
 							"required":    true,
 							"description": "Username to delete",
-							"schema":      map[string]any{"type": "string", "example": "runner_svc"},
+							"schema":      oaiProp("string", "", "runner_svc"),
 						},
 					},
-					"responses": map[string]any{
-						"200": map[string]any{
-							"description": "User deleted",
-							"content": map[string]any{
-								"application/json": map[string]any{
-									"schema": map[string]any{
-										"type": "object",
-										"properties": map[string]any{
-											"deleted":  map[string]any{"type": "boolean", "example": true},
-											"username": map[string]any{"type": "string", "example": "runner_svc"},
-										},
-									},
-								},
+					responses: oaiWithCommonResponses(map[string]any{
+						"200": oaiJSONResp("User deleted", map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"deleted":  oaiProp("boolean", "", true),
+								"username": oaiProp("string", "", "runner_svc"),
 							},
-						},
-						"401": map[string]any{"$ref": "#/components/responses/Unauthorized"},
-						"403": map[string]any{"$ref": "#/components/responses/Forbidden"},
-						"404": map[string]any{"$ref": "#/components/responses/NotFound"},
-					},
-				},
+						}),
+					}, "401", "403", "404"),
+				}),
 			},
 		},
-		"components": map[string]any{
-			"securitySchemes": map[string]any{
-				"basicAuth": map[string]any{
-					"type":        "http",
-					"scheme":      "basic",
-					"description": "HTTP Basic Authentication backed by `dbo.flow_api_users` (`TableAPIUsers`).",
+		"components": buildOpenAPIComponents(),
+	}
+}
+
+func buildOpenAPIComponents() map[string]any {
+	errRespContent := func(desc string) map[string]any {
+		return oaiJSONResp(desc, oaiRef("#/components/schemas/ErrorResponse"))
+	}
+	artifactTypes := []string{"pipeline", "options", "config"}
+
+	return map[string]any{
+		"securitySchemes": map[string]any{
+			"basicAuth": map[string]any{
+				"type":        "http",
+				"scheme":      "basic",
+				"description": "HTTP Basic Authentication backed by `dbo.flow_api_users` (`TableAPIUsers`).",
+			},
+		},
+		"parameters": map[string]any{
+			"ArtifactTypeParam": map[string]any{
+				"name":        "type",
+				"in":          "path",
+				"required":    true,
+				"description": "Artifact category (`pipeline`, `options`, or `config`)",
+				"schema":      oaiEnumProp("string", artifactTypes, nil, "", nil),
+			},
+			"ArtifactNameParam": map[string]any{
+				"name":        "name",
+				"in":          "path",
+				"required":    true,
+				"description": "Unique artifact name in the database",
+				"schema":      oaiProp("string", "", "daily_etl"),
+			},
+			"ArtifactIDParam": map[string]any{
+				"name":        "id",
+				"in":          "path",
+				"required":    true,
+				"description": "Database table primary key `ID` (`INT` / `BIGINT`) in `TablePipelineContent`, `TableOptionsContent`, or `TableConfigContent`",
+				"schema":      map[string]any{"type": "integer", "minimum": 1, "example": 1},
+			},
+		},
+		"responses": map[string]any{
+			"BadRequest":          errRespContent("Bad Request"),
+			"Unauthorized":        errRespContent("Unauthorized — Missing or invalid BasicAuth credentials"),
+			"Forbidden":           errRespContent("Forbidden — Authenticated user lacks the required permission scope"),
+			"NotFound":            errRespContent("Resource not found"),
+			"Conflict":            errRespContent("Conflict — Artifact already exists"),
+			"UnprocessableEntity": errRespContent("Unprocessable Entity — Validation or execution error"),
+		},
+		"schemas": map[string]any{
+			"ErrorResponse": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"error":  oaiProp("string", "", "Invalid username or password"),
+					"status": oaiProp("integer", "", 401),
 				},
 			},
-			"parameters": map[string]any{
-				"ArtifactTypeParam": map[string]any{
-					"name":        "type",
-					"in":          "path",
-					"required":    true,
-					"description": "Artifact category (`pipeline`, `options`, or `config`)",
-					"schema": map[string]any{
-						"type": "string",
-						"enum": []string{"pipeline", "options", "config"},
-					},
-				},
-				"ArtifactNameParam": map[string]any{
-					"name":        "name",
-					"in":          "path",
-					"required":    true,
-					"description": "Unique artifact name in the database",
-					"schema":      map[string]any{"type": "string", "example": "daily_etl"},
-				},
-				"ArtifactIDParam": map[string]any{
-					"name":        "id",
-					"in":          "path",
-					"required":    true,
-					"description": "Database table primary key `ID` (`INT` / `BIGINT`) in `TablePipelineContent`, `TableOptionsContent`, or `TableConfigContent`",
-					"schema":      map[string]any{"type": "integer", "minimum": 1, "example": 1},
+			"HealthResponse": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"status":           oaiProp("string", "", "ok"),
+					"dialect":          oaiProp("string", "", "sqlserver"),
+					"authenticated_as": oaiProp("string", "", "admin"),
+					"permission":       oaiProp("string", "", "all"),
+					"db_spid":          oaiProp("integer", "", 64),
+					"db_user":          oaiProp("string", "", "sa"),
+					"application_name": oaiProp("string", "", "go-flowAPI"),
+					"tables":           map[string]any{"type": "object", "additionalProperties": oaiProp("string", "", nil)},
 				},
 			},
-			"responses": map[string]any{
-				"BadRequest": map[string]any{
-					"description": "Bad Request",
-					"content": map[string]any{
-						"application/json": map[string]any{
-							"schema": map[string]any{"$ref": "#/components/schemas/ErrorResponse"},
-						},
-					},
-				},
-				"Unauthorized": map[string]any{
-					"description": "Unauthorized — Missing or invalid BasicAuth credentials",
-					"content": map[string]any{
-						"application/json": map[string]any{
-							"schema": map[string]any{"$ref": "#/components/schemas/ErrorResponse"},
-						},
-					},
-				},
-				"Forbidden": map[string]any{
-					"description": "Forbidden — Authenticated user lacks the required permission scope",
-					"content": map[string]any{
-						"application/json": map[string]any{
-							"schema": map[string]any{"$ref": "#/components/schemas/ErrorResponse"},
-						},
-					},
-				},
-				"NotFound": map[string]any{
-					"description": "Resource not found",
-					"content": map[string]any{
-						"application/json": map[string]any{
-							"schema": map[string]any{"$ref": "#/components/schemas/ErrorResponse"},
-						},
-					},
-				},
-				"Conflict": map[string]any{
-					"description": "Conflict — Artifact already exists",
-					"content": map[string]any{
-						"application/json": map[string]any{
-							"schema": map[string]any{"$ref": "#/components/schemas/ErrorResponse"},
-						},
-					},
-				},
-				"UnprocessableEntity": map[string]any{
-					"description": "Unprocessable Entity — Validation or execution error",
-					"content": map[string]any{
-						"application/json": map[string]any{
-							"schema": map[string]any{"$ref": "#/components/schemas/ErrorResponse"},
-						},
-					},
+			"ArtifactRecord": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"id":          oaiProp("integer", "Database table primary key `ID`", 1),
+					"type":        oaiEnumProp("string", artifactTypes, nil, "", "pipeline"),
+					"name":        oaiProp("string", "", "daily_etl"),
+					"description": oaiProp("string", "", "Daily ETL workflow"),
+					"content":     oaiProp("string", "", "<Flow><Node Name=\"Step1\">...</Node></Flow>"),
+					"encrypted":   oaiProp("boolean", "", false),
 				},
 			},
-			"schemas": map[string]any{
-				"ErrorResponse": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"error":  map[string]any{"type": "string", "example": "Invalid username or password"},
-						"status": map[string]any{"type": "integer", "example": 401},
-					},
+			"ArtifactPayload": map[string]any{
+				"type":     "object",
+				"required": []string{"name"},
+				"properties": map[string]any{
+					"name":        oaiProp("string", "", "daily_etl"),
+					"description": oaiProp("string", "", "Daily ETL workflow"),
+					"content":     oaiProp("string", "", "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Flow/>"),
+					"xml_content": oaiProp("string", "Alias for `content`", nil),
+					"encrypted":   oaiBoolProp(false, "Encrypt XML content at rest using `secure_key` or server default key"),
+					"secure_key":  oaiProp("string", "Optional passphrase for encryption", nil),
+					"upsert":      oaiBoolProp(false, "Overwrite existing artifact if name already exists"),
 				},
-				"HealthResponse": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"status":           map[string]any{"type": "string", "example": "ok"},
-						"dialect":          map[string]any{"type": "string", "example": "sqlserver"},
-						"authenticated_as": map[string]any{"type": "string", "example": "admin"},
-						"permission":       map[string]any{"type": "string", "example": "all"},
-						"db_spid":          map[string]any{"type": "integer", "example": 64},
-						"db_user":          map[string]any{"type": "string", "example": "sa"},
-						"application_name": map[string]any{"type": "string", "example": "go-flowAPI"},
-						"tables": map[string]any{
-							"type":                 "object",
-							"additionalProperties": map[string]any{"type": "string"},
-						},
-					},
+			},
+			"ArtifactListResponse": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"type":  oaiProp("string", "", "pipeline"),
+					"count": oaiProp("integer", "", 2),
+					"items": map[string]any{"type": "array", "items": oaiRef("#/components/schemas/ArtifactRecord")},
 				},
-				"ArtifactRecord": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"id":          map[string]any{"type": "integer", "example": 1, "description": "Database table primary key `ID`"},
-						"type":        map[string]any{"type": "string", "enum": []string{"pipeline", "options", "config"}, "example": "pipeline"},
-						"name":        map[string]any{"type": "string", "example": "daily_etl"},
-						"description": map[string]any{"type": "string", "example": "Daily ETL workflow"},
-						"content":     map[string]any{"type": "string", "example": "<Flow><Node Name=\"Step1\">...</Node></Flow>"},
-						"encrypted":   map[string]any{"type": "boolean", "example": false},
-					},
+			},
+			"ExecutionRequest": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"artifact_type":    oaiEnumProp("string", artifactTypes, nil, "Target artifact type when executing by `id` (`pipeline`, `options`, or `config`)", nil),
+					"id":               oaiProp("integer", "Database table primary key `ID` for the specified `artifact_type`", 1),
+					"pipeline_id":      oaiProp("integer", "Database table primary key `ID` in `TablePipelineContent` (`dbo.flow_pipeline_content`)", nil),
+					"options_id":       oaiProp("integer", "Database table primary key `ID` in `TableOptionsContent` (`dbo.flow_options_content`)", nil),
+					"config_id":        oaiProp("integer", "Database table primary key `ID` in `TableConfigContent` (`dbo.flow_config_content`)", nil),
+					"file":             oaiProp("string", "Database artifact name (`daily_etl`, `db:daily_etl`, `id:1`), or file path", "daily_etl"),
+					"file_xml":         oaiProp("string", "Inline pipeline XML (alternative to `file` / `pipeline_id`)", nil),
+					"config":           oaiProp("string", "Database config artifact name (`id:1` or name) or file path", nil),
+					"config_xml":       oaiProp("string", "Inline override `<Configuration>` XML", nil),
+					"options":          oaiProp("string", "Database options artifact name (`id:1` or name) or file path", nil),
+					"options_xml":      oaiProp("string", "Inline `<cli_options>` XML", nil),
+					"format":           oaiEnumProp("string", []string{"json", "jsonpretty", "markdown", "text", "csv"}, "json", "", nil),
+					"xsd":              oaiProp("string", "Optional path to XSD schema file for validation", nil),
+					"validate":         oaiBoolProp(false, "Validate only without executing nodes"),
+					"preflight":        oaiBoolProp(false, "Execute preflight nodes instead of flow nodes"),
+					"vars":             map[string]any{"type": "object", "additionalProperties": oaiProp("string", "", nil), "example": map[string]string{"ENV": "prod"}},
+					"vars_raw":         oaiProp("string", "Comma-separated KEY=VALUE variable overrides", "ENV=prod,BATCH_SIZE=500"),
+					"debug":            oaiBoolProp(false, ""),
+					"gopath":           oaiProp("string", "", nil),
+					"xslt":             oaiProp("string", "XSLT stylesheet artifact name or file path", nil),
+					"out":              oaiProp("string", "Optional output file path for XSLT transformation", nil),
+					"node_output":      oaiBoolProp(false, "Persist redacted & truncated (64 KB) per-node output into `pipeline_events.node_output`"),
+					"encrypted":        oaiBoolProp(false, ""),
+					"secure_key":       oaiProp("string", "", nil),
+					"key_file":         oaiProp("string", "", nil),
+					"verify_signature": oaiBoolProp(false, ""),
+					"public_key":       oaiProp("string", "", nil),
+					"cert":             oaiProp("string", "", nil),
+					"ca_cert":          oaiProp("string", "", nil),
+					"keyring":          oaiProp("string", "", nil),
+					"signature":        oaiProp("string", "", nil),
 				},
-				"ArtifactPayload": map[string]any{
-					"type":     "object",
-					"required": []string{"name"},
-					"properties": map[string]any{
-						"name":        map[string]any{"type": "string", "example": "daily_etl"},
-						"description": map[string]any{"type": "string", "example": "Daily ETL workflow"},
-						"content":     map[string]any{"type": "string", "example": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Flow/>"},
-						"xml_content": map[string]any{"type": "string", "description": "Alias for `content`"},
-						"encrypted":   map[string]any{"type": "boolean", "default": false, "description": "Encrypt XML content at rest using `secure_key` or server default key"},
-						"secure_key":  map[string]any{"type": "string", "description": "Optional passphrase for encryption"},
-						"upsert":      map[string]any{"type": "boolean", "default": false, "description": "Overwrite existing artifact if name already exists"},
-					},
+			},
+			"ScriptResult": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"ScriptID":      oaiProp("string", "", "HelloNode"),
+					"ReturnCode":    oaiProp("integer", "", 0),
+					"ResultsString": oaiProp("string", "", "hello from HelloNode"),
 				},
-				"ArtifactListResponse": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"type":  map[string]any{"type": "string", "example": "pipeline"},
-						"count": map[string]any{"type": "integer", "example": 2},
-						"items": map[string]any{
-							"type":  "array",
-							"items": map[string]any{"$ref": "#/components/schemas/ArtifactRecord"},
-						},
-					},
+			},
+			"ExecutionResponse": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"run_id":           oaiProp("string", "", "a1b2c3d4e5f6"),
+					"status":           oaiProp("string", "", "SUCCEEDED"),
+					"started_at":       map[string]any{"type": "string", "format": "date-time"},
+					"finished_at":      map[string]any{"type": "string", "format": "date-time"},
+					"duration_ms":      oaiProp("integer", "", 42),
+					"format":           oaiProp("string", "", "json"),
+					"formatted_output": oaiProp("string", "", nil),
+					"results":          map[string]any{"type": "array", "items": oaiRef("#/components/schemas/ScriptResult")},
+					"error_message":    oaiProp("string", "", nil),
 				},
-				"ExecutionRequest": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"artifact_type":    map[string]any{"type": "string", "enum": []string{"pipeline", "options", "config"}, "description": "Target artifact type when executing by `id` (`pipeline`, `options`, or `config`)"},
-						"id":               map[string]any{"type": "integer", "example": 1, "description": "Database table primary key `ID` for the specified `artifact_type`"},
-						"pipeline_id":      map[string]any{"type": "integer", "description": "Database table primary key `ID` in `TablePipelineContent` (`dbo.flow_pipeline_content`)"},
-						"options_id":       map[string]any{"type": "integer", "description": "Database table primary key `ID` in `TableOptionsContent` (`dbo.flow_options_content`)"},
-						"config_id":        map[string]any{"type": "integer", "description": "Database table primary key `ID` in `TableConfigContent` (`dbo.flow_config_content`)"},
-						"file":             map[string]any{"type": "string", "example": "daily_etl", "description": "Database artifact name (`daily_etl`, `db:daily_etl`, `id:1`), or file path"},
-						"file_xml":         map[string]any{"type": "string", "description": "Inline pipeline XML (alternative to `file` / `pipeline_id`)"},
-						"config":           map[string]any{"type": "string", "description": "Database config artifact name (`id:1` or name) or file path"},
-						"config_xml":       map[string]any{"type": "string", "description": "Inline override `<Configuration>` XML"},
-						"options":          map[string]any{"type": "string", "description": "Database options artifact name (`id:1` or name) or file path"},
-						"options_xml":      map[string]any{"type": "string", "description": "Inline `<cli_options>` XML"},
-						"format":           map[string]any{"type": "string", "enum": []string{"json", "jsonpretty", "markdown", "text", "csv"}, "default": "json"},
-						"xsd":              map[string]any{"type": "string", "description": "Optional path to XSD schema file for validation"},
-						"validate":         map[string]any{"type": "boolean", "default": false, "description": "Validate only without executing nodes"},
-						"preflight":        map[string]any{"type": "boolean", "default": false, "description": "Execute preflight nodes instead of flow nodes"},
-						"vars":             map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "example": map[string]string{"ENV": "prod"}},
-						"vars_raw":         map[string]any{"type": "string", "example": "ENV=prod,BATCH_SIZE=500", "description": "Comma-separated KEY=VALUE variable overrides"},
-						"debug":            map[string]any{"type": "boolean", "default": false},
-						"gopath":           map[string]any{"type": "string"},
-						"xslt":             map[string]any{"type": "string", "description": "XSLT stylesheet artifact name or file path"},
-						"out":              map[string]any{"type": "string", "description": "Optional output file path for XSLT transformation"},
-						"node_output":      map[string]any{"type": "boolean", "default": false, "description": "Persist redacted & truncated (64 KB) per-node output into `pipeline_events.node_output`"},
-						"encrypted":        map[string]any{"type": "boolean", "default": false},
-						"secure_key":       map[string]any{"type": "string"},
-						"key_file":         map[string]any{"type": "string"},
-						"verify_signature": map[string]any{"type": "boolean", "default": false},
-						"public_key":       map[string]any{"type": "string"},
-						"cert":             map[string]any{"type": "string"},
-						"ca_cert":          map[string]any{"type": "string"},
-						"keyring":          map[string]any{"type": "string"},
-						"signature":        map[string]any{"type": "string"},
-					},
+			},
+			"RunSummaryRecord": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"run_id":        oaiProp("string", "", nil),
+					"file_path":     oaiProp("string", "", nil),
+					"config_path":   oaiProp("string", "", nil),
+					"status":        oaiProp("string", "", "SUCCEEDED"),
+					"started_at":    map[string]any{"type": "string", "format": "date-time"},
+					"finished_at":   map[string]any{"type": "string", "format": "date-time"},
+					"duration_ms":   oaiProp("integer", "", nil),
+					"task_count":    oaiProp("integer", "", nil),
+					"user_name":     oaiProp("string", "", nil),
+					"hostname":      oaiProp("string", "", nil),
+					"options_path":  oaiProp("string", "", nil),
+					"error_class":   oaiProp("string", "", nil),
+					"error_message": oaiProp("string", "", nil),
 				},
-				"ScriptResult": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"ScriptID":      map[string]any{"type": "string", "example": "HelloNode"},
-						"ReturnCode":    map[string]any{"type": "integer", "example": 0},
-						"ResultsString": map[string]any{"type": "string", "example": "hello from HelloNode"},
-					},
+			},
+			"PipelineEventRecord": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"run_id":        oaiProp("string", "", nil),
+					"execution_id":  oaiProp("string", "", nil),
+					"sequence_num":  oaiProp("integer", "", nil),
+					"occurred_at":   map[string]any{"type": "string", "format": "date-time"},
+					"event_type":    oaiProp("string", "", "node.finished"),
+					"node_kind":     oaiProp("string", "", "Script"),
+					"node_id":       oaiProp("string", "", "HelloNode"),
+					"status":        oaiProp("string", "", "SUCCEEDED"),
+					"user_name":     oaiProp("string", "", nil),
+					"db_user_name":  oaiProp("string", "", nil),
+					"spid":          oaiProp("string", "", nil),
+					"hostname":      oaiProp("string", "", nil),
+					"error_message": oaiProp("string", "", nil),
+					"rows_read":     oaiProp("integer", "", nil),
+					"rows_written":  oaiProp("integer", "", nil),
+					"rows_affected": oaiProp("integer", "", nil),
+					"node_output":   oaiProp("string", "", nil),
 				},
-				"ExecutionResponse": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"run_id":           map[string]any{"type": "string", "example": "a1b2c3d4e5f6"},
-						"status":           map[string]any{"type": "string", "example": "SUCCEEDED"},
-						"started_at":       map[string]any{"type": "string", "format": "date-time"},
-						"finished_at":      map[string]any{"type": "string", "format": "date-time"},
-						"duration_ms":      map[string]any{"type": "integer", "example": 42},
-						"format":           map[string]any{"type": "string", "example": "json"},
-						"formatted_output": map[string]any{"type": "string"},
-						"results": map[string]any{
-							"type":  "array",
-							"items": map[string]any{"$ref": "#/components/schemas/ScriptResult"},
-						},
-						"error_message": map[string]any{"type": "string"},
-					},
+			},
+			"APIAuditEvent": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"event_id":      oaiProp("string", "", nil),
+					"occurred_at":   map[string]any{"type": "string", "format": "date-time"},
+					"event_type":    oaiProp("string", "", "pipeline.execute"),
+					"http_method":   oaiProp("string", "", "POST"),
+					"path":          oaiProp("string", "", "/api/v1/execute"),
+					"artifact_type": oaiProp("string", "", nil),
+					"artifact_name": oaiProp("string", "", nil),
+					"run_id":        oaiProp("string", "", nil),
+					"auth_user":     oaiProp("string", "", "admin"),
+					"remote_addr":   oaiProp("string", "", nil),
+					"status_code":   oaiProp("integer", "", 200),
+					"status":        oaiProp("string", "", "SUCCESS"),
+					"duration_ms":   oaiProp("integer", "", nil),
+					"error_message": oaiProp("string", "", nil),
+					"details_json":  oaiProp("string", "", nil),
 				},
-				"RunSummaryRecord": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"run_id":           map[string]any{"type": "string"},
-						"file_path":        map[string]any{"type": "string"},
-						"config_path":      map[string]any{"type": "string"},
-						"status":           map[string]any{"type": "string", "example": "SUCCEEDED"},
-						"started_at":       map[string]any{"type": "string", "format": "date-time"},
-						"finished_at":      map[string]any{"type": "string", "format": "date-time"},
-						"duration_ms":      map[string]any{"type": "integer"},
-						"task_count":       map[string]any{"type": "integer"},
-						"user_name":        map[string]any{"type": "string"},
-						"hostname":         map[string]any{"type": "string"},
-						"options_path":     map[string]any{"type": "string"},
-						"error_class":      map[string]any{"type": "string"},
-						"error_message":    map[string]any{"type": "string"},
-					},
+			},
+			"APIUser": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"username":    oaiProp("string", "", "admin"),
+					"permission":  oaiProp("string", "Role scope: `execution-only`, `read-only`, `write`, `upload`, or `all` (comma-separated combinations supported)", "all"),
+					"is_active":   oaiProp("boolean", "", true),
+					"description": oaiProp("string", "", "Initial administrator with all permissions"),
 				},
-				"PipelineEventRecord": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"run_id":        map[string]any{"type": "string"},
-						"execution_id":  map[string]any{"type": "string"},
-						"sequence_num":  map[string]any{"type": "integer"},
-						"occurred_at":   map[string]any{"type": "string", "format": "date-time"},
-						"event_type":    map[string]any{"type": "string", "example": "node.finished"},
-						"node_kind":     map[string]any{"type": "string", "example": "Script"},
-						"node_id":       map[string]any{"type": "string", "example": "HelloNode"},
-						"status":        map[string]any{"type": "string", "example": "SUCCEEDED"},
-						"user_name":     map[string]any{"type": "string"},
-						"db_user_name":  map[string]any{"type": "string"},
-						"spid":          map[string]any{"type": "string"},
-						"hostname":      map[string]any{"type": "string"},
-						"error_message": map[string]any{"type": "string"},
-						"rows_read":     map[string]any{"type": "integer"},
-						"rows_written":  map[string]any{"type": "integer"},
-						"rows_affected": map[string]any{"type": "integer"},
-						"node_output":   map[string]any{"type": "string"},
-					},
+			},
+			"UpsertUserRequest": map[string]any{
+				"type":     "object",
+				"required": []string{"username", "password", "permission"},
+				"properties": map[string]any{
+					"username":    oaiProp("string", "", "admin"),
+					"password":    oaiProp("string", "Plaintext password (automatically bcrypt-hashed) or pre-hashed `$2a$`/`sha256:` value", "StrongAdminPass!2026"),
+					"permission":  oaiEnumProp("string", []string{"all", "execution-only", "read-only", "write", "upload"}, nil, "", "all"),
+					"description": oaiProp("string", "", "Full administrator account"),
+					"is_active":   oaiBoolProp(true, ""),
 				},
-				"APIAuditEvent": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"event_id":      map[string]any{"type": "string"},
-						"occurred_at":   map[string]any{"type": "string", "format": "date-time"},
-						"event_type":    map[string]any{"type": "string", "example": "pipeline.execute"},
-						"http_method":   map[string]any{"type": "string", "example": "POST"},
-						"path":          map[string]any{"type": "string", "example": "/api/v1/execute"},
-						"artifact_type": map[string]any{"type": "string"},
-						"artifact_name": map[string]any{"type": "string"},
-						"run_id":        map[string]any{"type": "string"},
-						"auth_user":     map[string]any{"type": "string", "example": "admin"},
-						"remote_addr":   map[string]any{"type": "string"},
-						"status_code":   map[string]any{"type": "integer", "example": 200},
-						"status":        map[string]any{"type": "string", "example": "SUCCESS"},
-						"duration_ms":   map[string]any{"type": "integer"},
-						"error_message": map[string]any{"type": "string"},
-						"details_json":  map[string]any{"type": "string"},
-					},
+			},
+			"DatabaseTestRequest": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"dsn": oaiProp("string", "Optional target database connection string to test. Leave empty (`\"\"`) to test the server's configured startup database (`StartupConnectionString` / `FLOW_API_DSN` / `-dsn`).", ""),
 				},
-				"APIUser": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"username":    map[string]any{"type": "string", "example": "admin"},
-						"permission":  map[string]any{"type": "string", "example": "all", "description": "Role scope: `execution-only`, `read-only`, `write`, `upload`, or `all` (comma-separated combinations supported)"},
-						"is_active":   map[string]any{"type": "boolean", "example": true},
-						"description": map[string]any{"type": "string", "example": "Initial administrator with all permissions"},
-					},
-				},
-				"UpsertUserRequest": map[string]any{
-					"type":     "object",
-					"required": []string{"username", "password", "permission"},
-					"properties": map[string]any{
-						"username":    map[string]any{"type": "string", "example": "admin"},
-						"password":    map[string]any{"type": "string", "example": "StrongAdminPass!2026", "description": "Plaintext password (automatically bcrypt-hashed) or pre-hashed `$2a$`/`sha256:` value"},
-						"permission":  map[string]any{"type": "string", "enum": []string{"all", "execution-only", "read-only", "write", "upload"}, "example": "all"},
-						"description": map[string]any{"type": "string", "example": "Full administrator account"},
-						"is_active":   map[string]any{"type": "boolean", "default": true},
-					},
-				},
-				"DatabaseTestRequest": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"dsn": map[string]any{
-							"type":        "string",
-							"description": "Optional target database connection string to test. Leave empty (`\"\"`) to test the server's configured startup database (`StartupConnectionString` / `FLOW_API_DSN` / `-dsn`).",
-							"example":     "",
-						},
-					},
-				},
-				"DatabaseTestResponse": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"connected":        map[string]any{"type": "boolean", "example": true},
-						"dialect":          map[string]any{"type": "string", "example": "sqlserver"},
-						"spid":             map[string]any{"type": "integer", "example": 55},
-						"db_user":          map[string]any{"type": "string", "example": "sa"},
-						"application_name": map[string]any{"type": "string", "example": "go-flowAPI"},
-					},
+			},
+			"DatabaseTestResponse": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"connected":        oaiProp("boolean", "", true),
+					"dialect":          oaiProp("string", "", "sqlserver"),
+					"spid":             oaiProp("integer", "", 55),
+					"db_user":          oaiProp("string", "", "sa"),
+					"application_name": oaiProp("string", "", "go-flowAPI"),
 				},
 			},
 		},
@@ -1169,269 +829,126 @@ func (s *APIServer) BuildOpenAPISpec(r *http.Request) map[string]any {
 }
 
 func buildUploadPathItem(operationID string) map[string]any {
-	op := map[string]any{
-		"tags":        []string{"Upload"},
-		"summary":     "Upload an XML file into the database (multipart/form-data or raw body)",
-		"description": "Uploads a `pipeline`, `options`, or `config` XML file into its configured database table (`TablePipelineContent`, `TableOptionsContent`, or `TableConfigContent`), automatically handling UTF-8 BOM / UTF-16LE / UTF-16BE decoding and optional encryption. Requires `write`, `upload`, or `all` permission.",
-		"operationId": operationID,
-		"parameters": []map[string]any{
-			{"$ref": "#/components/parameters/ArtifactTypeParam"},
-			{
-				"name":        "name",
-				"in":          "query",
-				"description": "Artifact name (for raw body uploads, or to override the uploaded filename)",
-				"required":    false,
-				"schema":      map[string]any{"type": "string"},
+	return map[string]any{
+		"post": buildOAIOp(oaiOpSpec{
+			tag:         "Upload",
+			summary:     "Upload an XML file into the database (multipart/form-data or raw body)",
+			description: "Uploads a `pipeline`, `options`, or `config` XML file into its configured database table (`TablePipelineContent`, `TableOptionsContent`, or `TableConfigContent`), automatically handling UTF-8 BOM / UTF-16LE / UTF-16BE decoding and optional encryption. Requires `write`, `upload`, or `all` permission.",
+			operationID: operationID,
+			params: []map[string]any{
+				oaiRef("#/components/parameters/ArtifactTypeParam"),
+				oaiQueryParam("name", "string", "Artifact name (for raw body uploads, or to override the uploaded filename)", nil),
+				oaiQueryParam("description", "string", "Artifact description", nil),
+				oaiQueryParam("encrypted", "boolean", "Encrypt the uploaded XML before storing in the database", false),
+				oaiQueryParam("secure_key", "string", "Optional encryption key", nil),
 			},
-			{
-				"name":        "description",
-				"in":          "query",
-				"description": "Artifact description",
-				"required":    false,
-				"schema":      map[string]any{"type": "string"},
-			},
-			{
-				"name":        "encrypted",
-				"in":          "query",
-				"description": "Encrypt the uploaded XML before storing in the database",
-				"required":    false,
-				"schema":      map[string]any{"type": "boolean", "default": false},
-			},
-			{
-				"name":        "secure_key",
-				"in":          "query",
-				"description": "Optional encryption key",
-				"required":    false,
-				"schema":      map[string]any{"type": "string"},
-			},
-		},
-		"requestBody": map[string]any{
-			"required": true,
-			"content": map[string]any{
-				"multipart/form-data": map[string]any{
-					"schema": map[string]any{
-						"type":     "object",
-						"required": []string{"file"},
-						"properties": map[string]any{
-							"file":        map[string]any{"type": "string", "format": "binary", "description": "XML file to upload"},
-							"name":        map[string]any{"type": "string", "description": "Optional artifact name (defaults to filename without extension)"},
-							"description": map[string]any{"type": "string", "description": "Optional description"},
-							"encrypted":   map[string]any{"type": "boolean", "default": false},
-							"secure_key":  map[string]any{"type": "string"},
+			body: map[string]any{
+				"required": true,
+				"content": map[string]any{
+					"multipart/form-data": map[string]any{
+						"schema": map[string]any{
+							"type":     "object",
+							"required": []string{"file"},
+							"properties": map[string]any{
+								"file":        map[string]any{"type": "string", "format": "binary", "description": "XML file to upload"},
+								"name":        oaiProp("string", "Optional artifact name (defaults to filename without extension)", nil),
+								"description": oaiProp("string", "Optional description", nil),
+								"encrypted":   oaiBoolProp(false, ""),
+								"secure_key":  oaiProp("string", "", nil),
+							},
 						},
 					},
-				},
-				"application/xml": map[string]any{
-					"schema": map[string]any{"type": "string", "example": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Flow/>"},
-				},
-			},
-		},
-		"responses": map[string]any{
-			"201": map[string]any{
-				"description": "Artifact uploaded and stored",
-				"content": map[string]any{
-					"application/json": map[string]any{
-						"schema": map[string]any{"$ref": "#/components/schemas/ArtifactRecord"},
+					"application/xml": map[string]any{
+						"schema": oaiProp("string", "", "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Flow/>"),
 					},
 				},
 			},
-			"400": map[string]any{"$ref": "#/components/responses/BadRequest"},
-			"401": map[string]any{"$ref": "#/components/responses/Unauthorized"},
-			"403": map[string]any{"$ref": "#/components/responses/Forbidden"},
-		},
+			responses: oaiWithCommonResponses(map[string]any{
+				"201": oaiJSONResp("Artifact uploaded and stored", oaiRef("#/components/schemas/ArtifactRecord")),
+			}, "400", "401", "403"),
+		}),
 	}
+}
+
+func buildListQueryPathItem(operationID, summary, desc, respDesc, arrayKey, itemRef string, params []map[string]any) map[string]any {
 	return map[string]any{
-		"post": op,
+		"get": buildOAIOp(oaiOpSpec{
+			tag:         "Telemetry & Audit",
+			summary:     summary,
+			description: desc,
+			operationID: operationID,
+			params:      params,
+			responses: oaiWithCommonResponses(map[string]any{
+				"200": oaiJSONResp(respDesc, map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"count":  oaiProp("integer", "", nil),
+						arrayKey: map[string]any{"type": "array", "items": oaiRef(itemRef)},
+					},
+				}),
+			}, "401", "403"),
+		}),
 	}
 }
 
 func buildRunsPathItem(operationID string) map[string]any {
-	return map[string]any{
-		"get": map[string]any{
-			"tags":        []string{"Telemetry & Audit"},
-			"summary":     "Query pipeline execution run summaries",
-			"description": "Queries `TablePipelineRuns` (`dbo.pipeline_runs`). Requires `read-only` or `all` permission.",
-			"operationId": operationID,
-			"parameters": []map[string]any{
-				{
-					"name":        "status",
-					"in":          "query",
-					"description": "Optional status filter (e.g. `SUCCEEDED`, `FAILED`)",
-					"required":    false,
-					"schema":      map[string]any{"type": "string"},
-				},
-				{
-					"name":        "limit",
-					"in":          "query",
-					"description": "Maximum number of runs to return (default 100, max 1000)",
-					"required":    false,
-					"schema":      map[string]any{"type": "integer", "default": 100},
-				},
-			},
-			"responses": map[string]any{
-				"200": map[string]any{
-					"description": "Pipeline run summaries",
-					"content": map[string]any{
-						"application/json": map[string]any{
-							"schema": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"count": map[string]any{"type": "integer"},
-									"runs": map[string]any{
-										"type":  "array",
-										"items": map[string]any{"$ref": "#/components/schemas/RunSummaryRecord"},
-									},
-								},
-							},
-						},
-					},
-				},
-				"401": map[string]any{"$ref": "#/components/responses/Unauthorized"},
-				"403": map[string]any{"$ref": "#/components/responses/Forbidden"},
-			},
+	return buildListQueryPathItem(
+		operationID,
+		"Query pipeline execution run summaries",
+		"Queries `TablePipelineRuns` (`dbo.pipeline_runs`). Requires `read-only` or `all` permission.",
+		"Pipeline run summaries",
+		"runs",
+		"#/components/schemas/RunSummaryRecord",
+		[]map[string]any{
+			oaiQueryParam("status", "string", "Optional status filter (e.g. `SUCCEEDED`, `FAILED`)", nil),
+			oaiQueryParam("limit", "integer", "Maximum number of runs to return (default 100, max 1000)", 100),
 		},
-	}
+	)
 }
 
 func buildEventsPathItem(operationID string) map[string]any {
-	return map[string]any{
-		"get": map[string]any{
-			"tags":        []string{"Telemetry & Audit"},
-			"summary":     "Query per-node pipeline execution events and node_output",
-			"description": "Queries `TablePipelineEvents` (`dbo.pipeline_events`), including `node_output` when `node_output=true` was enabled on execution. Requires `read-only` or `all` permission.",
-			"operationId": operationID,
-			"parameters": []map[string]any{
-				{
-					"name":        "run_id",
-					"in":          "query",
-					"description": "Filter events by pipeline `run_id`",
-					"required":    false,
-					"schema":      map[string]any{"type": "string"},
-				},
-				{
-					"name":        "limit",
-					"in":          "query",
-					"description": "Maximum number of events to return (default 500, max 2000)",
-					"required":    false,
-					"schema":      map[string]any{"type": "integer", "default": 500},
-				},
-			},
-			"responses": map[string]any{
-				"200": map[string]any{
-					"description": "Pipeline execution events",
-					"content": map[string]any{
-						"application/json": map[string]any{
-							"schema": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"count": map[string]any{"type": "integer"},
-									"events": map[string]any{
-										"type":  "array",
-										"items": map[string]any{"$ref": "#/components/schemas/PipelineEventRecord"},
-									},
-								},
-							},
-						},
-					},
-				},
-				"401": map[string]any{"$ref": "#/components/responses/Unauthorized"},
-				"403": map[string]any{"$ref": "#/components/responses/Forbidden"},
-			},
+	return buildListQueryPathItem(
+		operationID,
+		"Query per-node pipeline execution events and node_output",
+		"Queries `TablePipelineEvents` (`dbo.pipeline_events`), including `node_output` when `node_output=true` was enabled on execution. Requires `read-only` or `all` permission.",
+		"Pipeline execution events",
+		"events",
+		"#/components/schemas/PipelineEventRecord",
+		[]map[string]any{
+			oaiQueryParam("run_id", "string", "Filter events by pipeline `run_id`", nil),
+			oaiQueryParam("limit", "integer", "Maximum number of events to return (default 500, max 2000)", 500),
 		},
-	}
+	)
 }
 
 func buildAuditPathItem(operationID string) map[string]any {
-	return map[string]any{
-		"get": map[string]any{
-			"tags":        []string{"Telemetry & Audit"},
-			"summary":     "Query API audit events",
-			"description": "Queries `TableAPIAuditEvents` (`dbo.flow_api_events`) for CRUD, upload, authentication, user management, and execution audit logs. Requires `read-only` or `all` permission.",
-			"operationId": operationID,
-			"parameters": []map[string]any{
-				{
-					"name":        "event_type",
-					"in":          "query",
-					"description": "Filter by event type (e.g. `pipeline.execute`, `artifact.upload`, `auth.forbidden`)",
-					"required":    false,
-					"schema":      map[string]any{"type": "string"},
-				},
-				{
-					"name":        "auth_user",
-					"in":          "query",
-					"description": "Filter by authenticated username",
-					"required":    false,
-					"schema":      map[string]any{"type": "string"},
-				},
-				{
-					"name":        "status",
-					"in":          "query",
-					"description": "Filter by status (`SUCCESS`, `ERROR`, `FAILED`, `FORBIDDEN`, `UNAUTHORIZED`)",
-					"required":    false,
-					"schema":      map[string]any{"type": "string"},
-				},
-				{
-					"name":        "limit",
-					"in":          "query",
-					"description": "Maximum number of audit events to return (default 100, max 1000)",
-					"required":    false,
-					"schema":      map[string]any{"type": "integer", "default": 100},
-				},
-			},
-			"responses": map[string]any{
-				"200": map[string]any{
-					"description": "API audit trail events",
-					"content": map[string]any{
-						"application/json": map[string]any{
-							"schema": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"count": map[string]any{"type": "integer"},
-									"api_events": map[string]any{
-										"type":  "array",
-										"items": map[string]any{"$ref": "#/components/schemas/APIAuditEvent"},
-									},
-								},
-							},
-						},
-					},
-				},
-				"401": map[string]any{"$ref": "#/components/responses/Unauthorized"},
-				"403": map[string]any{"$ref": "#/components/responses/Forbidden"},
-			},
+	return buildListQueryPathItem(
+		operationID,
+		"Query API audit events",
+		"Queries `TableAPIAuditEvents` (`dbo.flow_api_events`) for CRUD, upload, authentication, user management, and execution audit logs. Requires `read-only` or `all` permission.",
+		"API audit trail events",
+		"api_events",
+		"#/components/schemas/APIAuditEvent",
+		[]map[string]any{
+			oaiQueryParam("event_type", "string", "Filter by event type (e.g. `pipeline.execute`, `artifact.upload`, `auth.forbidden`)", nil),
+			oaiQueryParam("auth_user", "string", "Filter by authenticated username", nil),
+			oaiQueryParam("status", "string", "Filter by status (`SUCCESS`, `ERROR`, `FAILED`, `FORBIDDEN`, `UNAUTHORIZED`)", nil),
+			oaiQueryParam("limit", "integer", "Maximum number of audit events to return (default 100, max 1000)", 100),
 		},
-	}
+	)
 }
 
 func buildDBTestPathItem(operationID string) map[string]any {
 	return map[string]any{
-		"post": map[string]any{
-			"tags":        []string{"System"},
-			"summary":     "Test connectivity to the startup database or an external DSN",
-			"description": "Opens and pings a database connection across all 5 supported drivers (`sqlserver`, `postgres`, `mysql`, `sqlite`, `oracle`) and returns session identity details. Requires `all` permission.",
-			"operationId": operationID,
-			"requestBody": map[string]any{
-				"required": true,
-				"content": map[string]any{
-					"application/json": map[string]any{
-						"schema": map[string]any{"$ref": "#/components/schemas/DatabaseTestRequest"},
-					},
-				},
-			},
-			"responses": map[string]any{
-				"200": map[string]any{
-					"description": "Database connection succeeded",
-					"content": map[string]any{
-						"application/json": map[string]any{
-							"schema": map[string]any{"$ref": "#/components/schemas/DatabaseTestResponse"},
-						},
-					},
-				},
-				"400": map[string]any{"$ref": "#/components/responses/BadRequest"},
-				"401": map[string]any{"$ref": "#/components/responses/Unauthorized"},
-				"403": map[string]any{"$ref": "#/components/responses/Forbidden"},
-				"502": map[string]any{"$ref": "#/components/responses/BadRequest"},
-			},
-		},
+		"post": buildOAIOp(oaiOpSpec{
+			tag:         "System",
+			summary:     "Test connectivity to the startup database or an external DSN",
+			description: "Opens and pings a database connection across all 5 supported drivers (`sqlserver`, `postgres`, `mysql`, `sqlite`, `oracle`) and returns session identity details. Requires `all` permission.",
+			operationID: operationID,
+			body:        oaiJSONBody("#/components/schemas/DatabaseTestRequest", true),
+			responses: oaiWithCommonResponses(map[string]any{
+				"200": oaiJSONResp("Database connection succeeded", oaiRef("#/components/schemas/DatabaseTestResponse")),
+			}, "400", "401", "403", "502"),
+		}),
 	}
 }
