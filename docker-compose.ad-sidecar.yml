@@ -1,0 +1,84 @@
+# Docker Compose with Active Directory (EXAMPLE) Kerberos (klist) Sidecar
+# Usage:
+#   docker exec -it go-flow-api klist -f
+
+services:
+  krb5-sidecar:
+    image: alpine:3.21
+    container_name: go-flow-krb5-sidecar
+    restart: unless-stopped
+    environment:
+      AD_DOMAIN: "${AD_DOMAIN:-EXAMPLE}"
+      AD_REALM: "${AD_REALM:-EXAMPLE.COM}"
+      AD_USER: "${AD_USER:-${USERNAME:-RUN_AS_USER}}"
+      AD_PASSWORD: "${AD_PASSWORD:-}"
+      AD_GROUPS: "${AD_GROUPS:-}"
+      AD_DC_HOST: "${AD_DC_HOST:-dc.example.com}"
+      AD_LDAP_BASE_DN: "${AD_LDAP_BASE_DN:-DC=example,DC=com}"
+      KRB5CCNAME: "/krb5cache/krb5cc_1000"
+      KRB5_CONFIG: "/etc/krb5.conf"
+      KRB5_RENEW_INTERVAL_SEC: "${KRB5_RENEW_INTERVAL_SEC:-14400}"
+    volumes:
+      - ./docker/krb5.conf:/etc/krb5.conf:ro
+      - ./docker/krb5-sidecar-entrypoint.sh:/usr/local/bin/krb5-sidecar-entrypoint.sh:ro
+      # Optional: mount a keytab instead of passing AD_PASSWORD
+      # - ./docker/example.keytab:/etc/krb5.keytab:ro
+      - krb5_cache:/krb5cache
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        apk add --no-cache krb5 krb5-libs openldap-clients cyrus-sasl-gssapi >/dev/null 2>&1 || apk add --no-cache krb5 krb5-libs
+        tr -d '\r' < /usr/local/bin/krb5-sidecar-entrypoint.sh > /tmp/sidecar.sh
+        chmod +x /tmp/sidecar.sh
+        exec /tmp/sidecar.sh
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /krb5cache/ad-identity.env && klist -s"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+
+  go-flow-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: go-flow-api:latest
+    container_name: go-flow-api
+    restart: unless-stopped
+    depends_on:
+      krb5-sidecar:
+        condition: service_healthy
+    ports:
+      - "${FLOW_API_HOST_PORT:-5180}:5180"
+    environment:
+      FLOW_API_ADDR: ":5180"
+      FLOW_API_DSN: "${FLOW_API_DSN:-sqlserver://db.example.com:1433?database=EXAMPLE_DB&integrated+security=true&authenticator=krb5&trustServerCertificate=true}"
+      # Shared Kerberos credential cache (klist) from krb5-sidecar
+      KRB5CCNAME: "/krb5cache/krb5cc_1000"
+      KRB5_CONFIG: "/etc/krb5.conf"
+      AD_REALM: "${AD_REALM:-EXAMPLE.COM}"
+      # Active Directory (EXAMPLE) user and dynamic groups file populated by the sidecar
+      FLOW_WINDOWS_USER: "${AD_DOMAIN:-EXAMPLE}\\${AD_USER:-${USERNAME:-RUN_AS_USER}}"
+      FLOW_WINDOWS_GROUPS: "${AD_GROUPS:-}"
+      FLOW_WINDOWS_GROUPS_FILE: "/krb5cache/ad-groups.txt"
+      HOST_USERDOMAIN: "${AD_DOMAIN:-EXAMPLE}"
+      HOST_USERNAME: "${AD_USER:-${USERNAME:-RUN_AS_USER}}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./docker/krb5.conf:/etc/krb5.conf:ro
+      - krb5_cache:/krb5cache:ro
+      - flow_api_data:/data
+
+volumes:
+  # In-memory tmpfs volume shared between krb5-sidecar and go-flow-api
+  krb5_cache:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=16m,mode=1777"
+  flow_api_data:

@@ -19,3 +19,6 @@ go-flowAPI
 *.sqlite
 *.sqlite3
 private-docker-compose.yml
+docker/private-krb5-sidecar-entrypoint.sh
+docker/private-krb5.conf
+private-docker-compose.ad-sidecar.yml

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/etl-madness/flow"
+	"github.com/microsoft/go-mssqldb/msdsn"
 )
 
 func setupTestServer(t *testing.T) (*APIServer, *httptest.Server, *sql.DB) {
@@ -1121,11 +1122,17 @@ func TestAuthAndWindowsIdentityComprehensive(t *testing.T) {
 	}
 
 	t.Setenv("FLOW_WINDOWS_USER", `CORP\env_win_user`)
+	t.Setenv("FLOW_WINDOWS_GROUPS", `RSYSLAB\Domain Users,RSYSLAB\ETL_Operators`)
+	groupsFile := filepath.Join(t.TempDir(), "ad-groups.txt")
+	_ = os.WriteFile(groupsFile, []byte("RSYSLAB\\AD_Sidecar_Admins\nRSYSLAB\\Data_Engineers\n"), 0600)
+	t.Setenv("FLOW_WINDOWS_GROUPS_FILE", groupsFile)
 	resolvedU, resolvedG := resolveWindowsUserAndGroups(WindowsAutoHostUserMarker, []string{"CORP\\Group1", "CORP\\group1", ""})
-	if resolvedU != `CORP\env_win_user` || len(resolvedG) < 1 {
+	if resolvedU != `CORP\env_win_user` || len(resolvedG) < 5 {
 		t.Fatalf("unexpected resolved user/groups: %q, %v", resolvedU, resolvedG)
 	}
 	t.Setenv("FLOW_WINDOWS_USER", "")
+	t.Setenv("FLOW_WINDOWS_GROUPS", "")
+	t.Setenv("FLOW_WINDOWS_GROUPS_FILE", "")
 	t.Setenv("HOST_USERNAME", "host_bob")
 	t.Setenv("HOST_USERDOMAIN", "CORPDOM")
 	resolvedU2, _ := resolveWindowsUserAndGroups("root", nil)
@@ -1589,6 +1596,17 @@ func TestDBTelemetryAndConfigDialects(t *testing.T) {
 	}
 
 	// 4. LoadStartupConfig & resolveKey with env vars and key-file
+	t.Setenv("KRB5CCNAME", "FILE:/krb5cache/krb5cc_1000")
+	t.Setenv("KRB5_KTNAME", "FILE:/etc/krb5.keytab")
+	var krbCfg msdsn.Config
+	normalizeKrb5Config(&krbCfg)
+	if krbCfg.Parameters["krb5-credcachefile"] != "/krb5cache/krb5cc_1000" || krbCfg.Parameters["krb5-keytabfile"] != "/etc/krb5.keytab" {
+		t.Fatalf("unexpected normalized krb5 parameters: %+v", krbCfg.Parameters)
+	}
+	normalizeKrb5Config(nil)
+	t.Setenv("KRB5CCNAME", "")
+	t.Setenv("KRB5_KTNAME", "")
+
 	keyFile := filepath.Join(t.TempDir(), "secret.key")
 	_ = os.WriteFile(keyFile, []byte("  file-secret-key-123  \n"), 0600)
 	t.Setenv("PORT", "9091")

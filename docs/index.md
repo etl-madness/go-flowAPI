@@ -18,6 +18,8 @@ This documentation suite is organized for direct inclusion in the **[Flow Ecosys
 | **[`index.md`](index.md)** *(This Document)* | Unified overview of architecture, cross-platform builds, Docker deployment, and all REST API endpoints. |
 | **[`COMPILATION_AND_BUILD_GUIDE.md`](COMPILATION_AND_BUILD_GUIDE.md)** | Deep-dive cross-platform compilation options for **Windows**, **Linux**, **FreeBSD**, and **macOS** (`amd64` & `arm64`), compiler flags, static linking, air-gapped vendor builds, and release scripts. |
 | **[`DOCKER_DEPLOYMENT_GUIDE.md`](DOCKER_DEPLOYMENT_GUIDE.md)** | Detailed **Docker & Docker Compose** guide covering multi-stage BuildKit contexts, all 4 Compose topologies (SQLite, PostgreSQL 16, SQL Server 2022, Existing/Host DB), Windows SQL Server host networking, and standalone CLI usage. |
+| **[`AD_KERBEROS_SIDECAR_GUIDE.md`](AD_KERBEROS_SIDECAR_GUIDE.md)** | Complete guide to running `go-flowAPI` in a Linux container with an **Active Directory Kerberos (`klist`) sidecar**, shared `tmpfs` ticket cache, and nested AD group RBAC resolution. |
+| **[`AD_KERBEROS_CONNECTION_FIX.md`](AD_KERBEROS_CONNECTION_FIX.md)** | Diagnosis, changes, and verification for the SQL Server Kerberos connection fix. |
 | **[`API_ENDPOINTS_REFERENCE.md`](API_ENDPOINTS_REFERENCE.md)** | Exhaustive **REST API Endpoint Reference** covering authentication, RBAC permission matrix, request/response schemas, SSE live streaming, cryptographic utilities, telemetry queries, and per-node database session identity logging. |
 
 ---

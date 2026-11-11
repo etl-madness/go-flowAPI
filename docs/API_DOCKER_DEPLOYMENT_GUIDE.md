@@ -217,7 +217,7 @@ flowchart LR
 
 ### Checklist for Windows Host SQL Server Connectivity:
 1. **Use SQL Server Authentication (`username:password@`)**:
-   Ensure SQL Server is configured for **SQL Server and Windows Authentication mode (Mixed Mode)** and supply explicit credentials in `FLOW_API_DSN`:
+   For SQL Server authentication, ensure SQL Server is configured for **SQL Server and Windows Authentication mode (Mixed Mode)** and supply explicit credentials in `FLOW_API_DSN`:
    ```sql
    USE [master];
    CREATE LOGIN [flow_api] WITH PASSWORD = N'YourStrong!Passw0rd', CHECK_POLICY = OFF;
@@ -228,6 +228,7 @@ flowchart LR
    ALTER ROLE [db_datawriter] ADD MEMBER [flow_api];
    GO
    ```
+   For Windows/AD authentication instead, use the [Kerberos sidecar guide](./AD_KERBEROS_SIDECAR_GUIDE.md); Linux containers do not automatically inherit the Windows host's login.
 2. **Use `host.docker.internal` (or `extra_hosts`)**:
    Inside the container, `localhost` refers to the container itself. Use `host.docker.internal` to reach the host machine. If your pipelines stored in the database reference your Windows host's machine name (e.g., `db.example.com`), map that hostname under `extra_hosts` in `docker-compose.yml`:
    ```yaml

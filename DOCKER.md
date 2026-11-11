@@ -1,10 +1,11 @@
 # Docker Quickstart Guide (`go-flowAPI`)
 
-This guide walks through building and running `go-flowAPI` in Docker across all four included Docker Compose configurations:
+This guide walks through building and running `go-flowAPI` in Docker across all five included Docker Compose configurations:
 1. **SQLite (Persistent Volume)** — Fastest single-container setup (`docker-compose.sqlite.yml`)
 2. **PostgreSQL 16 Container** — Full stack with automated schema initialization (`docker-compose.postgres.yml`)
 3. **SQL Server 2022 Container** — Full stack with automated `EXAMPLE_DB` DB and schema initialization (`docker-compose.sqlserver.yml`)
 4. **Existing / Host Database** — Connects to an external or host database via `FLOW_API_DSN` (`docker-compose.yml`)
+5. **Active Directory Kerberos (`klist`) Sidecar** — Runs `go-flowAPI` with a shared Kerberos ticket cache and AD group permissions (`docker-compose.ad-sidecar.yml` — see **[`docs/AD_KERBEROS_SIDECAR_GUIDE.md`](./docs/AD_KERBEROS_SIDECAR_GUIDE.md)**)
 
 ---
 
@@ -18,6 +19,9 @@ This guide walks through building and running `go-flowAPI` in Docker across all 
 | [`docker-compose.sqlite.yml`](./docker-compose.sqlite.yml) | Runs `go-flowAPI` with a persistent SQLite volume (`/data/flow_api.db`) and auto-schema init |
 | [`docker-compose.postgres.yml`](./docker-compose.postgres.yml) | Runs PostgreSQL 16 + `go-flowAPI` with automated `dbo.*` schema initialization |
 | [`docker-compose.sqlserver.yml`](./docker-compose.sqlserver.yml) | Runs SQL Server 2022 + `sqlserver-init` job + `go-flowAPI` |
+| [`docker-compose.ad-sidecar.yml`](./docker-compose.ad-sidecar.yml) | Runs `krb5-sidecar` (`kinit`/`klist` + AD group lookup) + `go-flowAPI` for Active Directory |
+| [`docker/krb5.conf`](./docker/krb5.conf) | Template Kerberos realm configuration (`EXAMPLE.COM`) |
+| [`docker/krb5-sidecar-entrypoint.sh`](./docker/krb5-sidecar-entrypoint.sh) | Sidecar entrypoint acquiring/renewing TGTs and resolving AD groups into `/krb5cache` |
 | [`docker/docker-entrypoint.sh`](./docker/docker-entrypoint.sh) | Container entrypoint that auto-initializes SQLite tables when `FLOW_API_DSN` targets SQLite |
 | [`docker/init/sqlite-init.sql`](./docker/init/sqlite-init.sql) | SQLite DDL script for all 7 `go-flowAPI` tables |
 | [`docker/init/postgres-init.sql`](./docker/init/postgres-init.sql) | PostgreSQL DDL script (`dbo` schema + all 7 tables) |
@@ -115,12 +119,12 @@ When running `go-flowAPI` natively on Windows (`go run .` or `.\go-flowAPI.exe`)
 
 When running inside a **Linux Docker container**, keep these three requirements in mind:
 
-1. **Use SQL Server Authentication (`username:password@`)**:
-   Linux containers do not have access to your logged-in Windows SSPI token. Always include a SQL Server login and password in `FLOW_API_DSN`:
+1. **Choose SQL Server or Kerberos authentication**:
+   Linux containers do not automatically inherit your logged-in Windows SSPI token. For the standard Compose configuration, use a SQL Server login and password in `FLOW_API_DSN`:
    ```text
    sqlserver://<username>:<password>@host.docker.internal:1433?database=EXAMPLE_DB&trustServerCertificate=true
    ```
-   Ensure your SQL Server instance is configured for **SQL Server and Windows Authentication mode (Mixed Mode)** (in SSMS: right-click server -> *Properties* -> *Security* -> *SQL Server and Windows Authentication mode*, then restart SQL Server).
+   SQL Server authentication requires **SQL Server and Windows Authentication mode (Mixed Mode)** (in SSMS: right-click server -> *Properties* -> *Security* -> *SQL Server and Windows Authentication mode*, then restart SQL Server). Alternatively, use the [Kerberos sidecar guide](./docs/AD_KERBEROS_SIDECAR_GUIDE.md) to authenticate as an AD principal without a SQL login.
 
    To create a dedicated SQL login for `go-flowAPI` in SSMS:
    ```sql
@@ -139,6 +143,21 @@ When running inside a **Linux Docker container**, keep these three requirements 
 
 3. **Enable TCP/IP on Port `1433`**:
    Docker containers connect to the host database exclusively over TCP/IP. In **SQL Server Configuration Manager** -> **SQL Server Network Configuration** -> **Protocols for MSSQLSERVER**, verify that **TCP/IP** is **Enabled** and listening on TCP port `1433` (under *TCP/IP Properties* -> *IP Addresses* -> *IPAll*), and that Windows Firewall allows inbound connections on port `1433`.
+
+---
+
+## Option 5: Active Directory Kerberos Sidecar
+
+The [Kerberos sidecar guide](./docs/AD_KERBEROS_SIDECAR_GUIDE.md) covers configuring the realm, obtaining a ticket with a password or keytab, and connecting to SQL Server using that ticket. The sidecar requires a valid ticket before Compose starts the API; a Windows host login alone does not provide one to the Linux containers.
+
+After startup, verify the SQL login rather than relying on container status:
+
+```powershell
+docker exec go-flow-api klist -f
+(Invoke-RestMethod http://localhost:5180/api/v1/health).db_user
+```
+
+`db_user` should be the expected domain user. An empty value does not confirm a working database connection.
 
 ---
 

@@ -322,6 +322,20 @@ func resolveWindowsUserAndGroups(windowsUser string, windowsGroups []string) (st
 		addGroup(g)
 	}
 
+	if envGroups := strings.TrimSpace(os.Getenv("FLOW_WINDOWS_GROUPS")); envGroups != "" {
+		for _, g := range parseWindowsGroupsHeader(envGroups) {
+			addGroup(g)
+		}
+	}
+
+	if groupsFile := strings.TrimSpace(os.Getenv("FLOW_WINDOWS_GROUPS_FILE")); groupsFile != "" {
+		if data, err := os.ReadFile(groupsFile); err == nil && len(data) > 0 {
+			for _, g := range parseWindowsGroupsHeader(string(data)) {
+				addGroup(g)
+			}
+		}
+	}
+
 	if targetOSUser != nil {
 		if gids, err := targetOSUser.GroupIds(); err == nil {
 			for _, gid := range gids {

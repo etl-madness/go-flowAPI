@@ -17,8 +17,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/go-flow
 # Stage 2: Minimal runtime image
 FROM alpine:3.21
 
-RUN apk add --no-cache ca-certificates tzdata sqlite wget \
-    && mkdir -p /app /data
+RUN apk add --no-cache ca-certificates tzdata sqlite wget krb5 krb5-libs \
+    && mkdir -p /app /data /krb5cache
 
 WORKDIR /app
 
