@@ -1,0 +1,250 @@
+.\" Man page for go-flowAPI(1)
+.TH GO-FLOWAPI 1 "November 2026" "ETL Madness Flow API" "User Commands and Daemons"
+.SH NAME
+go-flowAPI \- REST API, artifact repository, live SSE execution gateway, and telemetry daemon for ETL Madness Flow
+.SH SYNOPSIS
+.B go-flowAPI
+.RI [ options ...]
+.br
+.B go-flowAPI
+.B \-hash\-password
+.I plaintext
+.SH DESCRIPTION
+.B go-flowAPI
+is the centralized HTTP REST API and background service for the ETL Madness Flow ecosystem.
+It embeds the
+.B go-flow
+pipeline engine and pure-Go database drivers to manage database-stored XML/JSON artifacts
+.RB ( pipelines ,
+.BR options ,
+.BR configs ),
+execute and validate pipelines synchronously or over live Server-Sent Events (SSE), provide cryptographic encryption/signing endpoints, enforce database-backed BasicAuth and Active Directory group RBAC, and record full API audit and node execution telemetry across SQL Server, PostgreSQL, MySQL/MariaDB, SQLite, and Oracle.
+.PP
+On Windows,
+.B go-flowAPI.exe
+natively implements the Windows Service Control Manager (SCM) dispatcher and runs directly as a Windows Service without third-party service wrappers.
+On Linux, FreeBSD, and macOS, packages provide ready-to-enable
+.BR systemd (1),
+OpenRC, SysVinit, FreeBSD
+.BR rc.d (8),
+and macOS
+.BR launchd (8)
+service definitions configured via
+.BR go-flow-api.env (5).
+.SH OPTIONS
+Flags accept single-dash or double-dash Go flag syntax (for example,
+.B \-addr
+or
+.BR \-\-addr ).
+Precedence order from lowest to highest: compiled
+.IR StartupConnectionString ,
+values loaded from
+.B \-env\-file
+.RB ( FLOW_API_ENV_FILE ),
+process environment variables, and explicit command-line flags.
+.TP
+.BI \-dsn " uri"
+Primary startup database connection string override.
+Supports
+.BR sqlserver:// ,
+.BR postgres:// ,
+.BR mysql:// ,
+.BR sqlite:// ,
+and
+.BR oracle://
+URIs.
+Environment variable:
+.BR FLOW_API_DSN .
+.TP
+.BI \-addr " host:port"
+HTTP TCP listen address (default
+.BR :8080 ).
+Environment variables:
+.B FLOW_API_ADDR
+or
+.BR PORT .
+.TP
+.BI \-env\-file " path"
+Path to a
+.I KEY=VALUE
+environment configuration file loaded before resolving runtime environment variables (see
+.BR go-flow-api.env (5)).
+Unset variables are populated without overriding variables already present in the process environment.
+Environment variable:
+.BR FLOW_API_ENV_FILE .
+.TP
+.BI \-log\-file " path"
+Optional file path to append server logs (parent directories are created automatically with mode
+.BR 0750 ).
+Recommended when running under the Windows Service Control Manager or SysVinit.
+Environment variable:
+.BR FLOW_API_LOG_FILE .
+.TP
+.BI \-service\-name " name"
+Service name registered with the Windows Service Control Manager when running as a native Windows Service (default
+.BR GoFlowAPI ).
+.TP
+.BI \-secure\-key " passphrase"
+Default AES-256-GCM passphrase for encrypting and decrypting protected artifacts.
+Environment variables:
+.B FLOW_SECURE_KEY
+or
+.BR SECURE_KEY .
+.TP
+.BI \-key\-file " path"
+Path to a file containing the default encryption/decryption passphrase.
+.TP
+.BI \-bootstrap\-user " username"
+Create or update an initial BasicAuth user in
+.I dbo.flow_api_users
+at startup.
+Environment variable:
+.BR FLOW_API_BOOTSTRAP_USER .
+.TP
+.BI \-bootstrap\-pass " password"
+Plaintext password for
+.B \-bootstrap\-user
+(automatically hashed with bcrypt before storage).
+Environment variable:
+.BR FLOW_API_BOOTSTRAP_PASS .
+.TP
+.BI \-bootstrap\-perm " role"
+RBAC permission role assigned to
+.BR \-bootstrap\-user :
+.B all
+(default),
+.BR execution-only ,
+.BR read-only ,
+.BR write ,
+or
+.BR upload .
+Environment variable:
+.BR FLOW_API_BOOTSTRAP_PERM .
+.TP
+.BI \-hash\-password " password"
+Generate a bcrypt password hash on standard output and exit immediately.
+.TP
+.B \-debug
+Enable verbose request and execution debug logging.
+Environment variable:
+.B FLOW_API_DEBUG
+.RB ( true " or " 1 ).
+.SH RBAC PERMISSION ROLES
+.TP
+.B all
+Full administrative access across all endpoints, including user management
+.RB ( /api/v1/users ),
+database connectivity testing
+.RB ( /api/v1/db/test ),
+execution, CRUD, and audit logs.
+.TP
+.B execution-only
+Execute and validate pipelines
+.RB ( /api/v1/execute ,
+.BR /api/v1/execute/stream ,
+.BR /api/v1/validate )
+plus read-only artifact and telemetry queries.
+.TP
+.B write " / " upload
+Upload XML/JSON files and create, update, delete, and read artifacts
+.RB ( /api/v1/upload/* ,
+.BR /api/v1/artifacts/* ).
+.TP
+.B read-only
+List, read, and export artifacts and query
+.BR /api/v1/runs ,
+.BR /api/v1/events ,
+and
+.BR /api/v1/audit .
+.SH OS SERVICE MANAGEMENT
+.TP
+.B Linux (systemd)
+Edit
+.I /etc/go-flow-api/go-flow-api.env
+and run:
+.RS
+.nf
+sudo systemctl enable --now go-flow-api.service
+sudo journalctl -u go-flow-api.service -f
+.fi
+.RE
+.TP
+.B Linux (OpenRC)
+Install
+.I /opt/flow-api/share/services/openrc/go-flow-api
+to
+.I /etc/init.d/go-flow-api
+and run:
+.RS
+.nf
+sudo rc-update add go-flow-api default
+sudo rc-service go-flow-api start
+.fi
+.RE
+.TP
+.B FreeBSD (rc.d)
+Edit
+.I /usr/local/etc/go-flow-api/go-flow-api.env
+and run:
+.RS
+.nf
+sudo sysrc go_flow_api_enable="YES"
+sudo service go_flow_api start
+.fi
+.RE
+.TP
+.B macOS (launchd)
+Edit
+.IR /opt/flow-api/etc/go-flow-api.env ,
+copy
+.I /opt/flow-api/share/services/launchd/com.etlmadness.go-flow-api.plist
+to
+.IR /Library/LaunchDaemons/ ,
+and run:
+.RS
+.nf
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.etlmadness.go-flow-api.plist
+.fi
+.RE
+.TP
+.B Windows (Native SCM Service)
+From an elevated PowerShell prompt:
+.RS
+.nf
+& "C:\Program Files\ETL Madness\Flow API\share\services\windows\Install-GoFlowAPIService.ps1" -Start
+.fi
+.RE
+.SH FILES
+.TP
+.I /opt/flow-api/bin/go-flowAPI
+Installed server binary on Linux, macOS, and FreeBSD.
+.TP
+.I /etc/go-flow-api/go-flow-api.env
+Default daemon environment configuration on Linux.
+.TP
+.I /usr/local/etc/go-flow-api/go-flow-api.env
+Default daemon environment configuration on FreeBSD.
+.TP
+.I /usr/local/etc/rc.d/go_flow_api
+FreeBSD
+.BR rc.d (8)
+service control script.
+.TP
+.I /usr/lib/systemd/system/go-flow-api.service
+Linux
+.BR systemd.service (5)
+unit file.
+.TP
+.I /opt/flow-api/share/sql/*.sql
+Database initialization DDL scripts for SQLite, PostgreSQL, and SQL Server.
+.SH SIGNALS
+.B SIGINT
+and
+.B SIGTERM
+initiate a graceful HTTP shutdown (up to 15 seconds) and record a
+.B system.shutdown
+audit event before exiting.
+.SH SEE ALSO
+.BR go-flow-api.env (5),
+.BR flow (1),
+.BR flow-pipeline (5)

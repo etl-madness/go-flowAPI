@@ -1,0 +1,118 @@
+# Optional nFPM configuration for building .deb, .rpm, and Arch .pkg.tar.zst
+# packages under /opt/flow-api without requiring native dpkg-deb, rpmbuild, or makepkg.
+name: "go-flow-api"
+arch: "${NFPM_ARCH}"
+platform: "linux"
+version: "${FLOW_VERSION}"
+release: "${FLOW_RELEASE}"
+section: "net"
+priority: "optional"
+maintainer: "ETL Madness <maintainers@etl-madness.invalid>"
+description: |
+  ETL Madness go-flowAPI REST, Artifact CRUD, Execution & Telemetry Service.
+  Installs isolated under /opt/flow-api (binary, man pages, GNU Info manual,
+  SQL schema DDL scripts, and systemd/OpenRC/SysVinit service definitions)
+  with /etc/go-flow-api/go-flow-api.env and /etc/profile.d/go-flow-api.sh.
+homepage: "https://github.com/etl-madness/go-flowAPI"
+license: "MIT"
+
+scripts:
+  postinstall: "${REPO_ROOT}/packaging/debian/postinst"
+  preremove: "${REPO_ROOT}/packaging/debian/prerm"
+  postremove: "${REPO_ROOT}/packaging/debian/postrm"
+
+contents:
+  - src: "${STAGE_BIN_DIR}/go-flowAPI"
+    dst: "/opt/flow-api/bin/go-flowAPI"
+    file_info:
+      mode: 0755
+  - src: "${STAGE_DOC_DIR}/man1/go-flowAPI.1.gz"
+    dst: "/opt/flow-api/share/man/man1/go-flowAPI.1.gz"
+    file_info:
+      mode: 0644
+  - src: "${STAGE_DOC_DIR}/man5/go-flow-api.env.5.gz"
+    dst: "/opt/flow-api/share/man/man5/go-flow-api.env.5.gz"
+    file_info:
+      mode: 0644
+  - src: "${STAGE_DOC_DIR}/info/go-flow-api.info.gz"
+    dst: "/opt/flow-api/share/info/go-flow-api.info.gz"
+    file_info:
+      mode: 0644
+  - src: "${STAGE_DOC_DIR}/info/dir"
+    dst: "/opt/flow-api/share/info/dir"
+    file_info:
+      mode: 0644
+  - src: "${REPO_ROOT}/docker/init/sqlite-init.sql"
+    dst: "/opt/flow-api/share/sql/sqlite-init.sql"
+    file_info:
+      mode: 0644
+  - src: "${REPO_ROOT}/docker/init/postgres-init.sql"
+    dst: "/opt/flow-api/share/sql/postgres-init.sql"
+    file_info:
+      mode: 0644
+  - src: "${REPO_ROOT}/docker/init/sqlserver-init.sql"
+    dst: "/opt/flow-api/share/sql/sqlserver-init.sql"
+    file_info:
+      mode: 0644
+  - src: "${REPO_ROOT}/SCHEMA.md"
+    dst: "/opt/flow-api/share/doc/SCHEMA.md"
+    file_info:
+      mode: 0644
+  - src: "${REPO_ROOT}/BOOTSTRAP.md"
+    dst: "/opt/flow-api/share/doc/BOOTSTRAP.md"
+    file_info:
+      mode: 0644
+  - src: "${REPO_ROOT}/docs/API_ENDPOINTS_REFERENCE.md"
+    dst: "/opt/flow-api/share/doc/API_ENDPOINTS_REFERENCE.md"
+    file_info:
+      mode: 0644
+  - src: "${REPO_ROOT}/docs/AD_KERBEROS_SIDECAR_GUIDE.md"
+    dst: "/opt/flow-api/share/doc/AD_KERBEROS_SIDECAR_GUIDE.md"
+    file_info:
+      mode: 0644
+  - src: "${REPO_ROOT}/packaging/services/systemd/go-flow-api.service"
+    dst: "/opt/flow-api/share/services/systemd/go-flow-api.service"
+    file_info:
+      mode: 0644
+  - src: "${REPO_ROOT}/packaging/services/openrc/go-flow-api"
+    dst: "/opt/flow-api/share/services/openrc/go-flow-api"
+    file_info:
+      mode: 0755
+  - src: "${REPO_ROOT}/packaging/services/sysvinit/go-flow-api"
+    dst: "/opt/flow-api/share/services/sysvinit/go-flow-api"
+    file_info:
+      mode: 0755
+  - src: "${REPO_ROOT}/packaging/services/kerberos/go-flow-api-krb5-refresh.sh"
+    dst: "/opt/flow-api/share/services/kerberos/go-flow-api-krb5-refresh.sh"
+    file_info:
+      mode: 0755
+  - src: "${REPO_ROOT}/packaging/services/systemd/go-flow-api.service"
+    dst: "/usr/lib/systemd/system/go-flow-api.service"
+    file_info:
+      mode: 0644
+  - src: "${REPO_ROOT}/packaging/etc/go-flow-api/go-flow-api.env"
+    dst: "/etc/go-flow-api/go-flow-api.env"
+    type: "config|noreplace"
+    file_info:
+      mode: 0640
+  - src: "${REPO_ROOT}/packaging/etc/profile.d/go-flow-api.sh"
+    dst: "/etc/profile.d/go-flow-api.sh"
+    type: "config|noreplace"
+    file_info:
+      mode: 0644
+  - src: "${REPO_ROOT}/LICENSE"
+    dst: "/opt/flow-api/share/licenses/LICENSE"
+    file_info:
+      mode: 0644
+  - src: "${REPO_ROOT}/LICENSE"
+    dst: "/usr/share/licenses/go-flow-api/LICENSE"
+    file_info:
+      mode: 0644
+  - dst: "/var/lib/go-flow-api"
+    type: "dir"
+    file_info:
+      mode: 0750
+  - dst: "/var/log/go-flow-api"
+    type: "dir"
+    file_info:
+      mode: 0750

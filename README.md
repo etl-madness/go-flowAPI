@@ -83,6 +83,9 @@ docker compose -f docker-compose.sqlite.yml up -d --build
 | :--- | :--- | :--- | :--- |
 | `-dsn` | `FLOW_API_DSN` | `StartupConnectionString` | Startup database connection string |
 | `-addr` | `FLOW_API_ADDR` / `PORT` | `:8080` | HTTP listen address |
+| `-env-file` | `FLOW_API_ENV_FILE` | `""` | Path to `KEY=VALUE` environment configuration file (`go-flow-api.env`) |
+| `-log-file` | `FLOW_API_LOG_FILE` | `""` | Optional file path to append server logs (recommended for Windows SCM / SysVinit) |
+| `-service-name` | — | `"GoFlowAPI"` | Service name when running under the Windows Service Control Manager |
 | `-secure-key` | `FLOW_SECURE_KEY` | `""` | Default encryption/decryption passphrase for encrypted artifacts |
 | `-key-file` | — | `""` | Path to file containing default encryption/decryption key |
 | `-bootstrap-user` | `FLOW_API_BOOTSTRAP_USER` | `""` | Initial API username to create/update at startup |
@@ -90,6 +93,32 @@ docker compose -f docker-compose.sqlite.yml up -d --build
 | `-bootstrap-perm` | `FLOW_API_BOOTSTRAP_PERM` | `"all"` | Permission role for `-bootstrap-user` (`all`, `execution-only`, `read-only`, `write`, `upload`) |
 | `-hash-password` | — | `""` | Generate and print a bcrypt hash for the given password and exit |
 | `-debug` | `FLOW_API_DEBUG` | `false` | Enable verbose debug logging |
+
+---
+
+## OS Packaging, Installation & Background Services (Unix `/opt/flow-api` & Windows WinGet)
+
+Build scripts, package manifests, OS service units (`systemd`, OpenRC, SysVinit, FreeBSD `rc.d`, macOS `launchd`, and native Windows Service helpers), `man` pages, GNU `info` documentation, WiX `.msi` definitions, and WinGet manifests are located in [`packaging/`](packaging/README.md).
+
+All packages compile `go-flowAPI` (`go-flowAPI.exe` on Windows) as a static pure-Go binary (`CGO_ENABLED=0`), use non-colliding package identifiers (**`go-flow-api`** on Unix, **`ETLMadness.GoFlowAPI`** on WinGet), and install isolated under **`/opt/flow-api`** (or `C:\Program Files\ETL Madness\Flow API\`) so they never conflict with system binaries or with `go-flow` (`/opt/flow`):
+
+| Target Platform | Package Format | Build Script | Install Command | OS Service / `rc` Integration |
+| :--- | :--- | :--- | :--- | :--- |
+| **Debian / Ubuntu** | `.deb` | `sh ./packaging/scripts/build-deb.sh [amd64\|arm64]` | `sudo apt install ./packaging/dist/go-flow-api_*.deb` | `systemd` (`go-flow-api.service`), OpenRC & SysVinit |
+| **RHEL / Fedora / SUSE / openSUSE** | `.rpm` | `sh ./packaging/scripts/build-rpm.sh [amd64\|arm64]` | `sudo dnf install ./packaging/dist/go-flow-api-*.rpm` *(or `zypper`)* | `systemd` (`go-flow-api.service`), OpenRC & SysVinit |
+| **Arch Linux** | `.pkg.tar.zst` | `sh ./packaging/scripts/build-arch.sh [amd64\|arm64]` | `sudo pacman -U ./packaging/dist/go-flow-api-*.pkg.tar.zst` | `systemd` (`go-flow-api.service`) |
+| **macOS** | `.pkg` | `sh ./packaging/scripts/build-macos-pkg.sh [arm64\|amd64\|universal]` | `sudo installer -pkg ./packaging/dist/go-flow-api-*.pkg -target /` | `launchd` (`com.etlmadness.go-flow-api.plist`) |
+| **FreeBSD** | `.pkg` | `sh ./packaging/scripts/build-freebsd-pkg.sh [amd64\|arm64]` | `sudo pkg add ./packaging/dist/go-flow-api-*.pkg` | `rc.d` (`/usr/local/etc/rc.d/go_flow_api` + `sysrc`) |
+| **Windows (WinGet Portable)** | `.zip` + WinGet YAML | `.\packaging\scripts\Build-Windows.ps1 -Format zip` | `winget install --manifest packaging\dist\winget\e\ETLMadness\GoFlowAPI\<ver>\` | Native SCM in `go-flowAPI.exe` + `Install-GoFlowAPIService.ps1` |
+| **Windows (Enterprise MSI)** | `.msi` + WinGet YAML | `.\packaging\scripts\Build-Windows.ps1 -Format all` | `msiexec /i packaging\dist\go-flow-api-*-windows-amd64.msi` | Native SCM in `go-flowAPI.exe` + `Install-GoFlowAPIService.ps1` |
+
+To automatically build native package(s) for the current Unix host into `packaging/dist/`:
+
+```sh
+sh ./packaging/scripts/build-all.sh host
+```
+
+See **[`packaging/README.md`](packaging/README.md)** and **[`packaging/winget/README.md`](packaging/winget/README.md)** for full build options, `go-flow-api.env` configuration, **[running outside Docker with Kerberos tickets (`klist`) & Active Directory permissions](packaging/README.md#8-running-outside-docker-with-kerberos-tickets-klist--active-directory-permissions)**, and step-by-step instructions to enable, monitor, and manage `systemd`, OpenRC, SysVinit, FreeBSD `rc.d`, macOS `launchd`, and Windows Services.
 
 ---
 

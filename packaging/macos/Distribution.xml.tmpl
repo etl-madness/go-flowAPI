@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>ETL Madness Flow API (__VERSION__)</title>
+    <organization>com.etlmadness</organization>
+    <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+    <options customize="never" require-scripts="false" hostArchitectures="__HOST_ARCHS__"/>
+    <choices-outline>
+        <line choice="default">
+            <line choice="com.etlmadness.go-flow-api"/>
+        </line>
+    </choices-outline>
+    <choice id="default"/>
+    <choice id="com.etlmadness.go-flow-api" visible="false">
+        <pkg-ref id="com.etlmadness.go-flow-api"/>
+    </choice>
+    <pkg-ref id="com.etlmadness.go-flow-api" version="__VERSION__" onConclusion="none">go-flow-api-component.pkg</pkg-ref>
+</installer-gui-script>

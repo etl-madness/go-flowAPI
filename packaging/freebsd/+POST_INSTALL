@@ -1,0 +1,23 @@
+#!/bin/sh
+# FreeBSD post-install script for go-flow-api.
+# Creates unprivileged flowapi user/group, state/log directories, and seeds
+# /usr/local/etc/go-flow-api/go-flow-api.env without overwriting existing edits.
+
+if ! pw groupshow flowapi >/dev/null 2>&1; then
+    pw groupadd -n flowapi || true
+fi
+
+if ! pw usershow flowapi >/dev/null 2>&1; then
+    pw useradd -n flowapi -g flowapi -d /var/db/go-flow-api -s /usr/sbin/nologin -c "ETL Madness go-flowAPI daemon" || true
+fi
+
+install -d -o flowapi -g flowapi -m 0750 /var/db/go-flow-api /var/log/go-flow-api 2>/dev/null || true
+install -d -o root -g flowapi -m 0750 /usr/local/etc/go-flow-api 2>/dev/null || true
+
+if [ ! -f /usr/local/etc/go-flow-api/go-flow-api.env ] && [ -f /usr/local/etc/go-flow-api/go-flow-api.env.sample ]; then
+    cp /usr/local/etc/go-flow-api/go-flow-api.env.sample /usr/local/etc/go-flow-api/go-flow-api.env
+    chown root:flowapi /usr/local/etc/go-flow-api/go-flow-api.env 2>/dev/null || true
+    chmod 0640 /usr/local/etc/go-flow-api/go-flow-api.env 2>/dev/null || true
+fi
+
+exit 0

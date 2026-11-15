@@ -1,0 +1,107 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          go-flow-api
+# Required-Start:    $network $remote_fs $syslog
+# Required-Stop:     $network $remote_fs $syslog
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: ETL Madness go-flowAPI REST & Execution Service
+# Description:       Starts and stops the ETL Madness go-flowAPI daemon (/opt/flow-api/bin/go-flowAPI).
+### END INIT INFO
+
+set -u
+
+NAME="go-flow-api"
+DAEMON="/opt/flow-api/bin/go-flowAPI"
+DAEMON_USER="${GO_FLOW_API_USER:-flowapi}"
+ENV_FILE="${GO_FLOW_API_ENV_FILE:-/etc/go-flow-api/go-flow-api.env}"
+WORKDIR="${GO_FLOW_API_WORKDIR:-/var/lib/go-flow-api}"
+PIDFILE="/var/run/${NAME}.pid"
+LOGDIR="/var/log/${NAME}"
+LOGFILE="${LOGDIR}/${NAME}.log"
+EXTRA_OPTS="${GO_FLOW_API_OPTS:-}"
+
+[ -x "$DAEMON" ] || exit 0
+
+is_running() {
+    [ -f "$PIDFILE" ] || return 1
+    pid=$(cat "$PIDFILE" 2>/dev/null || true)
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+do_start() {
+    if is_running; then
+        printf '%s is already running (PID %s).\n' "$NAME" "$(cat "$PIDFILE")"
+        return 0
+    fi
+    mkdir -p "$WORKDIR" "$LOGDIR"
+    if id "$DAEMON_USER" >/dev/null 2>&1; then
+        chown "$DAEMON_USER" "$WORKDIR" "$LOGDIR" 2>/dev/null || true
+    fi
+    printf 'Starting %s...\n' "$NAME"
+    if command -v start-stop-daemon >/dev/null 2>&1; then
+        chuid_args=""
+        if id "$DAEMON_USER" >/dev/null 2>&1; then
+            chuid_args="--chuid ${DAEMON_USER}"
+        fi
+        # shellcheck disable=SC2086
+        start-stop-daemon --start --background --make-pidfile --pidfile "$PIDFILE" \
+            --chdir "$WORKDIR" $chuid_args \
+            --exec "$DAEMON" -- -env-file "$ENV_FILE" -log-file "$LOGFILE" $EXTRA_OPTS
+    elif id "$DAEMON_USER" >/dev/null 2>&1 && command -v su >/dev/null 2>&1; then
+        su -s /bin/sh "$DAEMON_USER" -c "cd '$WORKDIR' && nohup '$DAEMON' -env-file '$ENV_FILE' -log-file '$LOGFILE' $EXTRA_OPTS >/dev/null 2>&1 & echo \$! > '$PIDFILE'"
+    else
+        (
+            cd "$WORKDIR" || exit 1
+            # shellcheck disable=SC2086
+            nohup "$DAEMON" -env-file "$ENV_FILE" -log-file "$LOGFILE" $EXTRA_OPTS >/dev/null 2>&1 &
+            echo $! > "$PIDFILE"
+        )
+    fi
+}
+
+do_stop() {
+    if ! is_running; then
+        printf '%s is not running.\n' "$NAME"
+        rm -f "$PIDFILE"
+        return 0
+    fi
+    pid=$(cat "$PIDFILE")
+    printf 'Stopping %s (PID %s)...\n' "$NAME" "$pid"
+    kill -TERM "$pid" 2>/dev/null || true
+    i=0
+    while [ "$i" -lt 15 ] && kill -0 "$pid" 2>/dev/null; do
+        sleep 1
+        i=$((i + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -KILL "$pid" 2>/dev/null || true
+    fi
+    rm -f "$PIDFILE"
+}
+
+case "${1:-}" in
+    start)
+        do_start
+        ;;
+    stop)
+        do_stop
+        ;;
+    restart|reload|force-reload)
+        do_stop
+        do_start
+        ;;
+    status)
+        if is_running; then
+            printf '%s is running (PID %s).\n' "$NAME" "$(cat "$PIDFILE")"
+            exit 0
+        else
+            printf '%s is stopped.\n' "$NAME"
+            exit 3
+        fi
+        ;;
+    *)
+        printf 'Usage: %s {start|stop|restart|status}\n' "$0" >&2
+        exit 2
+        ;;
+esac

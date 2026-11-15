@@ -1,0 +1,31 @@
+[Unit]
+Description=ETL Madness go-flowAPI — Orchestration, Artifact CRUD & Execution REST API
+Documentation=https://etl-madness.github.io/flow-docs/
+Documentation=man:go-flowAPI(1) man:go-flow-api.env(5)
+After=network-online.target postgresql.service mariadb.service mysql.service mssql-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=flowapi
+Group=flowapi
+WorkingDirectory=/var/lib/go-flow-api
+StateDirectory=go-flow-api
+StateDirectoryMode=0750
+EnvironmentFile=-/etc/go-flow-api/go-flow-api.env
+ExecStart=/opt/flow-api/bin/go-flowAPI -env-file /etc/go-flow-api/go-flow-api.env
+KillSignal=SIGTERM
+TimeoutStopSec=20s
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65536
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/go-flow-api
+
+[Install]
+WantedBy=multi-user.target

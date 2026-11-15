@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+
+case "${1:-}" in
+    remove)
+        if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+            systemctl --no-reload disable --now go-flow-api.service >/dev/null 2>&1 || true
+        elif [ -x /etc/init.d/go-flow-api ]; then
+            /etc/init.d/go-flow-api stop >/dev/null 2>&1 || true
+        fi
+        ;;
+esac
+
+exit 0

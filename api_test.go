@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -1801,5 +1802,95 @@ func main() { fmt.Print("ok") }
 	c, _ = doAuthJSON(t, client, http.MethodGet, ts.URL+"/swagger/nonexistent", "", "", nil, nil)
 	if c != http.StatusNotFound {
 		t.Fatalf("expected 404 for /swagger/nonexistent, got %d", c)
+	}
+}
+
+func TestEnvFileLogFileAndRunAPIServer(t *testing.T) {
+	tmpDir := t.TempDir()
+	envPath := filepath.Join(tmpDir, "go-flow-api.env")
+	dbPath := filepath.Join(tmpDir, "svc_test.db")
+	logPath := filepath.Join(tmpDir, "logs", "go-flow-api.log")
+
+	envContent := strings.Join([]string{
+		"# Sample environment configuration",
+		"export FLOW_API_DSN=\"" + dbPath + "\"",
+		"FLOW_API_ADDR='127.0.0.1:0'",
+		"FLOW_WINDOWS_USER=\"RSYSLAB\\U00001\"",
+		"FLOW_API_DEBUG=true # inline comment",
+		"",
+	}, "\r\n")
+	if err := os.WriteFile(envPath, []byte(envContent), 0600); err != nil {
+		t.Fatalf("failed writing temp env file: %v", err)
+	}
+
+	// Ensure env vars are clean so loadEnvFile populates them
+	t.Setenv("FLOW_API_DSN", "")
+	t.Setenv("FLOW_API_ADDR", "")
+	t.Setenv("FLOW_WINDOWS_USER", "")
+	t.Setenv("FLOW_API_DEBUG", "")
+
+	cfg, err := LoadStartupConfig([]string{"-env-file", envPath, "-log-file", logPath, "-service-name", "GoFlowAPITest"})
+	if err != nil {
+		t.Fatalf("LoadStartupConfig with -env-file failed: %v", err)
+	}
+	if cfg.ConnectionString != dbPath || cfg.ListenAddr != "127.0.0.1:0" || !cfg.Debug || cfg.LogFilePath != logPath || cfg.ServiceName != "GoFlowAPITest" {
+		t.Fatalf("unexpected parsed ServerConfig: %+v", cfg)
+	}
+	if gotWinUser := os.Getenv("FLOW_WINDOWS_USER"); gotWinUser != `RSYSLAB\U00001` {
+		t.Fatalf("expected literal backslash in FLOW_WINDOWS_USER, got %q", gotWinUser)
+	}
+
+	// Missing env-file should return an error
+	if _, err := LoadStartupConfig([]string{"-env-file", filepath.Join(tmpDir, "missing.env")}); err == nil {
+		t.Fatalf("expected error for missing -env-file")
+	}
+
+	// Verify configureLogOutput creates parent directory and log file
+	origOut := log.Writer()
+	defer log.SetOutput(origOut)
+	lf, err := configureLogOutput(logPath)
+	if err != nil || lf == nil {
+		t.Fatalf("configureLogOutput failed: f=%v err=%v", lf, err)
+	}
+	log.Printf("service log check")
+	_ = lf.Close()
+	log.SetOutput(origOut)
+	if data, err := os.ReadFile(logPath); err != nil || !strings.Contains(string(data), "service log check") {
+		t.Fatalf("expected log entry in %s, err=%v", logPath, err)
+	}
+
+	// Verify interactive maybeRunOSService returns handled=false outside SCM
+	if handled, err := maybeRunOSService(cfg); err != nil || handled {
+		t.Fatalf("expected handled=false outside SCM, got handled=%v err=%v", handled, err)
+	}
+
+	// Verify normalizeKrb5Config resolves keytab principal user & realm from AD_REALM / FLOW_WINDOWS_USER
+	// and isContainerOrAutoUser recognizes the 'flowapi' daemon service account
+	t.Setenv("KRB5_KTNAME", "FILE:/etc/go-flow-api/flowapi.keytab")
+	t.Setenv("AD_REALM", "RSYSLAB.COM")
+	t.Setenv("FLOW_WINDOWS_USER", `RSYSLAB\svc_goflow`)
+	var ktCfg msdsn.Config
+	normalizeKrb5Config(&ktCfg)
+	if ktCfg.Parameters["krb5-keytabfile"] != "/etc/go-flow-api/flowapi.keytab" ||
+		ktCfg.Parameters["krb5-realm"] != "RSYSLAB.COM" ||
+		ktCfg.User != "svc_goflow" {
+		t.Fatalf("unexpected keytab normalized config: user=%q params=%+v", ktCfg.User, ktCfg.Parameters)
+	}
+	if !isContainerOrAutoUser("flowapi") || !isContainerOrAutoUser(`HOST\flowapi`) {
+		t.Fatalf("expected flowapi daemon account to be recognized by isContainerOrAutoUser")
+	}
+	t.Setenv("KRB5_KTNAME", "")
+	t.Setenv("AD_REALM", "")
+
+	// Verify runAPIServer starts, invokes onReady, and shuts down cleanly when context cancels
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runAPIServer(ctx, cfg, func() {
+			cancel()
+		})
+	}()
+	if err := <-errCh; err != nil {
+		t.Fatalf("runAPIServer failed: %v", err)
 	}
 }

@@ -1,0 +1,44 @@
+#!/bin/sh
+set -e
+
+case "${1:-}" in
+    configure)
+        if ! getent group flowapi >/dev/null 2>&1; then
+            if command -v groupadd >/dev/null 2>&1; then
+                groupadd --system flowapi || true
+            elif command -v addgroup >/dev/null 2>&1; then
+                addgroup --system flowapi || true
+            fi
+        fi
+
+        if ! getent passwd flowapi >/dev/null 2>&1; then
+            NOLOGIN_SHELL="/usr/sbin/nologin"
+            [ -x "$NOLOGIN_SHELL" ] || NOLOGIN_SHELL="/sbin/nologin"
+            [ -x "$NOLOGIN_SHELL" ] || NOLOGIN_SHELL="/bin/false"
+            if command -v useradd >/dev/null 2>&1; then
+                useradd --system --gid flowapi --home-dir /var/lib/go-flow-api --no-create-home --shell "$NOLOGIN_SHELL" flowapi || true
+            elif command -v adduser >/dev/null 2>&1; then
+                adduser --system --ingroup flowapi --home /var/lib/go-flow-api --no-create-home --shell "$NOLOGIN_SHELL" flowapi || true
+            fi
+        fi
+
+        mkdir -p /var/lib/go-flow-api /var/log/go-flow-api /etc/go-flow-api
+        if getent passwd flowapi >/dev/null 2>&1; then
+            chown flowapi:flowapi /var/lib/go-flow-api /var/log/go-flow-api || true
+            chmod 0750 /var/lib/go-flow-api /var/log/go-flow-api || true
+            if [ -f /etc/go-flow-api/go-flow-api.env ]; then
+                chown root:flowapi /etc/go-flow-api/go-flow-api.env || true
+                chmod 0640 /etc/go-flow-api/go-flow-api.env || true
+            fi
+        fi
+
+        if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+            systemctl daemon-reload >/dev/null 2>&1 || true
+            if [ -n "${2:-}" ] && systemctl is-active --quiet go-flow-api.service >/dev/null 2>&1; then
+                systemctl try-restart go-flow-api.service >/dev/null 2>&1 || true
+            fi
+        fi
+        ;;
+esac
+
+exit 0

@@ -1,0 +1,35 @@
+post_install() {
+    getent group flowapi >/dev/null 2>&1 || groupadd --system flowapi || true
+    getent passwd flowapi >/dev/null 2>&1 || useradd --system --gid flowapi --home-dir /var/lib/go-flow-api --no-create-home --shell /usr/bin/nologin flowapi || true
+
+    chown flowapi:flowapi /var/lib/go-flow-api /var/log/go-flow-api 2>/dev/null || true
+    chown root:flowapi /etc/go-flow-api /etc/go-flow-api/go-flow-api.env 2>/dev/null || true
+    chmod 0640 /etc/go-flow-api/go-flow-api.env 2>/dev/null || true
+
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+    printf "==> Configure /etc/go-flow-api/go-flow-api.env, then run:\n"
+    printf "    sudo systemctl enable --now go-flow-api.service\n"
+}
+
+post_upgrade() {
+    post_install
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+        if systemctl is-active --quiet go-flow-api.service >/dev/null 2>&1; then
+            systemctl try-restart go-flow-api.service >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
+pre_remove() {
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+        systemctl --no-reload disable --now go-flow-api.service >/dev/null 2>&1 || true
+    fi
+}
+
+post_remove() {
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+}

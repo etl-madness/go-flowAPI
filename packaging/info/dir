@@ -1,0 +1,11 @@
+This is the file .../info/dir, which contains the
+topmost node of the Info hierarchy, called (dir)Top.
+The first time you invoke Info you start off looking at this node.
+
+File: dir,	Node: Top	This is the top of the INFO tree
+
+* Menu:
+
+Network Applications and Daemons
+* go-flowAPI: (go-flow-api)Invoking go-flowAPI.       ETL Madness Flow REST API and execution daemon.
+* go-flow-api.env: (go-flow-api)Configuration File.   Environment configuration for go-flowAPI services.

@@ -1,0 +1,189 @@
+\input texinfo    @c -*-texinfo-*-
+@c %**start of header
+@setfilename go-flow-api.info
+@settitle ETL Madness Flow API Manual
+@documentencoding UTF-8
+@c %**end of header
+
+@dircategory Network Applications and Daemons
+@direntry
+* go-flowAPI: (go-flow-api)Invoking go-flowAPI.       ETL Madness Flow REST API and execution daemon.
+* go-flow-api.env: (go-flow-api)Configuration File.   Environment configuration for go-flowAPI services.
+@end direntry
+
+@copying
+This manual is for ETL Madness Flow API (@command{go-flowAPI}).
+
+Copyright @copyright{} 2026 ETL Madness. Licensed under the MIT License.
+@end copying
+
+@titlepage
+@title ETL Madness Flow API Manual
+@subtitle REST API, Database Repository, SSE Execution Gateway & OS Service Reference
+@page
+@vskip 0pt plus 1filll
+@insertcopying
+@end titlepage
+
+@contents
+
+@ifnottex
+@node Top
+@top ETL Madness Flow API
+
+This manual documents @strong{go-flowAPI}, the centralized HTTP REST API,
+artifact repository, live Server-Sent Events (SSE) execution gateway, and
+multi-database telemetry daemon for the ETL Madness Flow ecosystem.
+
+@menu
+* Overview and Architecture::   Supported databases, RBAC roles, and package layout.
+* Invoking go-flowAPI::         Command-line flags, precedence, and password hashing.
+* Configuration File::          Syntax and variables for @file{go-flow-api.env}.
+* OS Services and Daemons::     systemd, OpenRC, SysVinit, FreeBSD rc.d, launchd, and Windows SCM.
+* REST API Overview::           Core endpoints for artifacts, execution, crypto, and telemetry.
+@end menu
+@end ifnottex
+
+@node Overview and Architecture
+@chapter Overview and Architecture
+
+@command{go-flowAPI} compiles as a zero-dependency pure-Go static binary
+(@code{CGO_ENABLED=0}) embedding the @code{go-flow} pipeline execution engine
+and relational drivers for Microsoft SQL Server / Azure SQL, PostgreSQL,
+MySQL / MariaDB, SQLite, and Oracle.
+
+Packages install isolated under @file{/opt/flow-api} on Unix platforms and
+@file{C:\Program Files\ETL Madness\Flow API\} on Windows so binaries and manuals
+never conflict with system packages or with the @code{go-flow} CLI package
+(@file{/opt/flow}).
+
+@command{go-flowAPI} does not auto-create database tables at startup. Before
+starting the service against a new database, apply the schema DDL in
+@file{/opt/flow-api/share/doc/SCHEMA.md} or the ready-to-run SQL scripts in
+@file{/opt/flow-api/share/sql/}.
+
+@node Invoking go-flowAPI
+@chapter Invoking @command{go-flowAPI}
+
+Synopsis:
+
+@example
+go-flowAPI [-env-file PATH] [-dsn URI] [-addr HOST:PORT] [options...]
+go-flowAPI -hash-password "PlaintextPassword"
+@end example
+
+@section Command-Line Flags
+
+@table @code
+@item -dsn @var{URI}
+Database connection string override (@env{FLOW_API_DSN}).
+@item -addr @var{ADDR}
+HTTP TCP listen address, default @code{:8080} (@env{FLOW_API_ADDR} or @env{PORT}).
+@item -env-file @var{PATH}
+Load unset @code{KEY=VALUE} environment variables from @var{PATH} (@env{FLOW_API_ENV_FILE}).
+@item -log-file @var{PATH}
+Append server log output to @var{PATH} (@env{FLOW_API_LOG_FILE}).
+@item -service-name @var{NAME}
+Windows SCM service name when running as a Windows Service (default @code{GoFlowAPI}).
+@item -secure-key @var{KEY}
+Default AES-256-GCM passphrase (@env{FLOW_SECURE_KEY}).
+@item -key-file @var{PATH}
+File containing the default AES-256-GCM passphrase.
+@item -bootstrap-user @var{USER}
+Seed or update an initial BasicAuth user at startup (@env{FLOW_API_BOOTSTRAP_USER}).
+@item -bootstrap-pass @var{PASS}
+Password for @code{-bootstrap-user}, automatically bcrypt-hashed (@env{FLOW_API_BOOTSTRAP_PASS}).
+@item -bootstrap-perm @var{ROLE}
+Permission role for @code{-bootstrap-user}: @code{all} (default), @code{execution-only}, @code{read-only}, @code{write}, or @code{upload}.
+@item -hash-password @var{PASS}
+Print a bcrypt hash of @var{PASS} to stdout and exit.
+@item -debug
+Enable verbose debug logging (@env{FLOW_API_DEBUG}).
+@end table
+
+@node Configuration File
+@chapter Environment Configuration (@file{go-flow-api.env})
+
+Default file locations by platform:
+
+@itemize @bullet
+@item Linux: @file{/etc/go-flow-api/go-flow-api.env}
+@item FreeBSD: @file{/usr/local/etc/go-flow-api/go-flow-api.env}
+@item macOS: @file{/opt/flow-api/etc/go-flow-api.env}
+@item Windows: @file{C:\ProgramData\ETL Madness\Flow API\go-flow-api.env}
+@end itemize
+
+Key environment variables include @env{FLOW_API_DSN}, @env{FLOW_API_ADDR},
+@env{FLOW_SECURE_KEY}, @env{FLOW_API_LOG_FILE}, @env{FLOW_API_DEBUG}, and
+Active Directory / Kerberos variables (@env{AD_REALM}, @env{KRB5_CONFIG},
+@env{KRB5_KTNAME}, @env{KRB5CCNAME}).
+
+@node OS Services and Daemons
+@chapter Configuring OS Services and @code{rc} Scripts
+
+@section Linux (@code{systemd})
+Linux @code{.deb}, @code{.rpm}, and Arch @code{.pkg.tar.zst} packages create
+the unprivileged @code{flowapi} user, install @file{/etc/go-flow-api/go-flow-api.env}
+(mode @code{0640}), and register @file{/usr/lib/systemd/system/go-flow-api.service}:
+
+@example
+sudo vi /etc/go-flow-api/go-flow-api.env
+sudo systemctl enable --now go-flow-api.service
+sudo systemctl status go-flow-api.service
+sudo journalctl -u go-flow-api.service -f
+@end example
+
+@section Linux (OpenRC and SysVinit)
+For Alpine, Gentoo, Devuan, or SysVinit hosts, ready-to-install init scripts
+are bundled under @file{/opt/flow-api/share/services/openrc/go-flow-api} and
+@file{/opt/flow-api/share/services/sysvinit/go-flow-api}. Copy the appropriate
+script to @file{/etc/init.d/go-flow-api} (@code{chmod 0755}) and enable via
+@code{rc-update add go-flow-api default} (OpenRC) or @code{update-rc.d go-flow-api defaults}
+/ @code{chkconfig --add go-flow-api} (SysVinit).
+
+@section FreeBSD (@code{rc.d})
+The FreeBSD @code{.pkg} installs @file{/usr/local/etc/rc.d/go_flow_api} and
+seeds @file{/usr/local/etc/go-flow-api/go-flow-api.env}:
+
+@example
+sudo vi /usr/local/etc/go-flow-api/go-flow-api.env
+sudo sysrc go_flow_api_enable="YES"
+sudo service go_flow_api start
+sudo service go_flow_api status
+@end example
+
+@section macOS (@code{launchd})
+Configure @file{/opt/flow-api/etc/go-flow-api.env} (@code{chmod 0600}), copy
+@file{/opt/flow-api/share/services/launchd/com.etlmadness.go-flow-api.plist}
+into @file{/Library/LaunchDaemons/}, and run:
+
+@example
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.etlmadness.go-flow-api.plist
+sudo launchctl kickstart -k system/com.etlmadness.go-flow-api
+@end example
+
+@section Windows (Native SCM Windows Service)
+@file{go-flowAPI.exe} natively supports the Windows Service Control Manager.
+Run the bundled PowerShell installer in an elevated Administrator shell:
+
+@example
+& "C:\Program Files\ETL Madness\Flow API\share\services\windows\Install-GoFlowAPIService.ps1" -Start
+@end example
+
+Pass @code{-Credential (Get-Credential "DOMAIN\svc_flowapi")} or
+@code{-GroupManagedServiceAccount "DOMAIN\gmsa_flowapi$"} when connecting to
+Microsoft SQL Server with Windows Integrated Authentication.
+
+@node REST API Overview
+@chapter REST API Overview
+
+@itemize @bullet
+@item @code{GET /api/v1/health}: Public health, database driver, and schema check.
+@item @code{GET /swagger/} and @code{GET /api/v1/openapi.json}: Interactive Swagger UI and OpenAPI 3.0.3 spec.
+@item @code{/api/v1/artifacts/@{type@}} and @code{/api/v1/upload/@{type@}}: CRUD, ID lookup, XML export, and file upload for @code{pipelines}, @code{options}, and @code{configs}.
+@item @code{POST /api/v1/execute}, @code{POST /api/v1/execute/stream}, @code{POST /api/v1/validate}: Synchronous execution, live SSE node streaming, and XSD/AST validation.
+@item @code{GET /api/v1/runs}, @code{GET /api/v1/events}, @code{GET /api/v1/audit}: Execution history, @code{node_output} telemetry, and API audit trail.
+@item @code{/api/v1/users} and @code{POST /api/v1/db/test}: Administrative BasicAuth user management and DSN connectivity verification.
+@end itemize
+
+@bye

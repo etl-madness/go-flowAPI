@@ -1,0 +1,36 @@
+#!/sbin/openrc-run
+# OpenRC init script for ETL Madness go-flowAPI (Alpine Linux, Gentoo, Artix).
+# Install to /etc/init.d/go-flow-api (chmod 0755) and enable via:
+#   rc-update add go-flow-api default
+#   rc-service go-flow-api start
+
+name="go-flowAPI"
+description="ETL Madness go-flowAPI REST & Pipeline Execution Service"
+
+: "${GO_FLOW_API_USER:=flowapi}"
+: "${GO_FLOW_API_GROUP:=flowapi}"
+: "${GO_FLOW_API_ENV_FILE:=/etc/go-flow-api/go-flow-api.env}"
+: "${GO_FLOW_API_WORKDIR:=/var/lib/go-flow-api}"
+: "${GO_FLOW_API_LOGFILE:=/var/log/go-flow-api/go-flow-api.log}"
+: "${GO_FLOW_API_OPTS:=}"
+
+command="/opt/flow-api/bin/go-flowAPI"
+command_args="-env-file ${GO_FLOW_API_ENV_FILE} ${GO_FLOW_API_OPTS}"
+command_user="${GO_FLOW_API_USER}:${GO_FLOW_API_GROUP}"
+command_background="yes"
+directory="${GO_FLOW_API_WORKDIR}"
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="${GO_FLOW_API_LOGFILE}"
+error_log="${GO_FLOW_API_LOGFILE}"
+retry="TERM/15/KILL/5"
+
+depend() {
+    need net
+    after firewall postgresql mysql mariadb
+}
+
+start_pre() {
+    checkpath --directory --owner "${GO_FLOW_API_USER}:${GO_FLOW_API_GROUP}" --mode 0750 "${GO_FLOW_API_WORKDIR}"
+    checkpath --directory --owner "${GO_FLOW_API_USER}:${GO_FLOW_API_GROUP}" --mode 0750 "$(dirname "${GO_FLOW_API_LOGFILE}")"
+    checkpath --file --owner "${GO_FLOW_API_USER}:${GO_FLOW_API_GROUP}" --mode 0640 "${GO_FLOW_API_LOGFILE}"
+}

@@ -252,10 +252,10 @@ func (s *APIServer) AuthenticateUser(ctx context.Context, username, password str
 
 func isContainerOrAutoUser(u string) bool {
 	u = strings.TrimSpace(strings.ToLower(u))
-	if u == "" || u == strings.ToLower(WindowsAutoHostUserMarker) || u == "app" || u == "root" || u == "flow" || u == "nonroot" {
+	if u == "" || u == strings.ToLower(WindowsAutoHostUserMarker) || u == "app" || u == "root" || u == "flow" || u == "flowapi" || u == "nonroot" {
 		return true
 	}
-	for _, suffix := range []string{`\app`, `\root`, `\flow`, `/app`, `/root`, `/flow`} {
+	for _, suffix := range []string{`\app`, `\root`, `\flow`, `\flowapi`, `/app`, `/root`, `/flow`, `/flowapi`} {
 		if strings.HasSuffix(u, suffix) {
 			return true
 		}

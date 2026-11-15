@@ -1,0 +1,69 @@
+# Maintainer: ETL Madness <maintainers@etl-madness.invalid>
+pkgname=go-flow-api
+pkgver=__PKGVER__
+pkgrel=__PKGREL__
+pkgdesc="ETL Madness go-flowAPI REST, Artifact CRUD, Execution & Telemetry Service (/opt/flow-api)"
+arch=('__CARCH__')
+url="https://github.com/etl-madness/go-flowAPI"
+license=('MIT')
+options=('!debug' '!strip')
+install=go-flow-api.install
+backup=(
+    'etc/profile.d/go-flow-api.sh'
+    'etc/go-flow-api/go-flow-api.env'
+)
+source=("go-flow-api-${pkgver}-staged.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+    install -dm0755 "${pkgdir}/opt/flow-api/bin"
+    install -m0755 "${srcdir}/bin/go-flowAPI" "${pkgdir}/opt/flow-api/bin/go-flowAPI"
+
+    install -dm0755 "${pkgdir}/opt/flow-api/share/man/man1"
+    install -m0644 "${srcdir}/doc/man1/go-flowAPI.1.gz" "${pkgdir}/opt/flow-api/share/man/man1/go-flowAPI.1.gz"
+
+    install -dm0755 "${pkgdir}/opt/flow-api/share/man/man5"
+    install -m0644 "${srcdir}/doc/man5/go-flow-api.env.5.gz" "${pkgdir}/opt/flow-api/share/man/man5/go-flow-api.env.5.gz"
+
+    install -dm0755 "${pkgdir}/opt/flow-api/share/info"
+    install -m0644 "${srcdir}/doc/info/go-flow-api.info.gz" "${pkgdir}/opt/flow-api/share/info/go-flow-api.info.gz"
+    install -m0644 "${srcdir}/doc/info/dir" "${pkgdir}/opt/flow-api/share/info/dir"
+
+    install -dm0755 "${pkgdir}/opt/flow-api/share/sql"
+    install -m0644 "${srcdir}/sql/sqlite-init.sql" "${pkgdir}/opt/flow-api/share/sql/sqlite-init.sql"
+    install -m0644 "${srcdir}/sql/postgres-init.sql" "${pkgdir}/opt/flow-api/share/sql/postgres-init.sql"
+    install -m0644 "${srcdir}/sql/sqlserver-init.sql" "${pkgdir}/opt/flow-api/share/sql/sqlserver-init.sql"
+
+    install -dm0755 "${pkgdir}/opt/flow-api/share/doc"
+    install -m0644 "${srcdir}/guides/SCHEMA.md" "${pkgdir}/opt/flow-api/share/doc/SCHEMA.md"
+    install -m0644 "${srcdir}/guides/BOOTSTRAP.md" "${pkgdir}/opt/flow-api/share/doc/BOOTSTRAP.md"
+    install -m0644 "${srcdir}/guides/API_ENDPOINTS_REFERENCE.md" "${pkgdir}/opt/flow-api/share/doc/API_ENDPOINTS_REFERENCE.md"
+    install -m0644 "${srcdir}/guides/AD_KERBEROS_SIDECAR_GUIDE.md" "${pkgdir}/opt/flow-api/share/doc/AD_KERBEROS_SIDECAR_GUIDE.md"
+
+    install -dm0755 "${pkgdir}/opt/flow-api/share/services/systemd"
+    install -m0644 "${srcdir}/services/systemd/go-flow-api.service" "${pkgdir}/opt/flow-api/share/services/systemd/go-flow-api.service"
+    install -dm0755 "${pkgdir}/opt/flow-api/share/services/openrc"
+    install -m0755 "${srcdir}/services/openrc/go-flow-api" "${pkgdir}/opt/flow-api/share/services/openrc/go-flow-api"
+    install -dm0755 "${pkgdir}/opt/flow-api/share/services/sysvinit"
+    install -m0755 "${srcdir}/services/sysvinit/go-flow-api" "${pkgdir}/opt/flow-api/share/services/sysvinit/go-flow-api"
+    install -dm0755 "${pkgdir}/opt/flow-api/share/services/kerberos"
+    install -m0755 "${srcdir}/services/kerberos/go-flow-api-krb5-refresh.sh" "${pkgdir}/opt/flow-api/share/services/kerberos/go-flow-api-krb5-refresh.sh"
+
+    install -dm0755 "${pkgdir}/opt/flow-api/share/licenses"
+    install -m0644 "${srcdir}/LICENSE" "${pkgdir}/opt/flow-api/share/licenses/LICENSE"
+
+    install -dm0755 "${pkgdir}/usr/share/licenses/${pkgname}"
+    install -m0644 "${srcdir}/LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+
+    install -dm0755 "${pkgdir}/etc/profile.d"
+    install -m0644 "${srcdir}/profile.d/go-flow-api.sh" "${pkgdir}/etc/profile.d/go-flow-api.sh"
+
+    install -dm0750 "${pkgdir}/etc/go-flow-api"
+    install -m0640 "${srcdir}/etc-env/go-flow-api.env" "${pkgdir}/etc/go-flow-api/go-flow-api.env"
+
+    install -dm0755 "${pkgdir}/usr/lib/systemd/system"
+    install -m0644 "${srcdir}/services/systemd/go-flow-api.service" "${pkgdir}/usr/lib/systemd/system/go-flow-api.service"
+
+    install -dm0750 "${pkgdir}/var/lib/go-flow-api"
+    install -dm0750 "${pkgdir}/var/log/go-flow-api"
+}

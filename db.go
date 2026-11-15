@@ -84,7 +84,41 @@ func normalizeKrb5Config(cfg *msdsn.Config) {
 	if cleaned := stripKrb5FilePrefix(kt); cleaned != "" {
 		cfg.Parameters["krb5-keytabfile"] = cleaned
 	}
+	if strings.TrimSpace(cfg.Parameters["krb5-realm"]) == "" {
+		if envRealm := strings.TrimSpace(os.Getenv("AD_REALM")); envRealm != "" {
+			cfg.Parameters["krb5-realm"] = envRealm
+		}
+	}
+	if cfg.Parameters["krb5-keytabfile"] != "" && strings.TrimSpace(cfg.User) == "" {
+		if principal := resolveKerberosPrincipalUser(); principal != "" {
+			cfg.User = principal
+		}
+	}
 	cfg.ServerSPN = qualifyKerberosServerSPN(cfg.ServerSPN, cfg.Parameters["krb5-realm"], cfg.Parameters["krb5-configfile"])
+}
+
+func resolveKerberosPrincipalUser() string {
+	for _, candidate := range []string{
+		os.Getenv("KRB5_PRINCIPAL"),
+		os.Getenv("AD_USER"),
+		os.Getenv("FLOW_WINDOWS_USER"),
+		os.Getenv("HOST_USERNAME"),
+	} {
+		v := strings.TrimSpace(candidate)
+		if v == "" {
+			continue
+		}
+		if slashIdx := strings.LastIndexAny(v, `\/`); slashIdx >= 0 {
+			v = strings.TrimSpace(v[slashIdx+1:])
+		}
+		if atIdx := strings.IndexByte(v, '@'); atIdx > 0 {
+			v = strings.TrimSpace(v[:atIdx])
+		}
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func qualifyKerberosServerSPN(spn, explicitRealm, explicitConf string) string {

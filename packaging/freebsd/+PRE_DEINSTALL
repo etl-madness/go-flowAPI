@@ -1,0 +1,8 @@
+#!/bin/sh
+# FreeBSD pre-deinstall script for go-flow-api.
+
+if [ -x /usr/local/etc/rc.d/go_flow_api ]; then
+    /usr/local/etc/rc.d/go_flow_api forcestop >/dev/null 2>&1 || true
+fi
+
+exit 0

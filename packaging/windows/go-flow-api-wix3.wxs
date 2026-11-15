@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- WiX v3 (candle/light) and Linux msitools (wixl) manifest for ETL Madness Flow API (.msi) -->
+<!-- Installs isolated under C:\Program Files\ETL Madness\Flow API\ with native Windows Service scripts -->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="$(var.FlowProductCode)"
+           Name="ETL Madness Flow API"
+           Language="1033"
+           Version="$(var.FlowMsiVersion)"
+           Manufacturer="ETL Madness"
+           UpgradeCode="{4B9E2C71-8A54-4D39-B61E-9C20F5A4D831}">
+
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Description="ETL Madness go-flowAPI REST, Artifact CRUD, Execution and Telemetry Service"
+             Manufacturer="ETL Madness" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <Media Id="1" Cabinet="goflowapi.cab" EmbedCab="yes" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="VendorFolder" Name="ETL Madness">
+          <Directory Id="INSTALLFOLDER" Name="Flow API">
+            <Directory Id="BinFolder" Name="bin" />
+            <Directory Id="DocsFolder" Name="docs" />
+            <Directory Id="ShareFolder" Name="share">
+              <Directory Id="SqlFolder" Name="sql" />
+              <Directory Id="ServicesFolder" Name="services">
+                <Directory Id="WinServicesFolder" Name="windows" />
+              </Directory>
+              <Directory Id="ManFolder" Name="man">
+                <Directory Id="Man1Folder" Name="man1" />
+                <Directory Id="Man5Folder" Name="man5" />
+              </Directory>
+            </Directory>
+          </Directory>
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <DirectoryRef Id="BinFolder">
+      <Component Id="CmpGoFlowAPIExe" Guid="*">
+        <File Id="FilGoFlowAPIExe" Source="$(var.StageDir)/bin/go-flowAPI.exe" KeyPath="yes" />
+        <Environment Id="EnvFlowAPIPath"
+                     Name="PATH"
+                     Value="[BinFolder]"
+                     Permanent="no"
+                     Part="last"
+                     Action="set"
+                     System="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="CmpLicense" Guid="*">
+        <File Id="FilLicense" Source="$(var.StageDir)/LICENSE.txt" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="DocsFolder">
+      <Component Id="CmpDocSchema" Guid="*">
+        <File Id="FilDocSchema" Source="$(var.StageDir)/docs/SCHEMA.md" KeyPath="yes" />
+      </Component>
+      <Component Id="CmpDocBootstrap" Guid="*">
+        <File Id="FilDocBootstrap" Source="$(var.StageDir)/docs/BOOTSTRAP.md" KeyPath="yes" />
+      </Component>
+      <Component Id="CmpDocEndpoints" Guid="*">
+        <File Id="FilDocEndpoints" Source="$(var.StageDir)/docs/API_ENDPOINTS_REFERENCE.md" KeyPath="yes" />
+      </Component>
+      <Component Id="CmpDocKerberos" Guid="*">
+        <File Id="FilDocKerberos" Source="$(var.StageDir)/docs/AD_KERBEROS_SIDECAR_GUIDE.md" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="SqlFolder">
+      <Component Id="CmpSqlSqlite" Guid="*">
+        <File Id="FilSqlSqlite" Source="$(var.StageDir)/share/sql/sqlite-init.sql" KeyPath="yes" />
+      </Component>
+      <Component Id="CmpSqlPostgres" Guid="*">
+        <File Id="FilSqlPostgres" Source="$(var.StageDir)/share/sql/postgres-init.sql" KeyPath="yes" />
+      </Component>
+      <Component Id="CmpSqlSqlServer" Guid="*">
+        <File Id="FilSqlSqlServer" Source="$(var.StageDir)/share/sql/sqlserver-init.sql" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="WinServicesFolder">
+      <Component Id="CmpWinSvcInstall" Guid="*">
+        <File Id="FilWinSvcInstall" Source="$(var.StageDir)/share/services/windows/Install-GoFlowAPIService.ps1" KeyPath="yes" />
+      </Component>
+      <Component Id="CmpWinSvcUninstall" Guid="*">
+        <File Id="FilWinSvcUninstall" Source="$(var.StageDir)/share/services/windows/Uninstall-GoFlowAPIService.ps1" KeyPath="yes" />
+      </Component>
+      <Component Id="CmpWinEnvExample" Guid="*">
+        <File Id="FilWinEnvExample" Source="$(var.StageDir)/share/services/windows/go-flow-api.env.example" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="Man1Folder">
+      <Component Id="CmpManApi1" Guid="*">
+        <File Id="FilManApi1" Source="$(var.StageDir)/share/man/man1/go-flowAPI.1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="Man5Folder">
+      <Component Id="CmpManEnv5" Guid="*">
+        <File Id="FilManEnv5" Source="$(var.StageDir)/share/man/man5/go-flow-api.env.5" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="MainFeature" Title="ETL Madness Flow API" Level="1">
+      <ComponentRef Id="CmpGoFlowAPIExe" />
+      <ComponentRef Id="CmpLicense" />
+      <ComponentRef Id="CmpDocSchema" />
+      <ComponentRef Id="CmpDocBootstrap" />
+      <ComponentRef Id="CmpDocEndpoints" />
+      <ComponentRef Id="CmpDocKerberos" />
+      <ComponentRef Id="CmpSqlSqlite" />
+      <ComponentRef Id="CmpSqlPostgres" />
+      <ComponentRef Id="CmpSqlSqlServer" />
+      <ComponentRef Id="CmpWinSvcInstall" />
+      <ComponentRef Id="CmpWinSvcUninstall" />
+      <ComponentRef Id="CmpWinEnvExample" />
+      <ComponentRef Id="CmpManApi1" />
+      <ComponentRef Id="CmpManEnv5" />
+    </Feature>
+  </Product>
+</Wix>

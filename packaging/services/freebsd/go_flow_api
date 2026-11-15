@@ -1,0 +1,54 @@
+#!/bin/sh
+#
+# PROVIDE: go_flow_api
+# REQUIRE: LOGIN NETWORKING DAEMON
+# KEYWORD: shutdown
+#
+# Add the following lines to /etc/rc.conf (or run 'sysrc go_flow_api_enable="YES"')
+# to enable go-flowAPI at boot on FreeBSD:
+#
+# go_flow_api_enable (bool):     Set to "YES" to enable go-flowAPI (default: "NO").
+# go_flow_api_user (str):        Unprivileged account to run as (default: "flowapi").
+# go_flow_api_group (str):       Group to run as (default: "flowapi").
+# go_flow_api_env_file (path):   KEY=VALUE environment config (default: "/usr/local/etc/go-flow-api/go-flow-api.env").
+# go_flow_api_chdir (path):      Working directory (default: "/var/db/go-flow-api").
+# go_flow_api_logfile (path):    Daemon output log file (default: "/var/log/go-flow-api/go-flow-api.log").
+# go_flow_api_flags (str):       Additional CLI flags passed to go-flowAPI (default: "").
+
+. /etc/rc.subr
+
+name="go_flow_api"
+rcvar="go_flow_api_enable"
+
+load_rc_config $name
+
+: "${go_flow_api_enable:=NO}"
+: "${go_flow_api_user:=flowapi}"
+: "${go_flow_api_group:=flowapi}"
+: "${go_flow_api_env_file:=/usr/local/etc/go-flow-api/go-flow-api.env}"
+: "${go_flow_api_chdir:=/var/db/go-flow-api}"
+: "${go_flow_api_logfile:=/var/log/go-flow-api/go-flow-api.log}"
+: "${go_flow_api_flags:=}"
+
+api_extra_flags="${go_flow_api_flags}"
+go_flow_api_flags=""
+
+pidfile="/var/run/${name}/${name}.pid"
+child_pidfile="/var/run/${name}/${name}_child.pid"
+api_bin="/opt/flow-api/bin/go-flowAPI"
+procname="/usr/sbin/daemon"
+command="/usr/sbin/daemon"
+command_args="-f -R 5 -P ${pidfile} -p ${child_pidfile} -t ${name} -o ${go_flow_api_logfile} ${api_bin} -env-file ${go_flow_api_env_file} ${api_extra_flags}"
+start_precmd="${name}_prestart"
+
+go_flow_api_prestart()
+{
+    install -d -o "${go_flow_api_user}" -g "${go_flow_api_group}" -m 0750 "/var/run/${name}"
+    install -d -o "${go_flow_api_user}" -g "${go_flow_api_group}" -m 0750 "${go_flow_api_chdir}"
+    install -d -o "${go_flow_api_user}" -g "${go_flow_api_group}" -m 0750 "$(dirname "${go_flow_api_logfile}")"
+    if [ ! -f "${go_flow_api_logfile}" ]; then
+        install -o "${go_flow_api_user}" -g "${go_flow_api_group}" -m 0640 /dev/null "${go_flow_api_logfile}"
+    fi
+}
+
+run_rc_command "$1"

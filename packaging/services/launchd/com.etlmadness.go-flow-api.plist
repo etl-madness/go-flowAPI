@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS LaunchDaemon plist for ETL Madness go-flowAPI.
+  To enable system-wide at boot:
+    1. Edit /opt/flow-api/etc/go-flow-api.env and set chmod 0600 /opt/flow-api/etc/go-flow-api.env
+    2. sudo mkdir -p /var/db/go-flow-api /var/log/go-flow-api
+    3. sudo cp /opt/flow-api/share/services/launchd/com.etlmadness.go-flow-api.plist /Library/LaunchDaemons/
+    4. sudo chown root:wheel /Library/LaunchDaemons/com.etlmadness.go-flow-api.plist
+    5. sudo chmod 0644 /Library/LaunchDaemons/com.etlmadness.go-flow-api.plist
+    6. sudo launchctl bootstrap system /Library/LaunchDaemons/com.etlmadness.go-flow-api.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.etlmadness.go-flow-api</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/flow-api/bin/go-flowAPI</string>
+        <string>-env-file</string>
+        <string>/opt/flow-api/etc/go-flow-api.env</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/var/db/go-flow-api</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <key>ExitTimeOut</key>
+    <integer>20</integer>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/go-flow-api/go-flow-api.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/var/log/go-flow-api/go-flow-api.error.log</string>
+
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>65536</integer>
+    </dict>
+</dict>
+</plist>
