@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -616,10 +617,187 @@ func (s *APIServer) applyOptionsXMLToRequest(ctx context.Context, req *Execution
 	return optLabel, nil
 }
 
+// resolveRegisteredArtifactRecord attempts to resolve an artifact strictly from the database
+// (by explicit ID, explicit "id:N" prefix, Name, or numeric Name fallback) without touching external SQL URIs or local files.
+func (s *APIServer) resolveRegisteredArtifactRecord(ctx context.Context, artifactType string, artifactID int64, nameOrPath string) (*ArtifactRecord, bool, error) {
+	if artifactID > 0 {
+		rec, err := s.GetArtifactByID(ctx, artifactType, artifactID, false, "")
+		if err != nil {
+			return nil, false, err
+		}
+		return rec, true, nil
+	}
+	ref := strings.TrimSpace(nameOrPath)
+	if ref == "" {
+		return nil, false, nil
+	}
+	lowerRef := strings.ToLower(ref)
+	if (strings.HasPrefix(lowerRef, "sql://") || strings.HasPrefix(lowerRef, "db://")) && strings.Contains(ref, "#") {
+		return nil, false, nil
+	}
+	if explicitID, ok := parseExplicitIDRef(ref); ok {
+		rec, err := s.GetArtifactByID(ctx, artifactType, explicitID, false, "")
+		if err != nil {
+			return nil, false, err
+		}
+		return rec, true, nil
+	}
+	lookupName := strings.TrimPrefix(strings.TrimPrefix(ref, "db://"), "db:")
+	if rec, err := s.GetArtifact(ctx, artifactType, lookupName, false, ""); err == nil && rec != nil {
+		return rec, true, nil
+	}
+	if numID, numErr := strconv.ParseInt(lookupName, 10, 64); numErr == nil && numID > 0 {
+		if recByID, idErr := s.GetArtifactByID(ctx, artifactType, numID, false, ""); idErr == nil && recByID != nil {
+			return recByID, true, nil
+		}
+	}
+	return nil, false, nil
+}
+
+// AuthorizeExecutionRequest verifies that user holds granular 'execute' permission on the resolved target pipeline
+// (including after <cli_options> expansion) and blocks inline XML, SQL URI, or filesystem escapes for scoped users.
+func (s *APIServer) AuthorizeExecutionRequest(ctx context.Context, user *APIUser, req ExecutionRequest) (string, error) {
+	if user == nil {
+		return "", nil
+	}
+	if user.HasPermission(PermAll) {
+		return "", nil
+	}
+
+	canInlineOrExternal := s.CanUserExecuteInlineOrExternal(user)
+
+	// Normalize ArtifactType + ID on a working copy
+	resolvedReq := req
+	canonicalType := "pipeline"
+	if strings.TrimSpace(resolvedReq.ArtifactType) != "" {
+		_, _, ct, err := ResolveArtifactTarget(resolvedReq.ArtifactType)
+		if err != nil {
+			return "", err
+		}
+		canonicalType = ct
+		resolvedReq.ArtifactType = ct
+	}
+	if resolvedReq.ID > 0 {
+		switch canonicalType {
+		case "pipeline":
+			if resolvedReq.PipelineID <= 0 {
+				resolvedReq.PipelineID = resolvedReq.ID
+			}
+		case "options":
+			if resolvedReq.OptionsID <= 0 {
+				resolvedReq.OptionsID = resolvedReq.ID
+			}
+		case "config":
+			if resolvedReq.ConfigID <= 0 {
+				resolvedReq.ConfigID = resolvedReq.ID
+			}
+		}
+	}
+
+	checkDisallowedInlineOrFS := func(r *ExecutionRequest) error {
+		if canInlineOrExternal {
+			return nil
+		}
+		if strings.TrimSpace(r.FileXML) != "" || strings.TrimSpace(r.ConfigXML) != "" || strings.TrimSpace(r.OptionsXML) != "" {
+			return fmt.Errorf("%w: inline XML execution is not permitted for scoped users", ErrPipelineForbidden)
+		}
+		if strings.TrimSpace(r.XSD) != "" || strings.TrimSpace(r.Out) != "" || strings.TrimSpace(r.KeyFile) != "" {
+			return fmt.Errorf("%w: local filesystem XSD/output/key_file options are not permitted for scoped users", ErrPipelineForbidden)
+		}
+		return nil
+	}
+
+	if err := checkDisallowedInlineOrFS(&resolvedReq); err != nil {
+		return "", err
+	}
+
+	// Ensure any referenced options profile comes from the DB for scoped users before expanding it
+	if resolvedReq.OptionsID > 0 || strings.TrimSpace(resolvedReq.Options) != "" || strings.TrimSpace(resolvedReq.OptionsXML) != "" {
+		if !canInlineOrExternal {
+			if _, ok, _ := s.resolveRegisteredArtifactRecord(ctx, "options", resolvedReq.OptionsID, resolvedReq.Options); !ok {
+				return "", fmt.Errorf("%w: options reference must be a registered database options artifact", ErrPipelineForbidden)
+			}
+		}
+		if _, optErr := s.applyOptionsXMLToRequest(ctx, &resolvedReq); optErr != nil && !canInlineOrExternal {
+			return "", optErr
+		}
+		if err := checkDisallowedInlineOrFS(&resolvedReq); err != nil {
+			return "", err
+		}
+	}
+
+	// Direct config-only execution without a pipeline
+	if (resolvedReq.ArtifactType == "config" || resolvedReq.ConfigID > 0) &&
+		resolvedReq.PipelineID <= 0 &&
+		strings.TrimSpace(resolvedReq.File) == "" &&
+		strings.TrimSpace(resolvedReq.FileXML) == "" {
+		if !canInlineOrExternal {
+			return "", fmt.Errorf("%w: direct config execution without a target pipeline is not permitted for scoped users", ErrPipelineForbidden)
+		}
+		return "", nil
+	}
+
+	if strings.TrimSpace(resolvedReq.FileXML) != "" {
+		if !canInlineOrExternal {
+			return "", fmt.Errorf("%w: inline XML execution is not permitted for scoped users", ErrPipelineForbidden)
+		}
+		return "inline", nil
+	}
+
+	targetFile := strings.TrimSpace(resolvedReq.File)
+	if resolvedReq.PipelineID <= 0 && targetFile == "" {
+		targetFile = "scripts.xml"
+	}
+
+	rec, foundInDB, dbErr := s.resolveRegisteredArtifactRecord(ctx, "pipeline", resolvedReq.PipelineID, targetFile)
+	if foundInDB && rec != nil {
+		allowed, reason, aclErr := s.EvaluatePipelineAccess(ctx, user, rec.Name, nil, ActionExecute)
+		if aclErr != nil {
+			return rec.Name, aclErr
+		}
+		if !allowed {
+			return rec.Name, fmt.Errorf("%w: %s", ErrPipelineForbidden, reason)
+		}
+		// Verify auxiliary config / XSLT references do not escape to local filesystem for scoped users
+		if !canInlineOrExternal {
+			if resolvedReq.ConfigID > 0 || strings.TrimSpace(resolvedReq.Config) != "" {
+				if _, ok, _ := s.resolveRegisteredArtifactRecord(ctx, "config", resolvedReq.ConfigID, resolvedReq.Config); !ok {
+					return rec.Name, fmt.Errorf("%w: config %q is not a registered database config artifact", ErrPipelineForbidden, resolvedReq.Config)
+				}
+			}
+			if strings.TrimSpace(resolvedReq.XSLT) != "" {
+				xsltRec, ok, _ := s.resolveRegisteredArtifactRecord(ctx, "pipeline", 0, resolvedReq.XSLT)
+				if !ok || xsltRec == nil {
+					return rec.Name, fmt.Errorf("%w: XSLT %q is not a registered database artifact", ErrPipelineForbidden, resolvedReq.XSLT)
+				}
+				if okXSLT, xsltReason, _ := s.EvaluatePipelineAccess(ctx, user, xsltRec.Name, nil, ActionRead); !okXSLT {
+					return rec.Name, fmt.Errorf("%w: %s", ErrPipelineForbidden, xsltReason)
+				}
+			}
+		}
+		return rec.Name, nil
+	}
+
+	if !canInlineOrExternal {
+		if dbErr != nil && !errors.Is(dbErr, ErrArtifactNotFound) {
+			return targetFile, dbErr
+		}
+		return targetFile, fmt.Errorf("%w: pipeline %q is not accessible or not registered in database", ErrPipelineForbidden, targetFile)
+	}
+
+	return targetFile, nil
+}
+
 // ExecutePipeline executes or validates a pipeline with all available CLI/Builder options,
 // supporting resolution by artifact name, inline XML, local path, or database table ID.
 func (s *APIServer) ExecutePipeline(ctx context.Context, req ExecutionRequest, onEvent func(flow.ExecutionEvent)) (*ExecutionResponse, error) {
 	start := time.Now().UTC()
+
+	if user := UserFromContext(ctx); user != nil {
+		if _, authErr := s.AuthorizeExecutionRequest(ctx, user, req); authErr != nil {
+			return nil, authErr
+		}
+	}
 
 	// Normalize ArtifactType + ID into the corresponding typed ID field (PipelineID, OptionsID, or ConfigID)
 	canonicalType := "pipeline"

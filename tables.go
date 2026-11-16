@@ -22,6 +22,13 @@ const (
 
 	// BasicAuth Users & Role Permissions Table
 	TableAPIUsers = DefaultSchema + "flow_api_users"
+
+	// Granular User/Group & Pipeline/Pipeline-Group RBAC/ACL Tables
+	TableAPIGroups            = DefaultSchema + "flow_api_groups"
+	TableAPIUserGroups        = DefaultSchema + "flow_api_user_groups"
+	TablePipelineGroups       = DefaultSchema + "flow_pipeline_groups"
+	TablePipelineGroupMembers = DefaultSchema + "flow_pipeline_group_members"
+	TablePipelineACL          = DefaultSchema + "flow_pipeline_acl"
 )
 
 // resolveTableName adjusts the table path for dialects where "dbo." is not a valid default schema

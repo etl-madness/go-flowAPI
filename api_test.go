@@ -136,6 +136,46 @@ func setupTestServer(t *testing.T) (*APIServer, *httptest.Server, *sql.DB) {
 			created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
+		`CREATE TABLE IF NOT EXISTS flow_api_groups (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			name        TEXT NOT NULL UNIQUE COLLATE NOCASE,
+			description TEXT,
+			created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE TABLE IF NOT EXISTS flow_api_user_groups (
+			group_name TEXT NOT NULL COLLATE NOCASE,
+			username   TEXT NOT NULL COLLATE NOCASE,
+			added_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (group_name, username)
+		)`,
+		`CREATE TABLE IF NOT EXISTS flow_pipeline_groups (
+			id           INTEGER PRIMARY KEY AUTOINCREMENT,
+			name         TEXT NOT NULL UNIQUE COLLATE NOCASE,
+			description  TEXT,
+			name_pattern TEXT,
+			created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE TABLE IF NOT EXISTS flow_pipeline_group_members (
+			group_name    TEXT NOT NULL COLLATE NOCASE,
+			pipeline_name TEXT NOT NULL COLLATE NOCASE,
+			added_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (group_name, pipeline_name)
+		)`,
+		`CREATE TABLE IF NOT EXISTS flow_pipeline_acl (
+			id             INTEGER PRIMARY KEY AUTOINCREMENT,
+			principal_type TEXT NOT NULL COLLATE NOCASE,
+			principal_name TEXT NOT NULL COLLATE NOCASE,
+			target_type    TEXT NOT NULL COLLATE NOCASE,
+			target_name    TEXT NOT NULL COLLATE NOCASE,
+			permissions    TEXT NOT NULL,
+			effect         TEXT NOT NULL DEFAULT 'allow' COLLATE NOCASE,
+			description    TEXT,
+			created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE (principal_type, principal_name, target_type, target_name, effect)
+		)`,
 	}
 
 	for _, stmt := range ddlStatements {
@@ -1892,5 +1932,551 @@ func TestEnvFileLogFileAndRunAPIServer(t *testing.T) {
 	}()
 	if err := <-errCh; err != nil {
 		t.Fatalf("runAPIServer failed: %v", err)
+	}
+}
+
+func TestGranularACLGroupsAndPipelineCRUD(t *testing.T) {
+	_, ts, _ := setupTestServer(t)
+	client := ts.Client()
+
+	doReq := func(method, path, user, pass, body string) (int, []byte) {
+		t.Helper()
+		var rdr io.Reader
+		if body != "" {
+			rdr = strings.NewReader(body)
+		}
+		req, err := http.NewRequest(method, ts.URL+path, rdr)
+		if err != nil {
+			t.Fatalf("NewRequest(%s %s): %v", method, path, err)
+		}
+		if user != "" {
+			req.SetBasicAuth(user, pass)
+		}
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("Do(%s %s): %v", method, path, err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, b
+	}
+
+	// 1. Verify OpenAPI spec exposes the new Access Control & Groups endpoints and schemas
+	code, specBytes := doReq(http.MethodGet, "/swagger/doc.json", "", "", "")
+	if code != http.StatusOK {
+		t.Fatalf("expected 200 from /swagger/doc.json, got %d", code)
+	}
+	for _, needle := range []string{"/api/v1/groups", "/api/v1/pipeline-groups", "/api/v1/acls", "/api/v1/permissions/effective", "PipelineACL"} {
+		if !strings.Contains(string(specBytes), needle) {
+			t.Fatalf("expected OpenAPI spec to contain %q", needle)
+		}
+	}
+
+	// 2. Non-admin cannot manage groups or ACLs
+	if c, _ := doReq(http.MethodPost, "/api/v1/groups", "write_user", "write_pass", `{"name":"finance_ops"}`); c != http.StatusForbidden {
+		t.Fatalf("expected 403 when non-admin creates group, got %d", c)
+	}
+
+	// 3. Admin creates API user groups, adds/removes members, and creates scoped users assigned to groups
+	code, grpBody := doReq(http.MethodPost, "/api/v1/groups", "admin_user", "admin_pass", `{"name":"finance_ops","description":"Finance ETL Operators"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("expected 201 creating finance_ops group, got %d: %s", code, string(grpBody))
+	}
+	code, _ = doReq(http.MethodPost, "/api/v1/groups", "admin_user", "admin_pass", `{"name":"temp_grp","description":"Temp"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("expected 201 creating temp_grp, got %d", code)
+	}
+	code, _ = doReq(http.MethodPut, "/api/v1/groups/temp_grp", "admin_user", "admin_pass", `{"description":"Updated Temp"}`)
+	if code != http.StatusOK {
+		t.Fatalf("expected 200 updating temp_grp, got %d", code)
+	}
+	code, _ = doReq(http.MethodDelete, "/api/v1/groups/temp_grp", "admin_user", "admin_pass", "")
+	if code != http.StatusOK {
+		t.Fatalf("expected 200 deleting temp_grp, got %d", code)
+	}
+
+	// Create scoped users: fin_reader (in finance_ops via POST /api/v1/users) and fin_author
+	code, userResp := doReq(http.MethodPost, "/api/v1/users", "admin_user", "admin_pass",
+		`{"username":"fin_reader","password":"fin_pass","permission":"scoped","groups":["finance_ops"]}`)
+	if code != http.StatusCreated || !strings.Contains(string(userResp), "finance_ops") {
+		t.Fatalf("expected 201 creating fin_reader with finance_ops group, got %d: %s", code, string(userResp))
+	}
+	code, _ = doReq(http.MethodPost, "/api/v1/users", "admin_user", "admin_pass",
+		`{"username":"fin_author","password":"fin_pass","permission":"scoped"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("expected 201 creating fin_author, got %d", code)
+	}
+	code, _ = doReq(http.MethodPost, "/api/v1/groups/finance_ops/members", "admin_user", "admin_pass", `{"username":"fin_author"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("expected 201 adding fin_author to finance_ops, got %d", code)
+	}
+	code, memBody := doReq(http.MethodGet, "/api/v1/groups/finance_ops/members", "admin_user", "admin_pass", "")
+	if code != http.StatusOK || !strings.Contains(string(memBody), "fin_reader") || !strings.Contains(string(memBody), "fin_author") {
+		t.Fatalf("expected both members in finance_ops, got %d: %s", code, string(memBody))
+	}
+	// Remove fin_author from finance_ops so fin_author tests direct user-level ACLs while fin_reader tests group-level ACLs
+	if c, _ := doReq(http.MethodDelete, "/api/v1/groups/finance_ops/members/fin_author", "admin_user", "admin_pass", ""); c != http.StatusOK {
+		t.Fatalf("expected 200 removing fin_author from finance_ops, got %d", c)
+	}
+
+	// 4. Create pipeline groups: finance_pipelines (with glob pattern fin_*) and hr_pipelines (explicit membership)
+	code, _ = doReq(http.MethodPost, "/api/v1/pipeline-groups", "admin_user", "admin_pass",
+		`{"name":"finance_pipelines","description":"Finance ETL","name_pattern":"fin_*"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("expected 201 creating finance_pipelines, got %d", code)
+	}
+	code, _ = doReq(http.MethodPost, "/api/v1/pipeline-groups", "admin_user", "admin_pass",
+		`{"name":"hr_pipelines","description":"HR ETL"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("expected 201 creating hr_pipelines, got %d", code)
+	}
+
+	// Seed initial pipelines as admin_user
+	code, finPipeResp := doReq(http.MethodPost, "/api/v1/artifacts/pipeline", "admin_user", "admin_pass",
+		`{"name":"fin_gl_daily","description":"GL Daily","content":`+mustJSONString(samplePipelineXML)+`}`)
+	if code != http.StatusCreated {
+		t.Fatalf("expected 201 creating fin_gl_daily, got %d: %s", code, string(finPipeResp))
+	}
+	var finRec ArtifactRecord
+	_ = json.Unmarshal(finPipeResp, &finRec)
+
+	code, hrPipeResp := doReq(http.MethodPost, "/api/v1/artifacts/pipeline", "admin_user", "admin_pass",
+		`{"name":"hr_payroll","description":"HR Payroll","groups":["hr_pipelines"],"content":`+mustJSONString(samplePipelineXML)+`}`)
+	if code != http.StatusCreated {
+		t.Fatalf("expected 201 creating hr_payroll, got %d: %s", code, string(hrPipeResp))
+	}
+	var hrRec ArtifactRecord
+	_ = json.Unmarshal(hrPipeResp, &hrRec)
+
+	//Also test explicit pipeline addition to finance_pipelines for a non-fin_* name
+	code, _ = doReq(http.MethodPost, "/api/v1/artifacts/pipeline", "admin_user", "admin_pass",
+		`{"name":"shared_ledger_sync","content":`+mustJSONString(samplePipelineXML)+`}`)
+	if code != http.StatusCreated {
+		t.Fatalf("expected 201 creating shared_ledger_sync, got %d", code)
+	}
+	code, _ = doReq(http.MethodPost, "/api/v1/pipeline-groups/finance_pipelines/pipelines", "admin_user", "admin_pass",
+		`{"pipeline_name":"shared_ledger_sync"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("expected 201 assigning shared_ledger_sync to finance_pipelines, got %d", code)
+	}
+
+	// 5. Before ACL rules exist, scoped fin_reader sees 0 pipelines and gets 403 on direct read
+	code, listBefore := doReq(http.MethodGet, "/api/v1/artifacts/pipeline", "fin_reader", "fin_pass", "")
+	if code != http.StatusOK || !strings.Contains(string(listBefore), `"count":0`) {
+		t.Fatalf("expected scoped user with no ACLs to list 0 pipelines, got %d: %s", code, string(listBefore))
+	}
+	if c, _ := doReq(http.MethodGet, "/api/v1/artifacts/pipeline/fin_gl_daily", "fin_reader", "fin_pass", ""); c != http.StatusForbidden {
+		t.Fatalf("expected 403 for scoped user reading fin_gl_daily without ACL, got %d", c)
+	}
+	if c, _ := doReq(http.MethodGet, "/api/v1/artifacts/options", "fin_reader", "fin_pass", ""); c != http.StatusForbidden {
+		t.Fatalf("expected 403 for scoped user listing global options directly, got %d", c)
+	}
+
+	// 6. Grant group finance_ops -> read on pipeline_group finance_pipelines
+	code, aclBody := doReq(http.MethodPost, "/api/v1/acls", "admin_user", "admin_pass",
+		`{"principal_type":"group","principal_name":"finance_ops","target_type":"pipeline_group","target_name":"finance_pipelines","permissions":"read","effect":"allow","description":"Finance readers"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("expected 201 creating group ACL, got %d: %s", code, string(aclBody))
+	}
+	var readACL PipelineACL
+	_ = json.Unmarshal(aclBody, &readACL)
+
+	// fin_reader can now list ONLY fin_gl_daily (via fin_* pattern) and shared_ledger_sync (via explicit group member), NOT hr_payroll!
+	code, listAfter := doReq(http.MethodGet, "/api/v1/artifacts/pipeline", "fin_reader", "fin_pass", "")
+	if code != http.StatusOK {
+		t.Fatalf("expected 200 listing pipelines as fin_reader, got %d", code)
+	}
+	if !strings.Contains(string(listAfter), "fin_gl_daily") || !strings.Contains(string(listAfter), "shared_ledger_sync") || strings.Contains(string(listAfter), "hr_payroll") {
+		t.Fatalf("unexpected filtered pipeline list for fin_reader: %s", string(listAfter))
+	}
+	// Group filter query param ?group=finance_pipelines works
+	code, grpFiltered := doReq(http.MethodGet, "/api/v1/artifacts/pipeline?group=finance_pipelines", "fin_reader", "fin_pass", "")
+	if code != http.StatusOK || !strings.Contains(string(grpFiltered), `"count":2`) {
+		t.Fatalf("expected 2 pipelines with ?group=finance_pipelines, got %d: %s", code, string(grpFiltered))
+	}
+	// Direct GET by name, by ID, and /export succeed on fin_gl_daily and return 403 on hr_payroll
+	if c, _ := doReq(http.MethodGet, "/api/v1/artifacts/pipeline/fin_gl_daily", "fin_reader", "fin_pass", ""); c != http.StatusOK {
+		t.Fatalf("expected 200 reading fin_gl_daily by name, got %d", c)
+	}
+	if c, _ := doReq(http.MethodGet, fmt.Sprintf("/api/v1/artifacts/pipeline/id/%d", finRec.ID), "fin_reader", "fin_pass", ""); c != http.StatusOK {
+		t.Fatalf("expected 200 reading fin_gl_daily by ID, got %d", c)
+	}
+	if c, _ := doReq(http.MethodGet, "/api/v1/artifacts/pipeline/fin_gl_daily/export", "fin_reader", "fin_pass", ""); c != http.StatusOK {
+		t.Fatalf("expected 200 exporting fin_gl_daily, got %d", c)
+	}
+	if c, _ := doReq(http.MethodGet, "/api/v1/artifacts/pipeline/hr_payroll", "fin_reader", "fin_pass", ""); c != http.StatusForbidden {
+		t.Fatalf("expected 403 reading hr_payroll by name, got %d", c)
+	}
+	if c, _ := doReq(http.MethodGet, fmt.Sprintf("/api/v1/artifacts/pipeline/id/%d", hrRec.ID), "fin_reader", "fin_pass", ""); c != http.StatusForbidden {
+		t.Fatalf("expected 403 reading hr_payroll by ID, got %d", c)
+	}
+	// fin_reader has read only -> cannot update or delete fin_gl_daily
+	if c, _ := doReq(http.MethodPut, "/api/v1/artifacts/pipeline/fin_gl_daily", "fin_reader", "fin_pass", `{"content":`+mustJSONString(samplePipelineXML)+`}`); c != http.StatusForbidden {
+		t.Fatalf("expected 403 when read-only scoped user attempts PUT, got %d", c)
+	}
+
+	// 7. Grant user fin_author -> create,read,update on pipeline_group finance_pipelines
+	code, authorACLBytes := doReq(http.MethodPost, "/api/v1/acls", "admin_user", "admin_pass",
+		`{"principal_type":"user","principal_name":"fin_author","target_type":"pipeline_group","target_name":"finance_pipelines","permissions":"create,read,update","effect":"allow"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("expected 201 creating fin_author ACL, got %d: %s", code, string(authorACLBytes))
+	}
+	var authorACL PipelineACL
+	_ = json.Unmarshal(authorACLBytes, &authorACL)
+
+	// fin_author can create a pipeline inside finance_pipelines (either via explicit group or via fin_* name pattern!)
+	if c, b := doReq(http.MethodPost, "/api/v1/artifacts/pipeline", "fin_author", "fin_pass",
+		`{"name":"custom_fin_job","group":"finance_pipelines","content":`+mustJSONString(samplePipelineXML)+`}`); c != http.StatusCreated {
+		t.Fatalf("expected 201 creating custom_fin_job in finance_pipelines, got %d: %s", c, string(b))
+	}
+	if c, b := doReq(http.MethodPost, "/api/v1/artifacts/pipeline", "fin_author", "fin_pass",
+		`{"name":"fin_ar_aging","content":`+mustJSONString(samplePipelineXML)+`}`); c != http.StatusCreated {
+		t.Fatalf("expected 201 creating fin_ar_aging matching fin_* pattern, got %d: %s", c, string(b))
+	}
+	// fin_author CANNOT create an ungrouped non-matching pipeline or smuggle into hr_pipelines!
+	if c, _ := doReq(http.MethodPost, "/api/v1/artifacts/pipeline", "fin_author", "fin_pass",
+		`{"name":"rogue_unscoped_job","content":`+mustJSONString(samplePipelineXML)+`}`); c != http.StatusForbidden {
+		t.Fatalf("expected 403 creating ungrouped non-matching pipeline, got %d", c)
+	}
+	if c, _ := doReq(http.MethodPost, "/api/v1/artifacts/pipeline", "fin_author", "fin_pass",
+		`{"name":"fin_smuggle","groups":["finance_pipelines","hr_pipelines"],"content":`+mustJSONString(samplePipelineXML)+`}`); c != http.StatusForbidden {
+		t.Fatalf("expected 403 when attempting to assign unauthorized hr_pipelines group on create, got %d", c)
+	}
+
+	// Raw upload via POST /api/v1/upload/pipeline?name=fin_upload_job checks create on new and update on overwrite
+	uploadReq := func(targetName string) int {
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/upload/pipeline?name="+targetName+"&group=finance_pipelines", strings.NewReader(samplePipelineXML))
+		req.SetBasicAuth("fin_author", "fin_pass")
+		req.Header.Set("Content-Type", "application/xml")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("upload request failed: %v", err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if c := uploadReq("fin_upload_job"); c != http.StatusCreated {
+		t.Fatalf("expected 201 uploading new fin_upload_job, got %d", c)
+	}
+	if c := uploadReq("fin_upload_job"); c != http.StatusCreated {
+		t.Fatalf("expected 201 overwriting fin_upload_job with update perm, got %d", c)
+	}
+	// Upload overwrite on hr_payroll must be 403
+	hrUpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/upload/pipeline?name=hr_payroll", strings.NewReader(samplePipelineXML))
+	hrUpReq.SetBasicAuth("fin_author", "fin_pass")
+	hrUpReq.Header.Set("Content-Type", "application/xml")
+	hrUpResp, _ := client.Do(hrUpReq)
+	hrUpResp.Body.Close()
+	if hrUpResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 uploading over hr_payroll, got %d", hrUpResp.StatusCode)
+	}
+
+	// fin_author can PUT update custom_fin_job, but DELETE fails until delete action is granted via PUT /api/v1/acls/{id}
+	if c, _ := doReq(http.MethodPut, "/api/v1/artifacts/pipeline/custom_fin_job", "fin_author", "fin_pass",
+		`{"description":"Updated desc","group":"finance_pipelines","content":`+mustJSONString(samplePipelineXML)+`}`); c != http.StatusOK {
+		t.Fatalf("expected 200 updating custom_fin_job, got %d", c)
+	}
+	if c, _ := doReq(http.MethodDelete, "/api/v1/artifacts/pipeline/custom_fin_job", "fin_author", "fin_pass", ""); c != http.StatusForbidden {
+		t.Fatalf("expected 403 deleting custom_fin_job without delete ACL, got %d", c)
+	}
+
+	// Upgrade fin_author's ACL via PUT /api/v1/acls/{id} to include delete
+	if c, b := doReq(http.MethodPut, fmt.Sprintf("/api/v1/acls/%d", authorACL.ID), "admin_user", "admin_pass",
+		`{"principal_type":"user","principal_name":"fin_author","target_type":"pipeline_group","target_name":"finance_pipelines","permissions":"create,read,update,delete","effect":"allow"}`); c != http.StatusOK {
+		t.Fatalf("expected 200 updating ACL by ID, got %d: %s", c, string(b))
+	}
+	if c, _ := doReq(http.MethodDelete, "/api/v1/artifacts/pipeline/custom_fin_job", "fin_author", "fin_pass", ""); c != http.StatusOK {
+		t.Fatalf("expected 200 deleting custom_fin_job after granting delete ACL, got %d", c)
+	}
+
+	// 8. Inspect effective permissions: self-inspection, non-admin blocked from inspecting others, admin simulation
+	code, selfPerm := doReq(http.MethodGet, "/api/v1/me/permissions", "fin_reader", "fin_pass", "")
+	if code != http.StatusOK || !strings.Contains(string(selfPerm), `"username":"fin_reader"`) {
+		t.Fatalf("expected 200 from /api/v1/me/permissions for fin_reader, got %d: %s", code, string(selfPerm))
+	}
+	if c, _ := doReq(http.MethodGet, "/api/v1/permissions/effective?username=admin_user", "fin_reader", "fin_pass", ""); c != http.StatusForbidden {
+		t.Fatalf("expected 403 when non-admin inspects another user's permissions, got %d", c)
+	}
+	code, adminInspect := doReq(http.MethodGet, "/api/v1/permissions/effective?username=fin_author", "admin_user", "admin_pass", "")
+	if code != http.StatusOK || !strings.Contains(string(adminInspect), `"finance_pipelines"`) {
+		t.Fatalf("expected 200 from admin effective permissions inspection, got %d: %s", code, string(adminInspect))
+	}
+
+	// Delete ACL by ID and verify listing filter
+	code, aclList := doReq(http.MethodGet, "/api/v1/acls?principal_name=finance_ops", "admin_user", "admin_pass", "")
+	if code != http.StatusOK || !strings.Contains(string(aclList), `"count":1`) {
+		t.Fatalf("expected 1 ACL for finance_ops, got %d: %s", code, string(aclList))
+	}
+	if c, _ := doReq(http.MethodDelete, fmt.Sprintf("/api/v1/acls/%d", readACL.ID), "admin_user", "admin_pass", ""); c != http.StatusOK {
+		t.Fatalf("expected 200 deleting readACL, got %d", c)
+	}
+}
+
+func TestGranularACLExecutionPrecedenceWindowsAndStrictMode(t *testing.T) {
+	apiSrv, ts, _ := setupTestServer(t)
+	client := ts.Client()
+
+	doReq := func(method, path, user, pass, body string, extraHeaders map[string]string) (int, []byte) {
+		t.Helper()
+		var rdr io.Reader
+		if body != "" {
+			rdr = strings.NewReader(body)
+		}
+		req, err := http.NewRequest(method, ts.URL+path, rdr)
+		if err != nil {
+			t.Fatalf("NewRequest(%s %s): %v", method, path, err)
+		}
+		if user != "" {
+			req.SetBasicAuth(user, pass)
+		}
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		for k, v := range extraHeaders {
+			req.Header.Set(k, v)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("Do(%s %s): %v", method, path, err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, b
+	}
+
+	// Seed pipeline_group finance_pipelines, fin_exec_pipe, hr_secret_pipe, a shared config, and two options profiles
+	doReq(http.MethodPost, "/api/v1/pipeline-groups", "admin_user", "admin_pass", `{"name":"finance_pipelines","name_pattern":"fin_*"}`, nil)
+
+	_, finBytes := doReq(http.MethodPost, "/api/v1/artifacts/pipeline", "admin_user", "admin_pass",
+		`{"name":"fin_exec_pipe","content":`+mustJSONString(samplePipelineXML)+`}`, nil)
+	var finRec ArtifactRecord
+	_ = json.Unmarshal(finBytes, &finRec)
+
+	_, hrBytes := doReq(http.MethodPost, "/api/v1/artifacts/pipeline", "admin_user", "admin_pass",
+		`{"name":"hr_secret_pipe","content":`+mustJSONString(samplePipelineXML)+`}`, nil)
+	var hrRec ArtifactRecord
+	_ = json.Unmarshal(hrBytes, &hrRec)
+
+	cfgXML := `<?xml version="1.0" encoding="UTF-8"?><Configuration><Variables><Variable Name="ENV" Value="prod"/></Variables></Configuration>`
+	_, cfgBytes := doReq(http.MethodPost, "/api/v1/artifacts/config", "admin_user", "admin_pass",
+		`{"name":"shared_cfg","content":`+mustJSONString(cfgXML)+`}`, nil)
+	var cfgRec ArtifactRecord
+	_ = json.Unmarshal(cfgBytes, &cfgRec)
+
+	optAllowedXML := `<cli_options><file>fin_exec_pipe</file><config>shared_cfg</config><format>json</format></cli_options>`
+	_, optAllowedBytes := doReq(http.MethodPost, "/api/v1/artifacts/options", "admin_user", "admin_pass",
+		`{"name":"opt_fin_allowed","content":`+mustJSONString(optAllowedXML)+`}`, nil)
+	var optAllowedRec ArtifactRecord
+	_ = json.Unmarshal(optAllowedBytes, &optAllowedRec)
+
+	optSecretXML := `<cli_options><file>hr_secret_pipe</file><format>json</format></cli_options>`
+	_, optSecretBytes := doReq(http.MethodPost, "/api/v1/artifacts/options", "admin_user", "admin_pass",
+		`{"name":"opt_hr_secret","content":`+mustJSONString(optSecretXML)+`}`, nil)
+	var optSecretRec ArtifactRecord
+	_ = json.Unmarshal(optSecretBytes, &optSecretRec)
+
+	// Create scoped runner and grant read,execute on finance_pipelines
+	doReq(http.MethodPost, "/api/v1/users", "admin_user", "admin_pass",
+		`{"username":"fin_runner","password":"run_pass","permission":"scoped"}`, nil)
+	doReq(http.MethodPost, "/api/v1/acls", "admin_user", "admin_pass",
+		`{"principal_type":"user","principal_name":"fin_runner","target_type":"pipeline_group","target_name":"finance_pipelines","permissions":"read,execute","effect":"allow"}`, nil)
+
+	// Execute hr_secret_pipe as admin_user first so telemetry tables contain both hr_secret_pipe and fin_exec_pipe runs
+	if c, b := doReq(http.MethodPost, "/api/v1/execute", "admin_user", "admin_pass", `{"file":"hr_secret_pipe","node_output":true}`, nil); c != http.StatusOK {
+		t.Fatalf("admin execute hr_secret_pipe failed (%d): %s", c, string(b))
+	}
+
+	// 1. fin_runner CAN execute, validate, and SSE-stream fin_exec_pipe (including via opt_fin_allowed + shared_cfg)
+	if c, b := doReq(http.MethodPost, "/api/v1/execute", "fin_runner", "run_pass", `{"file":"fin_exec_pipe","config":"shared_cfg","node_output":true}`, nil); c != http.StatusOK {
+		t.Fatalf("expected 200 executing fin_exec_pipe, got %d: %s", c, string(b))
+	}
+	if c, b := doReq(http.MethodPost, fmt.Sprintf("/api/v1/execute/pipeline/%d", finRec.ID), "fin_runner", "run_pass", "", nil); c != http.StatusOK {
+		t.Fatalf("expected 200 executing fin_exec_pipe by ID, got %d: %s", c, string(b))
+	}
+	if c, b := doReq(http.MethodPost, "/api/v1/validate", "fin_runner", "run_pass", `{"file":"fin_exec_pipe"}`, nil); c != http.StatusOK {
+		t.Fatalf("expected 200 validating fin_exec_pipe, got %d: %s", c, string(b))
+	}
+	if c, b := doReq(http.MethodPost, "/api/v1/execute/stream", "fin_runner", "run_pass", `{"file":"fin_exec_pipe"}`, nil); c != http.StatusOK || !strings.Contains(string(b), "event: done") {
+		t.Fatalf("expected 200 SSE stream for fin_exec_pipe, got %d: %s", c, string(b))
+	}
+	if c, b := doReq(http.MethodGet, fmt.Sprintf("/api/v1/execute/stream/pipeline/%d", finRec.ID), "fin_runner", "run_pass", "", nil); c != http.StatusOK || !strings.Contains(string(b), "event: done") {
+		t.Fatalf("expected 200 SSE stream by ID for fin_exec_pipe, got %d: %s", c, string(b))
+	}
+	if c, b := doReq(http.MethodPost, fmt.Sprintf("/api/v1/execute/options/%d", optAllowedRec.ID), "fin_runner", "run_pass", "", nil); c != http.StatusOK {
+		t.Fatalf("expected 200 executing opt_fin_allowed pointing to fin_exec_pipe, got %d: %s", c, string(b))
+	}
+
+	// 2. fin_runner is BLOCKED (403 Forbidden) on hr_secret_pipe, SSE stream of hr_secret_pipe, options indirection to hr_secret_pipe, inline XML, sql:// URI, local paths, and direct config execution
+	deniedExecCases := []struct {
+		name string
+		path string
+		body string
+	}{
+		{"direct secret name", "/api/v1/execute", `{"file":"hr_secret_pipe"}`},
+		{"direct secret ID", fmt.Sprintf("/api/v1/execute/pipeline/%d", hrRec.ID), ""},
+		{"SSE stream secret name", "/api/v1/execute/stream", `{"file":"hr_secret_pipe"}`},
+		{"SSE stream secret ID", fmt.Sprintf("/api/v1/execute/stream/pipeline/%d", hrRec.ID), ""},
+		{"options indirection to secret", "/api/v1/execute", `{"options":"opt_hr_secret"}`},
+		{"options ID indirection to secret", fmt.Sprintf("/api/v1/execute/options/%d", optSecretRec.ID), ""},
+		{"inline options_xml indirection to secret", "/api/v1/execute", `{"options_xml":` + mustJSONString(optSecretXML) + `}`},
+		{"inline file_xml bypass attempt", "/api/v1/execute", `{"file_xml":` + mustJSONString(samplePipelineXML) + `}`},
+		{"sql:// URI bypass attempt", "/api/v1/execute", `{"file":"sql://sqlserver/dbo.flow_pipeline_content/PipelineXML?id=1"}`},
+		{"local file path bypass attempt", "/api/v1/execute", `{"file":"./local_pipeline.xml"}`},
+		{"direct config execution by ID", fmt.Sprintf("/api/v1/execute/config/%d", cfgRec.ID), ""},
+	}
+	for _, tc := range deniedExecCases {
+		c, b := doReq(http.MethodPost, tc.path, "fin_runner", "run_pass", tc.body, nil)
+		if c != http.StatusForbidden {
+			t.Fatalf("case %q: expected 403 Forbidden, got %d: %s", tc.name, c, string(b))
+		}
+	}
+
+	// 3. Telemetry scoping: fin_runner sees runs & events ONLY for fin_exec_pipe, never hr_secret_pipe
+	code, runsBody := doReq(http.MethodGet, "/api/v1/runs", "fin_runner", "run_pass", "", nil)
+	if code != http.StatusOK || !strings.Contains(string(runsBody), "fin_exec_pipe") || strings.Contains(string(runsBody), "hr_secret_pipe") {
+		t.Fatalf("expected fin_runner /api/v1/runs to include fin_exec_pipe and exclude hr_secret_pipe, got %d: %s", code, string(runsBody))
+	}
+	code, eventsBody := doReq(http.MethodGet, "/api/v1/events", "fin_runner", "run_pass", "", nil)
+	if code != http.StatusOK || !strings.Contains(string(eventsBody), "HelloNode") {
+		t.Fatalf("expected fin_runner /api/v1/events to return fin_exec_pipe node events, got %d: %s", code, string(eventsBody))
+	}
+	// Audit trail stays restricted to global read/admin roles
+	if c, _ := doReq(http.MethodGet, "/api/v1/audit", "fin_runner", "run_pass", "", nil); c != http.StatusForbidden {
+		t.Fatalf("expected 403 on /api/v1/audit for scoped user, got %d", c)
+	}
+
+	// 4. Precedence check: explicit DENY overrides both scoped allow AND legacy global exec_user, while admin_user (PermAll) is unaffected
+	_, denyBytes := doReq(http.MethodPost, "/api/v1/acls", "admin_user", "admin_pass",
+		`{"principal_type":"user","principal_name":"fin_runner","target_type":"pipeline","target_name":"fin_exec_pipe","permissions":"execute","effect":"deny"}`, nil)
+	var denyRule PipelineACL
+	_ = json.Unmarshal(denyBytes, &denyRule)
+
+	if c, _ := doReq(http.MethodPost, "/api/v1/execute", "fin_runner", "run_pass", `{"file":"fin_exec_pipe"}`, nil); c != http.StatusForbidden {
+		t.Fatalf("expected explicit user deny to override pipeline_group allow (got %d)", c)
+	}
+	// Deny legacy exec_user on hr_secret_pipe
+	doReq(http.MethodPost, "/api/v1/acls", "admin_user", "admin_pass",
+		`{"principal_type":"user","principal_name":"exec_user","target_type":"pipeline","target_name":"hr_secret_pipe","permissions":"execute","effect":"deny"}`, nil)
+	if c, _ := doReq(http.MethodPost, "/api/v1/execute", "exec_user", "exec_pass", `{"file":"hr_secret_pipe"}`, nil); c != http.StatusForbidden {
+		t.Fatalf("expected explicit deny to block legacy exec_user on hr_secret_pipe, got %d", c)
+	}
+	if c, _ := doReq(http.MethodPost, "/api/v1/execute", "admin_user", "admin_pass", `{"file":"hr_secret_pipe"}`, nil); c != http.StatusOK {
+		t.Fatalf("expected admin_user (PermAll) to remain allowed, got %d", c)
+	}
+
+	// 5. Windows / Active Directory group integration via ACL rule with NO row in flow_api_users
+	doReq(http.MethodPost, "/api/v1/acls", "admin_user", "admin_pass",
+		`{"principal_type":"group","principal_name":"CORP\\AD_Finance_Runners","target_type":"pipeline_group","target_name":"finance_pipelines","permissions":"read,execute","effect":"allow"}`, nil)
+
+	adHeaders := map[string]string{
+		HeaderWindowsUser:   `CORP\alice_ad`,
+		HeaderWindowsGroups: `CORP\Domain Users, CORP\AD_Finance_Runners`,
+	}
+	if c, b := doReq(http.MethodGet, "/api/v1/health", "", "", "", adHeaders); c != http.StatusOK || !strings.Contains(string(b), `"permission":"scoped"`) {
+		t.Fatalf("expected Windows AD user matched via ACL group to authenticate as scoped on /health, got %d: %s", c, string(b))
+	}
+	if c, b := doReq(http.MethodPost, "/api/v1/execute", "", "", `{"file":"fin_exec_pipe"}`, adHeaders); c != http.StatusOK {
+		t.Fatalf("expected AD group member to execute fin_exec_pipe, got %d: %s", c, string(b))
+	}
+	if c, _ := doReq(http.MethodPost, "/api/v1/execute", "", "", `{"file":"hr_secret_pipe"}`, adHeaders); c != http.StatusForbidden {
+		t.Fatalf("expected AD group member to receive 403 on hr_secret_pipe, got %d", c)
+	}
+
+	// 6. StrictACL mode (-strict-acl / FLOW_API_STRICT_ACL=true) disables legacy global pipeline fallback for non-admin users
+	strictCfg, err := LoadStartupConfig([]string{"-dsn", "sqlite://strict.db", "-strict-acl"})
+	if err != nil || !strictCfg.StrictACL {
+		t.Fatalf("expected -strict-acl flag to set StrictACL=true, cfg=%+v err=%v", strictCfg, err)
+	}
+
+	apiSrv.cfg.StrictACL = true
+	defer func() { apiSrv.cfg.StrictACL = false }()
+
+	// Under StrictACL, read_user has no ACL entries -> sees 0 pipelines and gets 403 on direct pipeline read
+	code, strictList := doReq(http.MethodGet, "/api/v1/artifacts/pipeline", "read_user", "read_pass", "", nil)
+	if code != http.StatusOK || !strings.Contains(string(strictList), `"count":0`) {
+		t.Fatalf("expected read_user with no ACLs under StrictACL to list 0 pipelines, got %d: %s", code, string(strictList))
+	}
+	if c, _ := doReq(http.MethodPost, "/api/v1/execute", "exec_user", "exec_pass", `{"file":"fin_exec_pipe"}`, nil); c != http.StatusForbidden {
+		t.Fatalf("expected exec_user without ACL under StrictACL to get 403 on execute, got %d", c)
+	}
+}
+
+func TestLegacySevenTableSchemaGracefulFallback(t *testing.T) {
+	tmpDir := t.TempDir()
+	dsn := "sqlite://" + filepath.ToSlash(filepath.Join(tmpDir, "legacy7.db"))
+	cfg := &ServerConfig{
+		ConnectionString: dsn,
+		ListenAddr:       ":0",
+		DefaultSecureKey: "0123456789abcdef0123456789abcdef",
+	}
+	db, dialect, err := OpenDatabase(cfg.ConnectionString)
+	if err != nil {
+		t.Fatalf("OpenDatabase: %v", err)
+	}
+	defer db.Close()
+
+	// Provision ONLY the original 7 tables (no ACL or group tables)
+	legacyDDL := []string{
+		`CREATE TABLE flow_pipeline_content (ID INTEGER PRIMARY KEY AUTOINCREMENT, Name TEXT NOT NULL UNIQUE, Description TEXT, PipelineXML TEXT, CreatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, UpdatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+		`CREATE TABLE flow_options_content (ID INTEGER PRIMARY KEY AUTOINCREMENT, Name TEXT NOT NULL UNIQUE, Description TEXT, OptionsXML TEXT, CreatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, UpdatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+		`CREATE TABLE flow_config_content (ID INTEGER PRIMARY KEY AUTOINCREMENT, Name TEXT NOT NULL UNIQUE, Description TEXT, ConfigXML TEXT, CreatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, UpdatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+		`CREATE TABLE pipeline_runs (run_id TEXT PRIMARY KEY, file_path TEXT, config_path TEXT, status TEXT NOT NULL, started_at DATETIME NOT NULL, finished_at DATETIME NOT NULL, duration_ms INTEGER NOT NULL, task_count INTEGER NOT NULL, user_name TEXT, os_user_name TEXT, db_user_name TEXT, spid INTEGER, application_name TEXT, hostname TEXT, options_path TEXT, error_class TEXT, error_message TEXT)`,
+		`CREATE TABLE pipeline_events (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, execution_id TEXT, sequence_num INTEGER NOT NULL, occurred_at DATETIME NOT NULL, event_type TEXT NOT NULL, node_kind TEXT, node_id TEXT, status TEXT, user_name TEXT, os_user_name TEXT, db_user_name TEXT, spid TEXT, application_name TEXT, hostname TEXT, options_path TEXT, error_message TEXT, rows_read INTEGER, rows_written INTEGER, rows_affected INTEGER, node_output TEXT)`,
+		`CREATE TABLE flow_api_events (event_id TEXT PRIMARY KEY, occurred_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, event_type TEXT NOT NULL, http_method TEXT NOT NULL, path TEXT NOT NULL, artifact_type TEXT, artifact_name TEXT, run_id TEXT, auth_user TEXT, remote_addr TEXT, status_code INTEGER NOT NULL, status TEXT NOT NULL, duration_ms INTEGER NOT NULL, error_message TEXT, details_json TEXT)`,
+		`CREATE TABLE flow_api_users (username TEXT PRIMARY KEY, password_hash TEXT NOT NULL, permission TEXT NOT NULL, is_active INTEGER NOT NULL DEFAULT 1, description TEXT, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+	}
+	for _, stmt := range legacyDDL {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("legacy DDL failed: %v", err)
+		}
+	}
+
+	srv := NewAPIServer(cfg, db, dialect)
+	ctx := context.Background()
+	_, _ = srv.UpsertAPIUser(ctx, "write_u", "pass", PermWrite, "", true)
+	_, _ = srv.UpsertAPIUser(ctx, "exec_u", "pass", PermExecutionOnly, "", true)
+	_, _ = srv.UpsertAPIUser(ctx, "scoped_u", "pass", PermScoped, "", true)
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	client := ts.Client()
+
+	// Legacy write_u can create pipeline without ACL tables present
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/artifacts/pipeline", strings.NewReader(`{"name":"legacy_pipe","content":`+mustJSONString(samplePipelineXML)+`}`))
+	req.SetBasicAuth("write_u", "pass")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("POST legacy_pipe failed: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 on 7-table schema for write_u, got %d", resp.StatusCode)
+	}
+
+	// Legacy exec_u can execute legacy_pipe
+	execReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/execute", strings.NewReader(`{"file":"legacy_pipe"}`))
+	execReq.SetBasicAuth("exec_u", "pass")
+	execResp, err := client.Do(execReq)
+	if err != nil {
+		t.Fatalf("POST execute legacy_pipe failed: %v", err)
+	}
+	execResp.Body.Close()
+	if execResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 on 7-table schema for exec_u, got %d", execResp.StatusCode)
+	}
+
+	// Scoped user fails closed (403 Forbidden) on 7-table schema
+	scopedReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/execute", strings.NewReader(`{"file":"legacy_pipe"}`))
+	scopedReq.SetBasicAuth("scoped_u", "pass")
+	scopedResp, err := client.Do(scopedReq)
+	if err != nil {
+		t.Fatalf("POST execute as scoped_u failed: %v", err)
+	}
+	scopedResp.Body.Close()
+	if scopedResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 fail-closed on 7-table schema for scoped_u, got %d", scopedResp.StatusCode)
 	}
 }

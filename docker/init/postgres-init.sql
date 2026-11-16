@@ -99,3 +99,52 @@ CREATE TABLE IF NOT EXISTS dbo.flow_api_users (
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at    TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS dbo.flow_api_groups (
+    id          SERIAL       PRIMARY KEY,
+    name        VARCHAR(128) NOT NULL UNIQUE,
+    description VARCHAR(512),
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS dbo.flow_api_user_groups (
+    group_name VARCHAR(128) NOT NULL,
+    username   VARCHAR(255) NOT NULL,
+    created_at TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (group_name, username)
+);
+CREATE INDEX IF NOT EXISTS ix_flow_api_user_groups_username ON dbo.flow_api_user_groups (username);
+
+CREATE TABLE IF NOT EXISTS dbo.flow_pipeline_groups (
+    id           SERIAL       PRIMARY KEY,
+    name         VARCHAR(128) NOT NULL UNIQUE,
+    description  VARCHAR(512),
+    name_pattern VARCHAR(255),
+    created_at   TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at   TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS dbo.flow_pipeline_group_members (
+    group_name    VARCHAR(128) NOT NULL,
+    pipeline_name VARCHAR(255) NOT NULL,
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (group_name, pipeline_name)
+);
+CREATE INDEX IF NOT EXISTS ix_flow_pipeline_group_members_pipeline ON dbo.flow_pipeline_group_members (pipeline_name);
+
+CREATE TABLE IF NOT EXISTS dbo.flow_pipeline_acl (
+    id             SERIAL       PRIMARY KEY,
+    principal_type VARCHAR(32)  NOT NULL,
+    principal_name VARCHAR(255) NOT NULL,
+    target_type    VARCHAR(32)  NOT NULL,
+    target_name    VARCHAR(255) NOT NULL,
+    permissions    VARCHAR(128) NOT NULL,
+    effect         VARCHAR(16)  NOT NULL DEFAULT 'allow',
+    description    VARCHAR(512),
+    created_at     TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at     TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_flow_pipeline_acl_rule UNIQUE (principal_type, principal_name, target_type, target_name, effect)
+);
+CREATE INDEX IF NOT EXISTS ix_flow_pipeline_acl_target ON dbo.flow_pipeline_acl (target_type, target_name);
+CREATE INDEX IF NOT EXISTS ix_flow_pipeline_acl_principal ON dbo.flow_pipeline_acl (principal_type, principal_name);

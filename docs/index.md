@@ -16,11 +16,11 @@ This documentation suite is organized for direct inclusion in the **[Flow Ecosys
 | Document | Focus Area |
 | :--- | :--- |
 | **[`index.md`](index.md)** *(This Document)* | Unified overview of architecture, cross-platform builds, Docker deployment, and all REST API endpoints. |
-| **[`COMPILATION_AND_BUILD_GUIDE.md`](COMPILATION_AND_BUILD_GUIDE.md)** | Deep-dive cross-platform compilation options for **Windows**, **Linux**, **FreeBSD**, and **macOS** (`amd64` & `arm64`), compiler flags, static linking, air-gapped vendor builds, and release scripts. |
-| **[`DOCKER_DEPLOYMENT_GUIDE.md`](DOCKER_DEPLOYMENT_GUIDE.md)** | Detailed **Docker & Docker Compose** guide covering multi-stage BuildKit contexts, all 4 Compose topologies (SQLite, PostgreSQL 16, SQL Server 2022, Existing/Host DB), Windows SQL Server host networking, and standalone CLI usage. |
+| **[`API_COMPILATION_AND_BUILD_GUIDE.md`](API_COMPILATION_AND_BUILD_GUIDE.md)** | Deep-dive cross-platform compilation options for **Windows**, **Linux**, **FreeBSD**, and **macOS** (`amd64` & `arm64`), compiler flags, static linking, air-gapped vendor builds, and release scripts. |
+| **[`API_DOCKER_DEPLOYMENT_GUIDE.md`](API_DOCKER_DEPLOYMENT_GUIDE.md)** | Detailed **Docker & Docker Compose** guide covering multi-stage BuildKit contexts, all 4 Compose topologies (SQLite, PostgreSQL 16, SQL Server 2022, Existing/Host DB), Windows SQL Server host networking, and standalone CLI usage. |
 | **[`AD_KERBEROS_SIDECAR_GUIDE.md`](AD_KERBEROS_SIDECAR_GUIDE.md)** | Complete guide to running `go-flowAPI` in a Linux container with an **Active Directory Kerberos (`klist`) sidecar**, shared `tmpfs` ticket cache, and nested AD group RBAC resolution. |
 | **[`AD_KERBEROS_CONNECTION_FIX.md`](AD_KERBEROS_CONNECTION_FIX.md)** | Diagnosis, changes, and verification for the SQL Server Kerberos connection fix. |
-| **[`API_ENDPOINTS_REFERENCE.md`](API_ENDPOINTS_REFERENCE.md)** | Exhaustive **REST API Endpoint Reference** covering authentication, RBAC permission matrix, request/response schemas, SSE live streaming, cryptographic utilities, telemetry queries, and per-node database session identity logging. |
+| **[`API_ENDPOINTS_REFERENCE.md`](API_ENDPOINTS_REFERENCE.md)** | Exhaustive **REST API Endpoint Reference** covering authentication, global RBAC & granular pipeline ACLs, request/response schemas, SSE live streaming, cryptographic utilities, telemetry queries, and per-node database session identity logging. |
 
 ---
 
@@ -65,7 +65,7 @@ flowchart TB
 
 ## 1. Cross-Platform Compile Options (Windows, Linux, FreeBSD, macOS)
 
-> **Full Guide:** See **[Cross-Platform Compilation & Build Guide](COMPILATION_AND_BUILD_GUIDE.md)** for complete build scripts, air-gapped vendor packaging, and platform verification steps.
+> **Full Guide:** See **[Cross-Platform Compilation & Build Guide](API_COMPILATION_AND_BUILD_GUIDE.md)** for complete build scripts, air-gapped vendor packaging, and platform verification steps.
 
 Because `go-flowAPI` and `flow` use **100% pure-Go database drivers** (`modernc.org/sqlite`, `lib/pq`, `go-sql-driver/mysql`, `sijms/go-ora/v2`, and `microsoft/go-mssqldb`), `go-flowAPI` compiles into a **single zero-dependency static binary** (`CGO_ENABLED=0`) from any host OS targeting **Windows**, **Linux**, **FreeBSD**, and **macOS** across `amd64` and `arm64`.
 
@@ -162,7 +162,7 @@ CGO_ENABLED=0 GOOS=darwin GOARCH=arm64  go build -trimpath -ldflags="-s -w" -o d
 
 ## 2. Detailed Docker Instructions
 
-> **Full Guide:** See **[Docker & Container Deployment Guide](DOCKER_DEPLOYMENT_GUIDE.md)** for full BuildKit context details, environment variable reference, Windows SQL Server host networking, and troubleshooting.
+> **Full Guide:** See **[Docker & Container Deployment Guide](API_DOCKER_DEPLOYMENT_GUIDE.md)** for full BuildKit context details, environment variable reference, Windows SQL Server host networking, and troubleshooting.
 
 ### Multi-Stage Docker Build Architecture & Entrypoint Flow
 
@@ -238,28 +238,31 @@ docker run -d \
 
 ## 3. Overview of Each API Endpoint
 
-> **Full Guide:** See **[API Endpoints Reference](API_ENDPOINTS_REFERENCE.md)** for full request/response payloads, curl examples, SSE event schemas, and telemetry details.
+> **Full Guide:** See **[API Endpoints Reference](API_ENDPOINTS_REFERENCE.md)** for full request/response payloads, curl examples, SSE event schemas, granular ACL rules, and telemetry details.
 
-### Authentication & Role-Based Access Control (RBAC)
+### Authentication, Global RBAC & Granular Pipeline ACLs
 
 - **Public Endpoints (No Auth Required):**
-  - `GET /api/v1/health`
+  - `GET /api/v1/health` *(optional BasicAuth populates `authenticated_as`, `permission`, and `groups`)*
   - `GET /swagger/`, `GET /docs`, `GET /api/v1/openapi.json`
-- **Protected Endpoints (HTTP Basic Auth Required):**
-  - Every other `/api/v1/*` route enforces HTTP Basic Authentication and checks the authenticated user's `permissions` string (`r` = Read, `w` = Write, `x` = Execute, `d` = Delete, `a` = Admin, `*` = Full Access).
-  - **Execution-Only (`x`) Implicit Read Access:** Users granted `x` automatically receive read access to `GET` endpoints so `FlowCanvas` and CLI runners can fetch artifacts to execute them.
+- **Protected Endpoints (HTTP BasicAuth + Windows/AD Group Resolution):**
+  - Every other `/api/v1/*` route authenticates against `dbo.flow_api_users`, resolves API group memberships (`dbo.flow_api_user_groups`) and Windows/AD groups (`X-Flow-Windows-Groups`), and evaluates:
+    1. **`all` administrator role** → full access across all endpoints.
+    2. **Explicit `deny` rule in `dbo.flow_pipeline_acl`** → blocks matching pipeline actions (`403 Forbidden`).
+    3. **Explicit `allow` rule in `dbo.flow_pipeline_acl`** → grants `create`, `read`, `update`, `delete`, `execute`, or `all` on a `pipeline`, `pipeline_group` (explicit members + `name_pattern` glob), or `*`.
+    4. **Global role baseline** (`read-only`, `execution-only`, `write` / `upload`) when `-strict-acl` is false and the user's role is not `scoped` (`scoped` grants zero global baseline rights).
 
 ```mermaid
 flowchart TD
     Req["Incoming HTTP Request"] --> Public{"Is Public Route?\n/api/v1/health\n/swagger/*\n/api/v1/openapi.json"}
     Public -- "Yes" --> Allow["200 OK (No Auth Required)"]
-    Public -- "No" --> Basic["Validate HTTP Basic Auth\n(flow_api_users + bcrypt)"]
+    Public -- "No" --> Basic["Authenticate Principal & Resolve Groups\n(flow_api_users + flow_api_user_groups + AD Groups)"]
     Basic -- "Invalid / Missing" --> Deny401["401 Unauthorized"]
-    Basic -- "Valid" --> AdminCheck{"User Route (/api/v1/users*)\nor Admin ('a' / '*')?"}
-    AdminCheck -- "Admin Required & Missing" --> Deny403["403 Forbidden"]
-    AdminCheck -- "Authorized" --> MethodPerm["Check Route Permission:\nGET -> 'r' or 'x'\nPOST /execute, /validate, /db/test -> 'x'\nPOST/PUT artifacts & /crypto/* -> 'w'\nDELETE artifacts -> 'd'"]
-    MethodPerm -- "Permitted" --> Handler["Execute Endpoint Handler"]
-    MethodPerm -- "Missing Permission" --> Deny403
+    Basic -- "Valid" --> AdminCheck{"Admin ('all')?"}
+    AdminCheck -- "Yes" --> Handler["Execute Endpoint Handler"]
+    AdminCheck -- "No" --> EvalPerm["Evaluate Route RBAC & Pipeline ACL:\nExplicit DENY -> 403\nExplicit ALLOW -> Permitted\nElse Global Role (unless 'scoped' / -strict-acl)"]
+    EvalPerm -- "Permitted" --> Handler
+    EvalPerm -- "Denied" --> Deny403["403 Forbidden"]
 ```
 
 ### Complete Endpoint Summary Table
@@ -268,62 +271,79 @@ flowchart TD
 
 | Method | Path | Auth | Description |
 | :---: | :--- | :---: | :--- |
-| `GET` | `/api/v1/health` | **None (Public)** | Liveness & database connectivity probe (`status`, `version`, `db_provider`, `time`). |
-| `GET` | `/swagger/` | **None (Public)** | Interactive Swagger UI browser explorer (alias: `/docs`). |
-| `GET` | `/api/v1/openapi.json` | **None (Public)** | OpenAPI 3.0.3 JSON specification. |
+| `GET` | `/api/v1/health` | **Public** *(Optional Auth)* | Liveness, DB session identity (`dialect`, `db_spid`, `db_user`), caller `groups`, and configured tables. |
+| `GET` | `/swagger/` | **Public** | Interactive Swagger UI browser explorer (alias: `/docs`). |
+| `GET` | `/api/v1/openapi.json` | **Public** | OpenAPI 3.0.3 JSON specification. |
 
-#### B. Artifact Upload & CRUD Endpoints (`{type}`: `config`, `pipeline`, `workflow`, `lookup`)
+#### B. Artifact Upload & CRUD Endpoints (`{type}`: `pipeline`, `options`, `config`)
 
 | Method | Path | Auth / Perm | Description |
 | :---: | :--- | :---: | :--- |
-| `POST` | `/api/v1/upload/{type}` | `w` | Upload a raw JSON artifact (`?name=...` optional) and persist to `api_db`. |
-| `GET` | `/api/v1/artifacts/{type}` | `r` or `x` | List metadata for all active artifacts of `{type}`. |
-| `GET` | `/api/v1/artifacts/{type}/{name}` | `r` or `x` | Fetch full artifact record + raw JSON by logical name (`?version=N` optional). |
-| `PUT` | `/api/v1/artifacts/{type}/{name}` | `w` | Update existing artifact in-place by logical name. |
-| `DELETE` | `/api/v1/artifacts/{type}/{name}` | `d` | Soft-delete (`?hard=false`) or permanently delete (`?hard=true`) by name. |
-| `GET` | `/api/v1/artifacts/{type}/{name}/export` | `r` or `x` | Download raw artifact JSON as a file attachment by name. |
-| `GET` | `/api/v1/artifacts/{type}/id/{id}` | `r` or `x` | Fetch full artifact record by primary key ID. |
-| `PUT` | `/api/v1/artifacts/{type}/id/{id}` | `w` | Update existing artifact in-place by primary key ID (`?name=...` optional). |
-| `DELETE` | `/api/v1/artifacts/{type}/id/{id}` | `d` | Soft-delete or hard-delete artifact by primary key ID. |
-| `GET` | `/api/v1/artifacts/{type}/id/{id}/export` | `r` or `x` | Download raw artifact JSON as a file attachment by primary key ID. |
+| `POST`, `PUT` | `/api/v1/upload/{type}` | `write`, `upload`, `all`, or ACL (`create`/`update`) | Upload `.xml`/`.json` file (`multipart/form-data` or raw body; supports optional `group` for pipelines). |
+| `GET` | `/api/v1/artifacts/{type}` | `read-only`+ or ACL (`read`) | List artifacts of `{type}`; filters `pipeline` results to readable pipelines and returns `groups`. |
+| `POST` | `/api/v1/artifacts/{type}` | `write`, `upload`, `all`, or ACL (`create`/`update`) | Create or upsert (`upsert=true`) an artifact; supports `"groups": [...]` for pipelines. |
+| `GET` | `/api/v1/artifacts/{type}/{name}` | `read-only`+ or ACL (`read`) | Fetch full artifact record by unique `name` (`?decrypt=true` supported). |
+| `PUT` | `/api/v1/artifacts/{type}/{name}` | `write`, `upload`, `all`, or ACL (`update`) | Update existing artifact in-place by unique `name`. |
+| `DELETE` | `/api/v1/artifacts/{type}/{name}` | `write`, `upload`, `all`, or ACL (`delete`) | Delete artifact by `name` (cleans up pipeline group memberships and direct ACLs). |
+| `GET` | `/api/v1/artifacts/{type}/{name}/export` | `read-only`+ or ACL (`read`) | Download raw XML artifact as a file attachment by `name`. |
+| `GET` | `/api/v1/artifacts/{type}/id/{id}` | `read-only`+ or ACL (`read`) | Fetch full artifact record by primary key `ID`. |
+| `PUT` | `/api/v1/artifacts/{type}/id/{id}` | `write`, `upload`, `all`, or ACL (`update`) | Update existing artifact in-place by primary key `ID`. |
+| `DELETE` | `/api/v1/artifacts/{type}/id/{id}` | `write`, `upload`, `all`, or ACL (`delete`) | Delete artifact by primary key `ID`. |
+| `GET` | `/api/v1/artifacts/{type}/id/{id}/export` | `read-only`+ or ACL (`read`) | Download raw XML artifact as a file attachment by primary key `ID`. |
 
 #### C. Execution, Live SSE Streaming & Validation Endpoints
 
 | Method | Path | Auth / Perm | Description |
 | :---: | :--- | :---: | :--- |
-| `POST` | `/api/v1/execute` | `x` | Synchronously execute a pipeline or workflow by body payload (`target_type`, `target_name`, `config_name`, `inline_json`, `step_id`, `batch_size`, `verbose`). |
-| `POST` | `/api/v1/execute/{type}/{id}` | `x` | Synchronously execute a stored `pipeline` or `workflow` by database table ID (`?config_id=...&step_id=...`). |
-| `POST` | `/api/v1/execute/stream` | `x` | Execute and stream real-time Server-Sent Events (`text/event-stream`: `start`, `log`, `event`, `result`, `error`). |
-| `POST` | `/api/v1/execute/stream/{type}/{id}` | `x` | Execute stored artifact by database ID and stream real-time SSE progress. |
-| `POST` | `/api/v1/validate` | `x` | Validate DAG structure, step references, and config bindings without executing. |
-| `POST` | `/api/v1/validate/{type}/{id}` | `x` | Validate a stored `pipeline` or `workflow` by database ID. |
+| `POST` | `/api/v1/execute` | `execution-only`, `all`, or ACL (`execute`) | Synchronously execute a pipeline with full CLI/Builder parity (`file`, `file_xml`, `config`, `options`, `vars`, `node_output`). |
+| `POST` | `/api/v1/execute/{type}/{id}` | `execution-only`, `all`, or ACL (`execute`) | Synchronously execute a stored `pipeline`, `options`, or `config` artifact by database table `ID`. |
+| `POST`, `GET` | `/api/v1/execute/stream` | `execution-only`, `all`, or ACL (`execute`) | Execute and stream real-time Server-Sent Events (`text/event-stream`: `event: node_event`, `event: done`). |
+| `POST`, `GET` | `/api/v1/execute/stream/{type}/{id}` | `execution-only`, `all`, or ACL (`execute`) | Execute stored artifact by database `ID` and stream real-time SSE progress. |
+| `POST` | `/api/v1/validate` | `execution-only`, `all`, or ACL (`execute`) | Validate XSD compliance and AST semantic rules without executing `<flow>` steps. |
+| `POST` | `/api/v1/validate/{type}/{id}` | `execution-only`, `all`, or ACL (`execute`) | Validate a stored artifact by `{type}` and database `ID`. |
 
 #### D. Cryptographic & Digital Signature Endpoints
 
 | Method | Path | Auth / Perm | Description |
 | :---: | :--- | :---: | :--- |
-| `POST` | `/api/v1/crypto/keygen` | `w` | Generate a new AES-256-GCM encryption key (`purpose: "encryption"`) or Ed25519 keypair (`purpose: "signing"`). |
-| `POST` | `/api/v1/crypto/encrypt` | `w` | Encrypt plaintext into a `ENC:GCM:...` token or encrypt all sensitive fields in a config JSON (`mode: "config"`). |
-| `POST` | `/api/v1/crypto/decrypt` | `w` | Decrypt an `ENC:GCM:...` token or decrypt all encrypted fields in a config JSON. |
-| `POST` | `/api/v1/crypto/sign` | `w` | Digitally sign a pipeline, workflow, or config JSON using an Ed25519 private key. |
-| `POST` | `/api/v1/crypto/verify` | `r` or `x` | Verify the Ed25519 digital signature embedded in an artifact JSON using an Ed25519 public key. |
+| `POST` | `/api/v1/crypto/keygen` | `read-only`+ | Generate AES-256 keys, RSA-2048/4096, ECDSA-P256/P384, Ed25519 (+ X.509 cert), or OpenPGP keypairs. |
+| `POST` | `/api/v1/crypto/encrypt` | `read-only`+ | Encrypt XML/text into a `FLOWENC:v1:` AES-256-GCM armored envelope. |
+| `POST` | `/api/v1/crypto/decrypt` | `read-only`+ | Decrypt a `FLOWENC:v1:` envelope and inspect inner signature status. |
+| `POST` | `/api/v1/crypto/sign` | `read-only`+ | Digitally sign XML payloads using `OPENSSL`, `PKCS7`, or `PGP` (`none`, `sign-then-encrypt`, `encrypt-then-sign`). |
+| `POST` | `/api/v1/crypto/verify` | `read-only`+ | Verify wrapped (`FLOWSIGNED:v1:`) or detached signatures and X.509 chains. |
 
 #### E. Telemetry, Execution History & Audit Log Endpoints
 
 | Method | Path | Auth / Perm | Description |
 | :---: | :--- | :---: | :--- |
-| `GET` | `/api/v1/runs` | `r` or `x` | Query `flow_execution_runs` (`?limit=50&run_type=pipeline&status=SUCCESS`). Alias: `/api/v1/logs/runs`. |
-| `GET` | `/api/v1/events` | `r` or `x` | Query step-level `flow_Runtime_Events` (`?run_id=...&limit=100`). Alias: `/api/v1/logs/events`. |
-| `GET` | `/api/v1/audit` | `r` or `x` | Query `flow_api_audit_logs` (`?limit=100`). Alias: `/api/v1/logs/audit`. |
+| `GET` | `/api/v1/runs` | `read-only`+ | Query `dbo.pipeline_runs` (`?limit=100&status=...`). Alias: `/api/v1/logs/runs`. |
+| `GET` | `/api/v1/events` | `read-only`+ | Query step-level `dbo.pipeline_events` (`?run_id=...&limit=200`). Alias: `/api/v1/logs/events`. |
+| `GET` | `/api/v1/audit` | `read-only`+ | Query `dbo.flow_api_events` (`?limit=200&status=...`). Alias: `/api/v1/logs/api-events`. |
 
 #### F. Database Connectivity Test & User Management Endpoints
 
 | Method | Path | Auth / Perm | Description |
 | :---: | :--- | :---: | :--- |
-| `POST` | `/api/v1/db/test` | `x` | Test live connectivity to a database (`provider` + `connection_string` or `config_name`/`config_id` + `connection_name`). |
-| `GET` | `/api/v1/users` | `a` | List all registered API users and their RBAC permission strings. |
-| `POST` | `/api/v1/users` | `a` | Create or update an API user (`username`, `password`, `permissions`, `is_active`). |
-| `DELETE` | `/api/v1/users/{username}` | `a` | Delete an API user account. |
+| `POST` | `/api/v1/db/test` | `all` | Test live connectivity to the startup DB or a custom `dsn` (`sqlserver`, `postgres`, `mysql`, `sqlite`, `oracle`). |
+| `GET` | `/api/v1/users` | `all` | List all registered API users, permission scopes (`all`, `scoped`, `write`, `upload`, `execution-only`, `read-only`), and `groups`. |
+| `POST` | `/api/v1/users` | `all` | Create or update an API user (`username`, `password`, `permission`, `is_active`, `groups`). |
+| `DELETE` | `/api/v1/users/{username}` | `all` | Delete an API user account and clean up group memberships/direct ACLs. |
+
+#### G. Granular Pipeline ACLs, User Groups, Pipeline Groups & Effective Permissions
+
+| Method | Path | Auth / Perm | Description |
+| :---: | :--- | :---: | :--- |
+| `GET`, `POST` | `/api/v1/groups` | `all` | List or create/upsert API user groups (`dbo.flow_api_groups`). |
+| `GET`, `PUT`, `DELETE` | `/api/v1/groups/{name}` | `all` | Inspect, update, or delete an API user group. |
+| `GET`, `POST` | `/api/v1/groups/{name}/members` | `all` | List or add `username` / `usernames` to `dbo.flow_api_user_groups`. |
+| `DELETE` | `/api/v1/groups/{name}/members/{username}` | `all` | Remove a user from an API user group. |
+| `GET`, `POST` | `/api/v1/pipeline-groups` | `GET`: Auth; `POST`: `all` | List or create/upsert pipeline groups with optional `name_pattern` glob (`dbo.flow_pipeline_groups`). |
+| `GET`, `PUT`, `DELETE` | `/api/v1/pipeline-groups/{name}` | `GET`: Auth; `PUT`/`DELETE`: `all` | Inspect, update, or delete a pipeline group. |
+| `GET`, `POST` | `/api/v1/pipeline-groups/{name}/pipelines` | `GET`: Auth; `POST`: `all` | List or assign `pipeline_name` / `pipelines` (`dbo.flow_pipeline_group_members`). |
+| `DELETE` | `/api/v1/pipeline-groups/{name}/pipelines/{pipeline}` | `all` | Remove an explicit pipeline assignment from a pipeline group. |
+| `GET`, `POST` | `/api/v1/acls` | `all` | List (filterable by principal/target) or create/upsert `allow`/`deny` pipeline ACL rules (`dbo.flow_pipeline_acl`). |
+| `PUT`, `DELETE` | `/api/v1/acls/{id}` | `all` | Update or delete a granular pipeline ACL rule by primary key `id`. |
+| `GET` | `/api/v1/permissions/effective` | Any Auth (`all` for `?username=&groups=`) | Compute effective per-pipeline `create`, `read`, `update`, `delete`, and `execute` permissions (alias: `/api/v1/me/permissions`). |
 
 ---
 

@@ -19,6 +19,7 @@ import (
 
 // Permission Scope Constants
 const (
+	PermScoped        = "scoped"
 	PermExecutionOnly = "execution-only"
 	PermReadOnly      = "read-only"
 	PermWrite         = "write"
@@ -31,11 +32,12 @@ const (
 	HeaderWindowsGroups         = "X-Flow-Windows-Groups"
 )
 
-// APIUser represents a row in TableAPIUsers (dbo.flow_api_users).
+// APIUser represents a row in TableAPIUsers (dbo.flow_api_users) enriched with resolved group memberships.
 type APIUser struct {
 	Username     string    `json:"username"`
 	PasswordHash string    `json:"-"`
 	Permission   string    `json:"permission"`
+	Groups       []string  `json:"groups,omitempty"`
 	IsActive     bool      `json:"is_active"`
 	Description  string    `json:"description,omitempty"`
 	CreatedAt    time.Time `json:"created_at,omitempty"`
@@ -74,6 +76,10 @@ func (u *APIUser) HasPermission(required string) bool {
 			return true
 		}
 		switch reqNorm {
+		case PermScoped:
+			if tok == PermScoped || tok == PermReadOnly || tok == PermExecutionOnly || tok == PermWrite || tok == PermUpload {
+				return true
+			}
 		case PermReadOnly:
 			// "read-only", "execution-only", and "write"/"upload" can read artifacts and logs
 			if tok == PermReadOnly || tok == PermExecutionOnly || tok == PermWrite || tok == PermUpload {
@@ -102,6 +108,8 @@ func normalizePermToken(p string) string {
 	switch s {
 	case "all", "admin", "*", "full":
 		return PermAll
+	case "scoped", "granular", "acl", "none":
+		return PermScoped
 	case "execution-only", "execution_only", "execute", "exec", "runner":
 		return PermExecutionOnly
 	case "read-only", "read_only", "read", "readonly", "viewer":
@@ -120,22 +128,26 @@ func permRank(p string) int {
 	for _, part := range strings.Split(p, ",") {
 		switch normalizePermToken(part) {
 		case PermAll:
+			if 6 > best {
+				best = 6
+			}
+		case PermWrite:
 			if 5 > best {
 				best = 5
 			}
-		case PermWrite:
+		case PermUpload:
 			if 4 > best {
 				best = 4
 			}
-		case PermUpload:
+		case PermExecutionOnly:
 			if 3 > best {
 				best = 3
 			}
-		case PermExecutionOnly:
+		case PermReadOnly:
 			if 2 > best {
 				best = 2
 			}
-		case PermReadOnly:
+		case PermScoped:
 			if 1 > best {
 				best = 1
 			}
@@ -146,14 +158,16 @@ func permRank(p string) int {
 
 func rankToPerm(rank int) string {
 	switch rank {
-	case 5:
+	case 6:
 		return PermAll
-	case 4:
+	case 5:
 		return PermWrite
-	case 3:
+	case 4:
 		return PermUpload
-	case 2:
+	case 3:
 		return PermExecutionOnly
+	case 1:
+		return PermScoped
 	default:
 		return PermReadOnly
 	}
@@ -162,15 +176,15 @@ func rankToPerm(rank int) string {
 // ValidatePermissionString checks that a permission string contains only valid permission tokens.
 func ValidatePermissionString(perm string) error {
 	if strings.TrimSpace(perm) == "" {
-		return fmt.Errorf("permission cannot be empty; expected execution-only, read-only, write, upload, or all")
+		return fmt.Errorf("permission cannot be empty; expected scoped, execution-only, read-only, write, upload, or all")
 	}
 	for _, part := range strings.Split(perm, ",") {
 		norm := normalizePermToken(part)
 		switch norm {
-		case PermAll, PermExecutionOnly, PermReadOnly, PermWrite, PermUpload:
+		case PermAll, PermScoped, PermExecutionOnly, PermReadOnly, PermWrite, PermUpload:
 			// valid
 		default:
-			return fmt.Errorf("unsupported permission %q: expected execution-only, read-only, write, upload, or all", strings.TrimSpace(part))
+			return fmt.Errorf("unsupported permission %q: expected scoped, execution-only, read-only, write, upload, or all", strings.TrimSpace(part))
 		}
 	}
 	return nil
@@ -245,6 +259,10 @@ func (s *APIServer) AuthenticateUser(ctx context.Context, username, password str
 
 	if !VerifyPassword(user.PasswordHash, password) {
 		return nil, fmt.Errorf("invalid credentials")
+	}
+
+	if dbGroups, grpErr := s.ListGroupsForUser(ctx, user.Username); grpErr == nil && len(dbGroups) > 0 {
+		user.Groups = dbGroups
 	}
 
 	return &user, nil
@@ -382,6 +400,18 @@ func (s *APIServer) AuthenticateWindowsIdentityWithPassword(ctx context.Context,
 		return nil, err
 	}
 
+	if dbGroups, grpErr := s.ListGroupsForUser(ctx, windowsUser); grpErr == nil && len(dbGroups) > 0 {
+		seenExisting := make(map[string]struct{}, len(windowsGroups))
+		for _, g := range windowsGroups {
+			seenExisting[strings.ToLower(strings.TrimSpace(g))] = struct{}{}
+		}
+		for _, g := range dbGroups {
+			if _, exists := seenExisting[strings.ToLower(strings.TrimSpace(g))]; !exists {
+				windowsGroups = append(windowsGroups, g)
+			}
+		}
+	}
+
 	groupSet := make(map[string]struct{}, len(windowsGroups)*2)
 	for _, g := range windowsGroups {
 		trimmed := strings.TrimSpace(g)
@@ -436,6 +466,13 @@ func (s *APIServer) AuthenticateWindowsIdentityWithPassword(ctx context.Context,
 	}
 
 	if bestRank == 0 || len(matchedPrincipals) == 0 {
+		if hasACL, aclMatches := s.HasWindowsACLOrGroupRegistration(ctx, windowsUser, shortUser, groupSet); hasACL {
+			bestRank = 1 // PermScoped
+			matchedPrincipals = append(matchedPrincipals, aclMatches...)
+		}
+	}
+
+	if bestRank == 0 || len(matchedPrincipals) == 0 {
 		return nil, fmt.Errorf("windows user %q (and their AD/Windows groups) is not registered in %s", windowsUser, TableAPIUsers)
 	}
 
@@ -445,6 +482,7 @@ func (s *APIServer) AuthenticateWindowsIdentityWithPassword(ctx context.Context,
 	return &APIUser{
 		Username:    windowsUser,
 		Permission:  resolvedPerm,
+		Groups:      windowsGroups,
 		IsActive:    true,
 		Description: desc,
 	}, nil
@@ -528,46 +566,69 @@ func parseDBBool(v any) bool {
 	}
 }
 
+// authenticateOrWrite401 authenticates the HTTP request and writes a 401 response + audit event on failure.
+func (s *APIServer) authenticateOrWrite401(w http.ResponseWriter, r *http.Request, start time.Time) (*APIUser, bool) {
+	user, attemptedUser, hasCreds, err := s.AuthenticateRequest(r)
+	if !hasCreds {
+		w.Header().Set("WWW-Authenticate", `Basic realm="go-flowAPI"`)
+		s.logAPIEvent(r.Context(), APIAuditEvent{
+			OccurredAt:   start,
+			EventType:    "auth.missing_credentials",
+			HTTPMethod:   r.Method,
+			Path:         r.URL.Path,
+			AuthUser:     attemptedUser,
+			RemoteAddr:   r.RemoteAddr,
+			StatusCode:   http.StatusUnauthorized,
+			Status:       "UNAUTHORIZED",
+			DurationMs:   time.Since(start).Milliseconds(),
+			ErrorMessage: "Authentication credentials required",
+		})
+		writeJSONError(w, http.StatusUnauthorized, "Authentication credentials required")
+		return nil, false
+	}
+
+	if err != nil {
+		w.Header().Set("WWW-Authenticate", `Basic realm="go-flowAPI"`)
+		s.logAPIEvent(r.Context(), APIAuditEvent{
+			OccurredAt:   start,
+			EventType:    "auth.failed",
+			HTTPMethod:   r.Method,
+			Path:         r.URL.Path,
+			AuthUser:     attemptedUser,
+			RemoteAddr:   r.RemoteAddr,
+			StatusCode:   http.StatusUnauthorized,
+			Status:       "UNAUTHORIZED",
+			DurationMs:   time.Since(start).Milliseconds(),
+			ErrorMessage: err.Error(),
+		})
+		writeJSONError(w, http.StatusUnauthorized, err.Error())
+		return nil, false
+	}
+	return user, true
+}
+
+// RequireAuth authenticates the request (BasicAuth or Windows Integrated) and attaches *APIUser
+// (including local & AD group memberships) to the request context for resource-level ACL checks.
+func (s *APIServer) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now().UTC()
+		user, ok := s.authenticateOrWrite401(w, r, start)
+		if !ok {
+			return
+		}
+		ctx := context.WithValue(r.Context(), authUserContextKey, user)
+		next(w, r.WithContext(ctx))
+	}
+}
+
 // RequirePermission wraps an http.HandlerFunc with authentication against TableAPIUsers
 // (supporting both BasicAuth and Windows Integrated user/group matching) and enforces
-// that the authenticated user holds the required permission scope.
+// that the authenticated user holds the required global permission scope.
 func (s *APIServer) RequirePermission(requiredPerm string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now().UTC()
-		user, attemptedUser, hasCreds, err := s.AuthenticateRequest(r)
-		if !hasCreds {
-			w.Header().Set("WWW-Authenticate", `Basic realm="go-flowAPI"`)
-			s.logAPIEvent(r.Context(), APIAuditEvent{
-				OccurredAt:   start,
-				EventType:    "auth.missing_credentials",
-				HTTPMethod:   r.Method,
-				Path:         r.URL.Path,
-				AuthUser:     attemptedUser,
-				RemoteAddr:   r.RemoteAddr,
-				StatusCode:   http.StatusUnauthorized,
-				Status:       "UNAUTHORIZED",
-				DurationMs:   time.Since(start).Milliseconds(),
-				ErrorMessage: "Authentication credentials required",
-			})
-			writeJSONError(w, http.StatusUnauthorized, "Authentication credentials required")
-			return
-		}
-
-		if err != nil {
-			w.Header().Set("WWW-Authenticate", `Basic realm="go-flowAPI"`)
-			s.logAPIEvent(r.Context(), APIAuditEvent{
-				OccurredAt:   start,
-				EventType:    "auth.failed",
-				HTTPMethod:   r.Method,
-				Path:         r.URL.Path,
-				AuthUser:     attemptedUser,
-				RemoteAddr:   r.RemoteAddr,
-				StatusCode:   http.StatusUnauthorized,
-				Status:       "UNAUTHORIZED",
-				DurationMs:   time.Since(start).Milliseconds(),
-				ErrorMessage: err.Error(),
-			})
-			writeJSONError(w, http.StatusUnauthorized, err.Error())
+		user, ok := s.authenticateOrWrite401(w, r, start)
+		if !ok {
 			return
 		}
 

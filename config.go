@@ -28,6 +28,7 @@ type ServerConfig struct {
 	LogFilePath      string
 	ServiceName      string
 	Debug            bool
+	StrictACL        bool
 	BootstrapUser    string
 	BootstrapPass    string
 	BootstrapPerm    string
@@ -48,6 +49,7 @@ func LoadStartupConfig(args []string) (*ServerConfig, error) {
 	logFileFlag := fs.String("log-file", "", "Optional file path to append server logs (or FLOW_API_LOG_FILE)")
 	serviceNameFlag := fs.String("service-name", "GoFlowAPI", "Service name when running under the Windows Service Control Manager")
 	debugFlag := fs.Bool("debug", false, "Enable verbose debug logging")
+	strictACLFlag := fs.Bool("strict-acl", false, "Enforce strict ACL-only pipeline authorization for all non-admin users (or FLOW_API_STRICT_ACL)")
 	bootstrapUserFlag := fs.String("bootstrap-user", "", "Initial API username to seed/upsert at startup (or FLOW_API_BOOTSTRAP_USER)")
 	bootstrapPassFlag := fs.String("bootstrap-pass", "", "Password for -bootstrap-user (or FLOW_API_BOOTSTRAP_PASS)")
 	bootstrapPermFlag := fs.String("bootstrap-perm", PermAll, "Permission role for -bootstrap-user (default: all)")
@@ -107,6 +109,13 @@ func LoadStartupConfig(args []string) (*ServerConfig, error) {
 		}
 	}
 
+	strictACL := *strictACLFlag
+	if !strictACL {
+		if envStrict := strings.ToLower(strings.TrimSpace(os.Getenv("FLOW_API_STRICT_ACL"))); envStrict == "true" || envStrict == "1" {
+			strictACL = true
+		}
+	}
+
 	bootstrapUser := strings.TrimSpace(os.Getenv("FLOW_API_BOOTSTRAP_USER"))
 	if strings.TrimSpace(*bootstrapUserFlag) != "" {
 		bootstrapUser = strings.TrimSpace(*bootstrapUserFlag)
@@ -136,6 +145,7 @@ func LoadStartupConfig(args []string) (*ServerConfig, error) {
 		LogFilePath:      logFilePath,
 		ServiceName:      serviceName,
 		Debug:            debug,
+		StrictACL:        strictACL,
 		BootstrapUser:    bootstrapUser,
 		BootstrapPass:    bootstrapPass,
 		BootstrapPerm:    bootstrapPerm,

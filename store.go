@@ -16,14 +16,15 @@ var ErrArtifactExists = errors.New("artifact already exists")
 
 // ArtifactRecord represents a pipeline, options, or config XML document stored in the database.
 type ArtifactRecord struct {
-	ID              int64  `json:"id,omitempty"`
-	Type            string `json:"type"`
-	Name            string `json:"name"`
-	Description     string `json:"description"`
-	Content         string `json:"content,omitempty"`
-	Encrypted       bool   `json:"encrypted"`
-	Signed          bool   `json:"signed"`
-	SignatureFormat string `json:"signature_format,omitempty"`
+	ID              int64    `json:"id,omitempty"`
+	Type            string   `json:"type"`
+	Name            string   `json:"name"`
+	Description     string   `json:"description"`
+	Groups          []string `json:"groups,omitempty"`
+	Content         string   `json:"content,omitempty"`
+	Encrypted       bool     `json:"encrypted"`
+	Signed          bool     `json:"signed"`
+	SignatureFormat string   `json:"signature_format,omitempty"`
 }
 
 func inspectArtifactSecurity(content string) (encrypted bool, signed bool, sigFormat string) {
@@ -165,11 +166,18 @@ func (s *APIServer) UpsertArtifact(ctx context.Context, artifactType, name, desc
 	_ = s.db.QueryRowContext(ctx, idQuery, name).Scan(&id)
 
 	enc, signed, sigFmt := inspectArtifactSecurity(contentToStore)
+	var groups []string
+	if canonicalType == "pipeline" {
+		if snap, snapErr := s.loadACLSnapshot(ctx); snapErr == nil {
+			groups = snap.groupsForPipeline(name, nil)
+		}
+	}
 	return &ArtifactRecord{
 		ID:              id,
 		Type:            canonicalType,
 		Name:            name,
 		Description:     desc,
+		Groups:          groups,
 		Content:         contentToStore,
 		Encrypted:       enc,
 		Signed:          signed,
@@ -265,6 +273,12 @@ func (s *APIServer) GetArtifact(ctx context.Context, artifactType, name string, 
 		return nil, fmt.Errorf("failed querying %s for %q: %w", table, name, err)
 	}
 
+	if rec.Type == "pipeline" {
+		if snap, err := s.loadACLSnapshot(ctx); err == nil {
+			rec.Groups = snap.groupsForPipeline(rec.Name, nil)
+		}
+	}
+
 	return s.finalizeArtifactRecord(&rec, table, decrypt, secureKey)
 }
 
@@ -290,6 +304,12 @@ func (s *APIServer) GetArtifactByID(ctx context.Context, artifactType string, id
 			return nil, ErrArtifactNotFound
 		}
 		return nil, fmt.Errorf("failed querying %s for ID %d: %w", table, id, err)
+	}
+
+	if rec.Type == "pipeline" {
+		if snap, err := s.loadACLSnapshot(ctx); err == nil {
+			rec.Groups = snap.groupsForPipeline(rec.Name, nil)
+		}
 	}
 
 	return s.finalizeArtifactRecord(&rec, table, decrypt, secureKey)
@@ -333,7 +353,7 @@ func (s *APIServer) ListArtifacts(ctx context.Context, artifactType string, incl
 // DeleteArtifact deletes an artifact by name and returns ErrArtifactNotFound if no row was deleted.
 func (s *APIServer) DeleteArtifact(ctx context.Context, artifactType, name string) error {
 	name = strings.TrimSpace(name)
-	tableConst, _, _, err := ResolveArtifactTarget(artifactType)
+	tableConst, _, canonicalType, err := ResolveArtifactTarget(artifactType)
 	if err != nil {
 		return err
 	}
@@ -349,6 +369,9 @@ func (s *APIServer) DeleteArtifact(ctx context.Context, artifactType, name strin
 	if err == nil && affected == 0 {
 		return ErrArtifactNotFound
 	}
+	if canonicalType == "pipeline" {
+		s.CleanupPipelineReferences(ctx, name)
+	}
 	return nil
 }
 
@@ -357,9 +380,15 @@ func (s *APIServer) DeleteArtifactByID(ctx context.Context, artifactType string,
 	if id <= 0 {
 		return fmt.Errorf("invalid artifact ID %d: must be a positive integer", id)
 	}
-	tableConst, _, _, err := ResolveArtifactTarget(artifactType)
+	tableConst, _, canonicalType, err := ResolveArtifactTarget(artifactType)
 	if err != nil {
 		return err
+	}
+	var existingName string
+	if canonicalType == "pipeline" {
+		if existing, getErr := s.GetArtifactByID(ctx, artifactType, id, false, ""); getErr == nil && existing != nil {
+			existingName = existing.Name
+		}
 	}
 	table := resolveTableName(s.dialect, tableConst)
 	ph := Placeholder(s.dialect, 1)
@@ -372,6 +401,9 @@ func (s *APIServer) DeleteArtifactByID(ctx context.Context, artifactType string,
 	affected, err := res.RowsAffected()
 	if err == nil && affected == 0 {
 		return ErrArtifactNotFound
+	}
+	if canonicalType == "pipeline" && existingName != "" {
+		s.CleanupPipelineReferences(ctx, existingName)
 	}
 	return nil
 }
@@ -446,19 +478,43 @@ func (s *APIServer) ListAPIUsers(ctx context.Context) ([]APIUser, error) {
 	if users == nil {
 		users = []APIUser{}
 	}
-	return users, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	memTable := resolveTableName(s.dialect, TableAPIUserGroups)
+	mRows, mErr := s.db.QueryContext(ctx, fmt.Sprintf("SELECT group_name, username FROM %s ORDER BY group_name ASC", memTable))
+	if mErr == nil {
+		defer mRows.Close()
+		groupsByUserLower := make(map[string][]string)
+		for mRows.Next() {
+			var gName, uName string
+			if err := mRows.Scan(&gName, &uName); err == nil {
+				key := strings.ToLower(strings.TrimSpace(uName))
+				groupsByUserLower[key] = append(groupsByUserLower[key], gName)
+			}
+		}
+		for i := range users {
+			if grps, ok := groupsByUserLower[strings.ToLower(strings.TrimSpace(users[i].Username))]; ok {
+				users[i].Groups = grps
+			}
+		}
+	}
+	return users, nil
 }
 
-// DeleteAPIUser deletes a user from TableAPIUsers.
+// DeleteAPIUser deletes a user from TableAPIUsers and cleans up group/ACL references.
 func (s *APIServer) DeleteAPIUser(ctx context.Context, username string) error {
+	trimmed := strings.TrimSpace(username)
 	table := resolveTableName(s.dialect, TableAPIUsers)
 	query := fmt.Sprintf("DELETE FROM %s WHERE username = %s", table, Placeholder(s.dialect, 1))
-	res, err := s.db.ExecContext(ctx, query, strings.TrimSpace(username))
+	res, err := s.db.ExecContext(ctx, query, trimmed)
 	if err != nil {
 		return err
 	}
 	if affected, err := res.RowsAffected(); err == nil && affected == 0 {
 		return ErrArtifactNotFound
 	}
+	s.CleanupUserReferences(ctx, trimmed)
 	return nil
 }

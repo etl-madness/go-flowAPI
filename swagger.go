@@ -346,10 +346,11 @@ func (s *APIServer) BuildOpenAPISpec(r *http.Request) map[string]any {
 				"All `/api/v1/*` endpoints require HTTP Basic Authentication against `dbo.flow_api_users` (`TableAPIUsers`).\n\n" +
 				"| Permission Role | Capabilities |\n" +
 				"| :--- | :--- |\n" +
-				"| `execution-only` | Execute and validate pipelines (`/api/v1/execute`, `/api/v1/execute/stream`, `/api/v1/validate`) plus read/list/export artifacts and query logs |\n" +
+				"| `scoped` | Zero global permissions — strictly governed by granular per-pipeline and per-pipeline-group ACL rules in `dbo.flow_pipeline_acl` |\n" +
+				"| `execution-only` | Execute and validate pipelines (`/api/v1/execute`, `/api/v1/execute/stream`, `/api/v1/validate`) plus read/list/export artifacts and query logs (subject to ACL `deny` rules or `-strict-acl`) |\n" +
 				"| `read-only` | Read/list/export artifacts and query run, event, and audit logs |\n" +
 				"| `write` / `upload` | Upload files and create, update, delete, or read artifacts |\n" +
-				"| `all` | Full administrative access to all endpoints including `/api/v1/users` and `/api/v1/databases/test` |",
+				"| `all` | Full administrative access to all endpoints including `/api/v1/users`, `/api/v1/groups`, `/api/v1/pipeline-groups`, `/api/v1/acls`, and `/api/v1/databases/test` |",
 		},
 		"servers": []map[string]any{
 			{"url": serverURL, "description": "Active go-flowAPI Server"},
@@ -364,6 +365,7 @@ func (s *APIServer) BuildOpenAPISpec(r *http.Request) map[string]any {
 			{"name": "Execution", "description": "Synchronous execution, SSE streaming execution, and XSD/AST validation"},
 			{"name": "Telemetry & Audit", "description": "Query pipeline runs, node execution events (including node_output), and API audit events"},
 			{"name": "Users", "description": "Manage BasicAuth API users and role permissions in TableAPIUsers (requires 'all' permission)"},
+			{"name": "Access Control & Groups", "description": "Manage API user groups, pipeline groups, granular pipeline CRUD/execute ACL rules, and inspect effective permissions"},
 		},
 		"paths": map[string]any{
 			"/api/v1/health": map[string]any{
@@ -382,11 +384,12 @@ func (s *APIServer) BuildOpenAPISpec(r *http.Request) map[string]any {
 				"get": buildOAIOp(oaiOpSpec{
 					tag:         "Artifacts",
 					summary:     "List artifacts by type",
-					description: "Lists all stored artifacts of the specified type (`pipeline`, `options`, or `config`). Requires `read-only`, `write`, `upload`, or `all` permission.",
+					description: "Lists stored artifacts of the specified type (`pipeline`, `options`, or `config`). For `pipeline`, results are automatically filtered to pipelines where the caller has effective `read` access, and can optionally be filtered by pipeline `group`.",
 					operationID: "listArtifacts",
 					params: []map[string]any{
 						oaiRef("#/components/parameters/ArtifactTypeParam"),
 						oaiQueryParam("include_content", "boolean", "When `true` or `1`, includes the full XML `content` in each returned record", false),
+						oaiQueryParam("group", "string", "Optional pipeline group filter (applies when `type=pipeline`)", nil),
 					},
 					responses: oaiWithCommonResponses(map[string]any{
 						"200": oaiJSONResp("List of artifacts", oaiRef("#/components/schemas/ArtifactListResponse")),
@@ -567,6 +570,18 @@ func (s *APIServer) BuildOpenAPISpec(r *http.Request) map[string]any {
 					}, "401", "403", "404"),
 				}),
 			},
+			"/api/v1/groups":                        buildGroupsCollectionPathItem(),
+			"/api/v1/groups/{name}":                 buildGroupItemPathItem(),
+			"/api/v1/groups/{name}/members":         buildGroupMembersPathItem(),
+			"/api/v1/groups/{name}/members/{username}": buildGroupMemberItemPathItem(),
+			"/api/v1/pipeline-groups":               buildPipelineGroupsCollectionPathItem(),
+			"/api/v1/pipeline-groups/{name}":        buildPipelineGroupItemPathItem(),
+			"/api/v1/pipeline-groups/{name}/pipelines": buildPipelineGroupMembersPathItem(),
+			"/api/v1/pipeline-groups/{name}/pipelines/{pipeline}": buildPipelineGroupMemberItemPathItem(),
+			"/api/v1/acls":                          buildACLsCollectionPathItem(),
+			"/api/v1/acls/{id}":                     buildACLItemPathItem(),
+			"/api/v1/permissions/effective":         buildEffectivePermissionsPathItem("getEffectivePermissions"),
+			"/api/v1/me/permissions":                buildEffectivePermissionsPathItem("getMyEffectivePermissions"),
 		},
 		"components": buildOpenAPIComponents(),
 	}
@@ -632,6 +647,7 @@ func buildOpenAPIComponents() map[string]any {
 					"dialect":          oaiProp("string", "", "sqlserver"),
 					"authenticated_as": oaiProp("string", "", "admin"),
 					"permission":       oaiProp("string", "", "all"),
+					"groups":           map[string]any{"type": "array", "items": oaiProp("string", "", "finance_ops")},
 					"db_spid":          oaiProp("integer", "", 64),
 					"db_user":          oaiProp("string", "", "sa"),
 					"application_name": oaiProp("string", "", "go-flowAPI"),
@@ -647,6 +663,7 @@ func buildOpenAPIComponents() map[string]any {
 					"description": oaiProp("string", "", "Daily ETL workflow"),
 					"content":     oaiProp("string", "", "<Flow><Node Name=\"Step1\">...</Node></Flow>"),
 					"encrypted":   oaiProp("boolean", "", false),
+					"groups":      map[string]any{"type": "array", "items": oaiProp("string", "", "finance_pipelines")},
 				},
 			},
 			"ArtifactPayload": map[string]any{
@@ -660,6 +677,8 @@ func buildOpenAPIComponents() map[string]any {
 					"encrypted":   oaiBoolProp(false, "Encrypt XML content at rest using `secure_key` or server default key"),
 					"secure_key":  oaiProp("string", "Optional passphrase for encryption", nil),
 					"upsert":      oaiBoolProp(false, "Overwrite existing artifact if name already exists"),
+					"group":       oaiProp("string", "Optional pipeline group name (or comma-separated group names) to assign when creating/updating a `pipeline`", nil),
+					"groups":      map[string]any{"type": "array", "items": oaiProp("string", "", "finance_pipelines"), "description": "Optional list of pipeline groups to assign when creating/updating a `pipeline`"},
 				},
 			},
 			"ArtifactListResponse": map[string]any{
@@ -792,9 +811,10 @@ func buildOpenAPIComponents() map[string]any {
 				"type": "object",
 				"properties": map[string]any{
 					"username":    oaiProp("string", "", "admin"),
-					"permission":  oaiProp("string", "Role scope: `execution-only`, `read-only`, `write`, `upload`, or `all` (comma-separated combinations supported)", "all"),
+					"permission":  oaiProp("string", "Role scope: `scoped`, `execution-only`, `read-only`, `write`, `upload`, or `all` (comma-separated combinations supported)", "all"),
 					"is_active":   oaiProp("boolean", "", true),
 					"description": oaiProp("string", "", "Initial administrator with all permissions"),
+					"groups":      map[string]any{"type": "array", "items": oaiProp("string", "", "finance_ops")},
 				},
 			},
 			"UpsertUserRequest": map[string]any{
@@ -803,9 +823,95 @@ func buildOpenAPIComponents() map[string]any {
 				"properties": map[string]any{
 					"username":    oaiProp("string", "", "admin"),
 					"password":    oaiProp("string", "Plaintext password (automatically bcrypt-hashed) or pre-hashed `$2a$`/`sha256:` value", "StrongAdminPass!2026"),
-					"permission":  oaiEnumProp("string", []string{"all", "execution-only", "read-only", "write", "upload"}, nil, "", "all"),
+					"permission":  oaiEnumProp("string", []string{"all", "scoped", "execution-only", "read-only", "write", "upload"}, nil, "", "all"),
 					"description": oaiProp("string", "", "Full administrator account"),
 					"is_active":   oaiBoolProp(true, ""),
+					"groups":      map[string]any{"type": "array", "items": oaiProp("string", "", "finance_ops"), "description": "Optional API user groups to assign"},
+				},
+			},
+			"APIGroup": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"id":          oaiProp("integer", "", 1),
+					"name":        oaiProp("string", "", "finance_ops"),
+					"description": oaiProp("string", "", "Finance ETL operators"),
+					"members":     map[string]any{"type": "array", "items": oaiProp("string", "", "alice")},
+				},
+			},
+			"UpsertAPIGroupRequest": map[string]any{
+				"type":     "object",
+				"required": []string{"name"},
+				"properties": map[string]any{
+					"name":        oaiProp("string", "", "finance_ops"),
+					"description": oaiProp("string", "", "Finance ETL operators"),
+					"members":     map[string]any{"type": "array", "items": oaiProp("string", "", "alice")},
+				},
+			},
+			"PipelineGroup": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"id":           oaiProp("integer", "", 1),
+					"name":         oaiProp("string", "", "finance_pipelines"),
+					"description":  oaiProp("string", "", "Finance ETL pipelines"),
+					"name_pattern": oaiProp("string", "Optional glob pattern matching pipeline names (e.g. `fin_*`)", "fin_*"),
+					"pipelines":    map[string]any{"type": "array", "items": oaiProp("string", "", "fin_daily_gl")},
+				},
+			},
+			"UpsertPipelineGroupRequest": map[string]any{
+				"type":     "object",
+				"required": []string{"name"},
+				"properties": map[string]any{
+					"name":         oaiProp("string", "", "finance_pipelines"),
+					"description":  oaiProp("string", "", "Finance ETL pipelines"),
+					"name_pattern": oaiProp("string", "Optional glob pattern matching pipeline names (e.g. `fin_*`)", "fin_*"),
+					"pipelines":    map[string]any{"type": "array", "items": oaiProp("string", "", "fin_daily_gl")},
+				},
+			},
+			"PipelineACL": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"id":             oaiProp("integer", "", 1),
+					"principal_type": oaiEnumProp("string", []string{"user", "group"}, nil, "", "group"),
+					"principal_name": oaiProp("string", "API username, API group name, or Windows/AD identity (`DOMAIN\\Group`)", "finance_ops"),
+					"target_type":    oaiEnumProp("string", []string{"pipeline", "pipeline_group", "*"}, nil, "", "pipeline_group"),
+					"target_name":    oaiProp("string", "Pipeline name, pipeline group name, or `*`", "finance_pipelines"),
+					"permissions":    oaiProp("string", "Comma-separated actions: `create`, `read`, `update`, `delete`, `execute`, or `all`", "read,execute"),
+					"effect":         oaiEnumProp("string", []string{"allow", "deny"}, "allow", "", "allow"),
+					"description":    oaiProp("string", "", "Allow finance_ops to read and execute finance pipelines"),
+				},
+			},
+			"UpsertPipelineACLRequest": map[string]any{
+				"type":     "object",
+				"required": []string{"principal_type", "principal_name", "target_type", "permissions"},
+				"properties": map[string]any{
+					"principal_type": oaiEnumProp("string", []string{"user", "group"}, nil, "", "group"),
+					"principal_name": oaiProp("string", "", "finance_ops"),
+					"target_type":    oaiEnumProp("string", []string{"pipeline", "pipeline_group", "*"}, nil, "", "pipeline_group"),
+					"target_name":    oaiProp("string", "Required for `pipeline` and `pipeline_group`; defaults to `*` when `target_type` is `*`", "finance_pipelines"),
+					"permissions":    oaiProp("string", "Comma-separated actions: `create`, `read`, `update`, `delete`, `execute`, or `all`", "read,execute"),
+					"effect":         oaiEnumProp("string", []string{"allow", "deny"}, "allow", "", "allow"),
+					"description":    oaiProp("string", "", "Allow finance_ops to read and execute finance pipelines"),
+				},
+			},
+			"EffectivePipelinePermissions": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"pipeline": oaiProp("string", "", "fin_daily_gl"),
+					"groups":   map[string]any{"type": "array", "items": oaiProp("string", "", "finance_pipelines")},
+					"actions":  map[string]any{"type": "object", "additionalProperties": oaiProp("boolean", "", true)},
+				},
+			},
+			"EffectivePermissionsResponse": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"username":               oaiProp("string", "", "alice"),
+					"global_permission":      oaiProp("string", "", "scoped"),
+					"groups":                 map[string]any{"type": "array", "items": oaiProp("string", "", "finance_ops")},
+					"strict_acl":             oaiProp("boolean", "", false),
+					"can_create_ungrouped":   oaiProp("boolean", "", false),
+					"creatable_groups":       map[string]any{"type": "array", "items": oaiProp("string", "", "finance_pipelines")},
+					"can_execute_inline_xml": oaiProp("boolean", "", false),
+					"pipelines":              map[string]any{"type": "array", "items": oaiRef("#/components/schemas/EffectivePipelinePermissions")},
 				},
 			},
 			"DatabaseTestRequest": map[string]any{
@@ -833,12 +939,13 @@ func buildUploadPathItem(operationID string) map[string]any {
 		"post": buildOAIOp(oaiOpSpec{
 			tag:         "Upload",
 			summary:     "Upload an XML file into the database (multipart/form-data or raw body)",
-			description: "Uploads a `pipeline`, `options`, or `config` XML file into its configured database table (`TablePipelineContent`, `TableOptionsContent`, or `TableConfigContent`), automatically handling UTF-8 BOM / UTF-16LE / UTF-16BE decoding and optional encryption. Requires `write`, `upload`, or `all` permission.",
+			description: "Uploads a `pipeline`, `options`, or `config` XML file into its configured database table (`TablePipelineContent`, `TableOptionsContent`, or `TableConfigContent`), automatically handling UTF-8 BOM / UTF-16LE / UTF-16BE decoding and optional encryption. For `pipeline` uploads, enforces granular `create` (new pipeline) or `update` (existing pipeline) permissions.",
 			operationID: operationID,
 			params: []map[string]any{
 				oaiRef("#/components/parameters/ArtifactTypeParam"),
 				oaiQueryParam("name", "string", "Artifact name (for raw body uploads, or to override the uploaded filename)", nil),
 				oaiQueryParam("description", "string", "Artifact description", nil),
+				oaiQueryParam("group", "string", "Optional pipeline group name (or comma-separated group names) to assign when uploading a `pipeline`", nil),
 				oaiQueryParam("encrypted", "boolean", "Encrypt the uploaded XML before storing in the database", false),
 				oaiQueryParam("secure_key", "string", "Optional encryption key", nil),
 			},
@@ -853,6 +960,7 @@ func buildUploadPathItem(operationID string) map[string]any {
 								"file":        map[string]any{"type": "string", "format": "binary", "description": "XML file to upload"},
 								"name":        oaiProp("string", "Optional artifact name (defaults to filename without extension)", nil),
 								"description": oaiProp("string", "Optional description", nil),
+								"group":       oaiProp("string", "Optional pipeline group name (or comma-separated group names)", nil),
 								"encrypted":   oaiBoolProp(false, ""),
 								"secure_key":  oaiProp("string", "", nil),
 							},
@@ -949,6 +1057,401 @@ func buildDBTestPathItem(operationID string) map[string]any {
 			responses: oaiWithCommonResponses(map[string]any{
 				"200": oaiJSONResp("Database connection succeeded", oaiRef("#/components/schemas/DatabaseTestResponse")),
 			}, "400", "401", "403", "502"),
+		}),
+	}
+}
+
+func oaiPathParam(name, typ, desc string, example any) map[string]any {
+	return map[string]any{
+		"name":        name,
+		"in":          "path",
+		"required":    true,
+		"description": desc,
+		"schema":      oaiProp(typ, "", example),
+	}
+}
+
+func buildGroupsCollectionPathItem() map[string]any {
+	return map[string]any{
+		"get": buildOAIOp(oaiOpSpec{
+			tag:         "Access Control & Groups",
+			summary:     "List all API user groups",
+			description: "Lists all user groups in `TableAPIGroups` (`dbo.flow_api_groups`) and their members. Requires `all` permission.",
+			operationID: "listGroups",
+			responses: oaiWithCommonResponses(map[string]any{
+				"200": oaiJSONResp("List of API user groups", map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"count":  oaiProp("integer", "", 1),
+						"groups": map[string]any{"type": "array", "items": oaiRef("#/components/schemas/APIGroup")},
+					},
+				}),
+			}, "401", "403"),
+		}),
+		"post": buildOAIOp(oaiOpSpec{
+			tag:         "Access Control & Groups",
+			summary:     "Create or update an API user group",
+			description: "Creates or updates a user group in `TableAPIGroups` (`dbo.flow_api_groups`) and optionally assigns initial members. Requires `all` permission.",
+			operationID: "upsertGroup",
+			body:        oaiJSONBody("#/components/schemas/UpsertAPIGroupRequest", true),
+			responses: oaiWithCommonResponses(map[string]any{
+				"201": oaiJSONResp("Group created or updated", oaiRef("#/components/schemas/APIGroup")),
+			}, "400", "401", "403"),
+		}),
+	}
+}
+
+func buildGroupItemPathItem() map[string]any {
+	p := []map[string]any{oaiPathParam("name", "string", "Group name", "finance_ops")}
+	return map[string]any{
+		"get": buildOAIOp(oaiOpSpec{
+			tag:         "Access Control & Groups",
+			summary:     "Get an API user group by name",
+			description: "Fetches a user group and its member list. Requires `all` permission.",
+			operationID: "getGroup",
+			params:      p,
+			responses: oaiWithCommonResponses(map[string]any{
+				"200": oaiJSONResp("API user group", oaiRef("#/components/schemas/APIGroup")),
+			}, "401", "403", "404"),
+		}),
+		"put": buildOAIOp(oaiOpSpec{
+			tag:         "Access Control & Groups",
+			summary:     "Update an API user group",
+			description: "Updates an API user group's description and optional members. Requires `all` permission.",
+			operationID: "updateGroup",
+			params:      p,
+			body:        oaiJSONBody("#/components/schemas/UpsertAPIGroupRequest", true),
+			responses: oaiWithCommonResponses(map[string]any{
+				"200": oaiJSONResp("Updated API user group", oaiRef("#/components/schemas/APIGroup")),
+			}, "400", "401", "403"),
+		}),
+		"delete": buildOAIOp(oaiOpSpec{
+			tag:         "Access Control & Groups",
+			summary:     "Delete an API user group",
+			description: "Deletes an API user group along with its user memberships and group ACL bindings. Requires `all` permission.",
+			operationID: "deleteGroup",
+			params:      p,
+			responses: oaiWithCommonResponses(map[string]any{
+				"200": oaiJSONResp("Group deleted", map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"deleted": oaiProp("boolean", "", true),
+						"name":    oaiProp("string", "", "finance_ops"),
+					},
+				}),
+			}, "401", "403", "404"),
+		}),
+	}
+}
+
+func buildGroupMembersPathItem() map[string]any {
+	p := []map[string]any{oaiPathParam("name", "string", "Group name", "finance_ops")}
+	return map[string]any{
+		"get": buildOAIOp(oaiOpSpec{
+			tag:         "Access Control & Groups",
+			summary:     "List members of an API user group",
+			description: "Lists usernames assigned to the specified API user group. Requires `all` permission.",
+			operationID: "listGroupMembers",
+			params:      p,
+			responses: oaiWithCommonResponses(map[string]any{
+				"200": oaiJSONResp("Group members", map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"group":   oaiProp("string", "", "finance_ops"),
+						"count":   oaiProp("integer", "", 1),
+						"members": map[string]any{"type": "array", "items": oaiProp("string", "", "alice")},
+					},
+				}),
+			}, "401", "403", "404"),
+		}),
+		"post": buildOAIOp(oaiOpSpec{
+			tag:         "Access Control & Groups",
+			summary:     "Add member(s) to an API user group",
+			description: "Adds `username` and/or `usernames` (`members`) to `TableAPIUserGroups`. Requires `all` permission.",
+			operationID: "addGroupMembers",
+			params:      p,
+			body: map[string]any{
+				"required": true,
+				"content": map[string]any{
+					"application/json": map[string]any{
+						"schema": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"username":  oaiProp("string", "", "alice"),
+								"usernames": map[string]any{"type": "array", "items": oaiProp("string", "", "bob")},
+							},
+						},
+					},
+				},
+			},
+			responses: oaiWithCommonResponses(map[string]any{
+				"201": oaiJSONResp("Updated API user group", oaiRef("#/components/schemas/APIGroup")),
+			}, "400", "401", "403", "404"),
+		}),
+	}
+}
+
+func buildGroupMemberItemPathItem() map[string]any {
+	return map[string]any{
+		"delete": buildOAIOp(oaiOpSpec{
+			tag:         "Access Control & Groups",
+			summary:     "Remove a user from an API user group",
+			description: "Removes a username from `TableAPIUserGroups`. Requires `all` permission.",
+			operationID: "removeGroupMember",
+			params: []map[string]any{
+				oaiPathParam("name", "string", "Group name", "finance_ops"),
+				oaiPathParam("username", "string", "Username to remove", "alice"),
+			},
+			responses: oaiWithCommonResponses(map[string]any{
+				"200": oaiJSONResp("Member removed", map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"removed":  oaiProp("boolean", "", true),
+						"group":    oaiProp("string", "", "finance_ops"),
+						"username": oaiProp("string", "", "alice"),
+					},
+				}),
+			}, "401", "403", "404"),
+		}),
+	}
+}
+
+func buildPipelineGroupsCollectionPathItem() map[string]any {
+	return map[string]any{
+		"get": buildOAIOp(oaiOpSpec{
+			tag:         "Access Control & Groups",
+			summary:     "List pipeline groups",
+			description: "Lists pipeline groups in `TablePipelineGroups` (`dbo.flow_pipeline_groups`). Non-admin users receive groups containing at least one readable pipeline or creatable group.",
+			operationID: "listPipelineGroups",
+			responses: oaiWithCommonResponses(map[string]any{
+				"200": oaiJSONResp("List of pipeline groups", map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"count":           oaiProp("integer", "", 1),
+						"pipeline_groups": map[string]any{"type": "array", "items": oaiRef("#/components/schemas/PipelineGroup")},
+					},
+				}),
+			}, "401"),
+		}),
+		"post": buildOAIOp(oaiOpSpec{
+			tag:         "Access Control & Groups",
+			summary:     "Create or update a pipeline group",
+			description: "Creates or updates a pipeline group in `TablePipelineGroups` with optional `name_pattern` glob (e.g. `fin_*`) and explicit `pipelines` list. Requires `all` permission.",
+			operationID: "upsertPipelineGroup",
+			body:        oaiJSONBody("#/components/schemas/UpsertPipelineGroupRequest", true),
+			responses: oaiWithCommonResponses(map[string]any{
+				"201": oaiJSONResp("Pipeline group created or updated", oaiRef("#/components/schemas/PipelineGroup")),
+			}, "400", "401", "403"),
+		}),
+	}
+}
+
+func buildPipelineGroupItemPathItem() map[string]any {
+	p := []map[string]any{oaiPathParam("name", "string", "Pipeline group name", "finance_pipelines")}
+	return map[string]any{
+		"get": buildOAIOp(oaiOpSpec{
+			tag:         "Access Control & Groups",
+			summary:     "Get a pipeline group by name",
+			description: "Fetches a pipeline group and its explicit/pattern-matched pipelines.",
+			operationID: "getPipelineGroup",
+			params:      p,
+			responses: oaiWithCommonResponses(map[string]any{
+				"200": oaiJSONResp("Pipeline group", oaiRef("#/components/schemas/PipelineGroup")),
+			}, "401", "403", "404"),
+		}),
+		"put": buildOAIOp(oaiOpSpec{
+			tag:         "Access Control & Groups",
+			summary:     "Update a pipeline group",
+			description: "Updates a pipeline group's description, `name_pattern`, and optional member pipelines. Requires `all` permission.",
+			operationID: "updatePipelineGroup",
+			params:      p,
+			body:        oaiJSONBody("#/components/schemas/UpsertPipelineGroupRequest", true),
+			responses: oaiWithCommonResponses(map[string]any{
+				"200": oaiJSONResp("Updated pipeline group", oaiRef("#/components/schemas/PipelineGroup")),
+			}, "400", "401", "403"),
+		}),
+		"delete": buildOAIOp(oaiOpSpec{
+			tag:         "Access Control & Groups",
+			summary:     "Delete a pipeline group",
+			description: "Deletes a pipeline group along with its explicit pipeline memberships and ACL bindings. Requires `all` permission.",
+			operationID: "deletePipelineGroup",
+			params:      p,
+			responses: oaiWithCommonResponses(map[string]any{
+				"200": oaiJSONResp("Pipeline group deleted", map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"deleted": oaiProp("boolean", "", true),
+						"name":    oaiProp("string", "", "finance_pipelines"),
+					},
+				}),
+			}, "401", "403", "404"),
+		}),
+	}
+}
+
+func buildPipelineGroupMembersPathItem() map[string]any {
+	p := []map[string]any{oaiPathParam("name", "string", "Pipeline group name", "finance_pipelines")}
+	return map[string]any{
+		"get": buildOAIOp(oaiOpSpec{
+			tag:         "Access Control & Groups",
+			summary:     "List pipelines in a pipeline group",
+			description: "Lists pipelines explicitly assigned to or matching `name_pattern` of the pipeline group.",
+			operationID: "listPipelineGroupMembers",
+			params:      p,
+			responses: oaiWithCommonResponses(map[string]any{
+				"200": oaiJSONResp("Pipelines in group", map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"group":     oaiProp("string", "", "finance_pipelines"),
+						"count":     oaiProp("integer", "", 1),
+						"pipelines": map[string]any{"type": "array", "items": oaiProp("string", "", "fin_daily_gl")},
+					},
+				}),
+			}, "401", "403", "404"),
+		}),
+		"post": buildOAIOp(oaiOpSpec{
+			tag:         "Access Control & Groups",
+			summary:     "Assign pipeline(s) to a pipeline group",
+			description: "Adds `pipeline_name` (`pipeline`) and/or `pipelines` to `TablePipelineGroupMembers`. Requires `all` permission.",
+			operationID: "addPipelineGroupMembers",
+			params:      p,
+			body: map[string]any{
+				"required": true,
+				"content": map[string]any{
+					"application/json": map[string]any{
+						"schema": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"pipeline_name": oaiProp("string", "", "fin_daily_gl"),
+								"pipelines":     map[string]any{"type": "array", "items": oaiProp("string", "", "fin_ap_export")},
+							},
+						},
+					},
+				},
+			},
+			responses: oaiWithCommonResponses(map[string]any{
+				"201": oaiJSONResp("Updated pipeline group", oaiRef("#/components/schemas/PipelineGroup")),
+			}, "400", "401", "403", "404"),
+		}),
+	}
+}
+
+func buildPipelineGroupMemberItemPathItem() map[string]any {
+	return map[string]any{
+		"delete": buildOAIOp(oaiOpSpec{
+			tag:         "Access Control & Groups",
+			summary:     "Remove a pipeline from a pipeline group",
+			description: "Removes an explicit pipeline membership from `TablePipelineGroupMembers`. Requires `all` permission.",
+			operationID: "removePipelineGroupMember",
+			params: []map[string]any{
+				oaiPathParam("name", "string", "Pipeline group name", "finance_pipelines"),
+				oaiPathParam("pipeline", "string", "Pipeline name to remove", "fin_daily_gl"),
+			},
+			responses: oaiWithCommonResponses(map[string]any{
+				"200": oaiJSONResp("Pipeline removed from group", map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"removed":       oaiProp("boolean", "", true),
+						"group":         oaiProp("string", "", "finance_pipelines"),
+						"pipeline_name": oaiProp("string", "", "fin_daily_gl"),
+					},
+				}),
+			}, "401", "403", "404"),
+		}),
+	}
+}
+
+func buildACLsCollectionPathItem() map[string]any {
+	return map[string]any{
+		"get": buildOAIOp(oaiOpSpec{
+			tag:         "Access Control & Groups",
+			summary:     "List granular pipeline ACL rules",
+			description: "Lists ACL rules in `TablePipelineACL` (`dbo.flow_pipeline_acl`) with optional filtering by principal or target. Requires `all` permission.",
+			operationID: "listPipelineACLs",
+			params: []map[string]any{
+				oaiQueryParam("principal_type", "string", "Filter by `user` or `group`", nil),
+				oaiQueryParam("principal_name", "string", "Filter by username or group name", nil),
+				oaiQueryParam("target_type", "string", "Filter by `pipeline`, `pipeline_group`, or `*`", nil),
+				oaiQueryParam("target_name", "string", "Filter by pipeline name, pipeline group name, or `*`", nil),
+			},
+			responses: oaiWithCommonResponses(map[string]any{
+				"200": oaiJSONResp("List of pipeline ACL rules", map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"count": oaiProp("integer", "", 1),
+						"acls":  map[string]any{"type": "array", "items": oaiRef("#/components/schemas/PipelineACL")},
+					},
+				}),
+			}, "401", "403"),
+		}),
+		"post": buildOAIOp(oaiOpSpec{
+			tag:         "Access Control & Groups",
+			summary:     "Create or upsert a granular pipeline ACL rule",
+			description: "Creates or updates a pipeline ACL rule in `TablePipelineACL` (`dbo.flow_pipeline_acl`) granting or denying `create`, `read`, `update`, `delete`, `execute`, or `all` on a `pipeline`, `pipeline_group`, or `*`. Requires `all` permission.",
+			operationID: "upsertPipelineACL",
+			body:        oaiJSONBody("#/components/schemas/UpsertPipelineACLRequest", true),
+			responses: oaiWithCommonResponses(map[string]any{
+				"201": oaiJSONResp("ACL rule created or updated", oaiRef("#/components/schemas/PipelineACL")),
+			}, "400", "401", "403"),
+		}),
+	}
+}
+
+func buildACLItemPathItem() map[string]any {
+	p := []map[string]any{
+		{
+			"name":        "id",
+			"in":          "path",
+			"required":    true,
+			"description": "ACL rule ID",
+			"schema":      map[string]any{"type": "integer", "minimum": 1, "example": 1},
+		},
+	}
+	return map[string]any{
+		"put": buildOAIOp(oaiOpSpec{
+			tag:         "Access Control & Groups",
+			summary:     "Update a granular pipeline ACL rule by ID",
+			description: "Updates an existing ACL rule in `TablePipelineACL` by its primary key `id`. Requires `all` permission.",
+			operationID: "updatePipelineACL",
+			params:      p,
+			body:        oaiJSONBody("#/components/schemas/UpsertPipelineACLRequest", true),
+			responses: oaiWithCommonResponses(map[string]any{
+				"200": oaiJSONResp("Updated ACL rule", oaiRef("#/components/schemas/PipelineACL")),
+			}, "400", "401", "403", "404"),
+		}),
+		"delete": buildOAIOp(oaiOpSpec{
+			tag:         "Access Control & Groups",
+			summary:     "Delete a granular pipeline ACL rule by ID",
+			description: "Deletes an ACL rule from `TablePipelineACL` by its primary key `id`. Requires `all` permission.",
+			operationID: "deletePipelineACL",
+			params:      p,
+			responses: oaiWithCommonResponses(map[string]any{
+				"200": oaiJSONResp("ACL rule deleted", map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"deleted": oaiProp("boolean", "", true),
+						"id":      oaiProp("integer", "", 1),
+					},
+				}),
+			}, "401", "403", "404"),
+		}),
+	}
+}
+
+func buildEffectivePermissionsPathItem(operationID string) map[string]any {
+	return map[string]any{
+		"get": buildOAIOp(oaiOpSpec{
+			tag:         "Access Control & Groups",
+			summary:     "Inspect effective per-pipeline CRUD & execution permissions",
+			description: "Computes effective `create`, `read`, `update`, `delete`, and `execute` permissions across pipelines and pipeline groups. Any authenticated user can inspect their own effective permissions; administrators (`all`) may pass `?username=...` and optional `?groups=...` to preview another user's access.",
+			operationID: operationID,
+			params: []map[string]any{
+				oaiQueryParam("username", "string", "Optional target username to inspect (requires `all` permission when inspecting another user)", nil),
+				oaiQueryParam("groups", "string", "Optional comma-separated simulated AD/external groups (requires `all` permission)", nil),
+			},
+			responses: oaiWithCommonResponses(map[string]any{
+				"200": oaiJSONResp("Effective permissions matrix", oaiRef("#/components/schemas/EffectivePermissionsResponse")),
+			}, "401", "403", "404"),
 		}),
 	}
 }

@@ -8,7 +8,7 @@
 ## Key Features
 
 1. **Adjustable Table & Schema Paths (`tables.go`)**:
-   - Controlled via `const` declarations (`DefaultSchema = "dbo."`, `TablePipelineContent`, `TableOptionsContent`, `TableConfigContent`, `TablePipelineRuns`, `TablePipelineEvents`, `TableAPIAuditEvents`, `TableAPIUsers`).
+   - Controlled via `const` declarations (`DefaultSchema = "dbo."`, `TablePipelineContent`, `TableOptionsContent`, `TableConfigContent`, `TablePipelineRuns`, `TablePipelineEvents`, `TableAPIAuditEvents`, `TableAPIUsers`, `TableAPIGroups`, `TableAPIUserGroups`, `TablePipelineGroups`, `TablePipelineGroupMembers`, `TablePipelineACL`).
 2. **Startup Connection String Variable (`config.go`)**:
    - Defined in `var StartupConnectionString` and loaded at startup (can be overridden via `FLOW_API_DSN` or `-dsn`).
 3. **5 Supported Database Dialects**:
@@ -17,12 +17,13 @@
    - MySQL / MariaDB (`mysql://`)
    - SQLite (`sqlite://`)
    - Oracle (`oracle://`)
-4. **Database-Backed BasicAuth & Role Permissioning (`auth.go`)**:
-   - Authenticates against `TableAPIUsers` (`dbo.flow_api_users`) and enforces permissions:
+4. **Database-Backed BasicAuth, Windows/AD Groups & Granular Pipeline ACLs (`auth.go`, `acl.go`)**:
+   - Authenticates against `TableAPIUsers` (`dbo.flow_api_users`) as well as Windows/AD principals and groups, supporting global roles plus per-pipeline and per-pipeline-group ACLs (`create`, `read`, `update`, `delete`, `execute` with `allow` / `deny` precedence):
+     - `scoped`: Zero global rights — strictly governed by user- and group-level rules in `TablePipelineACL` (`dbo.flow_pipeline_acl`)
      - `execution-only`: Execute and validate pipelines (`POST /api/v1/execute`, `POST /api/v1/execute/stream`, `POST /api/v1/validate`) and read/list/export artifacts & query logs
      - `read-only`: Read/list/export artifacts and query telemetry & audit logs (`GET /api/v1/...`)
      - `write` or `upload`: Upload files and create/update/delete/read artifacts (`/api/v1/upload/...`, `/api/v1/artifacts/...`)
-     - `all`: Full access across all endpoints including user management (`/api/v1/users`) and DB connectivity testing (`/api/v1/db/test`)
+     - `all`: Full access across all endpoints including user, group, pipeline-group, and ACL management (`/api/v1/users`, `/api/v1/groups`, `/api/v1/pipeline-groups`, `/api/v1/acls`) and DB connectivity testing (`/api/v1/db/test`)
 5. **Full Event & Telemetry Logging (`telemetry.go`)**:
    - Every API call is logged to `TableAPIAuditEvents` (`dbo.flow_api_events`).
    - Every pipeline execution logs run summaries to `TablePipelineRuns` (`dbo.pipeline_runs`) and node events (including optional `node_output` with 64 KB UTF-8 safe truncation and secret redaction) to `TablePipelineEvents` (`dbo.pipeline_events`).
@@ -90,7 +91,8 @@ docker compose -f docker-compose.sqlite.yml up -d --build
 | `-key-file` | — | `""` | Path to file containing default encryption/decryption key |
 | `-bootstrap-user` | `FLOW_API_BOOTSTRAP_USER` | `""` | Initial API username to create/update at startup |
 | `-bootstrap-pass` | `FLOW_API_BOOTSTRAP_PASS` | `""` | Password for `-bootstrap-user` (automatically bcrypt-hashed) |
-| `-bootstrap-perm` | `FLOW_API_BOOTSTRAP_PERM` | `"all"` | Permission role for `-bootstrap-user` (`all`, `execution-only`, `read-only`, `write`, `upload`) |
+| `-bootstrap-perm` | `FLOW_API_BOOTSTRAP_PERM` | `"all"` | Permission role for `-bootstrap-user` (`all`, `scoped`, `execution-only`, `read-only`, `write`, `upload`) |
+| `-strict-acl` | `FLOW_API_STRICT_ACL` | `false` | Enforce strict ACL-only pipeline authorization for all non-`all` users |
 | `-hash-password` | — | `""` | Generate and print a bcrypt hash for the given password and exit |
 | `-debug` | `FLOW_API_DEBUG` | `false` | Enable verbose debug logging |
 
@@ -124,35 +126,51 @@ See **[`packaging/README.md`](packaging/README.md)** and **[`packaging/winget/RE
 
 ## API Endpoints & Permission Matrix
 
+Full endpoint schemas and `curl` examples are documented in **[`docs/API_ENDPOINTS_REFERENCE.md`](docs/API_ENDPOINTS_REFERENCE.md)** and served interactively at `/swagger/`.
+
 | Method & Path | Required Permission | Description |
 | :--- | :--- | :--- |
 | `GET /swagger/` (or `/docs`) | Public (Authorize in UI) | Interactive Swagger UI with BasicAuth support |
 | `GET /swagger/doc.json` (or `/api/v1/openapi.json`) | Public | OpenAPI 3.0.3 JSON specification |
-| `GET /api/v1/health` | Public (No BasicAuth required) | Health check and database driver/schema status |
-| `POST /api/v1/upload/{type}` | `write`, `upload`, or `all` | Upload `.xml`/`.json` file (`multipart/form-data` or raw body) into `pipelines`, `options`, or `configs` |
-| `GET /api/v1/artifacts/{type}` | `read-only`, `write`, `upload`, or `all` | List artifacts (`pipelines`, `options`, `configs`) |
-| `GET /api/v1/artifacts/{type}/{name}` | `read-only`, `write`, `upload`, or `all` | Fetch artifact by name (use `?decrypt=true` to decrypt) |
-| `GET /api/v1/artifacts/{type}/id/{id}` | `read-only`, `write`, `upload`, or `all` | Fetch artifact by database table `ID` (`?decrypt=true` supported) |
-| `GET /api/v1/artifacts/{type}/{name}/export` | `read-only`, `write`, `upload`, or `all` | Export artifact as raw XML attachment |
-| `GET /api/v1/artifacts/{type}/id/{id}/export` | `read-only`, `write`, `upload`, or `all` | Export artifact by database table `ID` as raw XML attachment |
-| `POST /api/v1/artifacts/{type}` | `write`, `upload`, or `all` | Create a new artifact (fails with `409 Conflict` if it already exists unless `upsert=true`) |
-| `PUT /api/v1/artifacts/{type}/{name}` | `write`, `upload`, or `all` | Update an existing artifact by name |
-| `PUT /api/v1/artifacts/{type}/id/{id}` | `write`, `upload`, or `all` | Update an existing artifact by database table `ID` |
-| `DELETE /api/v1/artifacts/{type}/{name}` | `write`, `upload`, or `all` | Delete an artifact by name |
-| `DELETE /api/v1/artifacts/{type}/id/{id}` | `write`, `upload`, or `all` | Delete an artifact by database table `ID` |
-| `POST /api/v1/execute` | `execution-only` or `all` | Execute a pipeline synchronously with all CLI/Builder options |
-| `POST /api/v1/execute/{type}/{id}` | `execution-only` or `all` | Execute by artifact type (`pipeline`, `options`, `config`) and database table `ID` |
-| `POST /api/v1/execute/stream` | `execution-only` or `all` | Execute a pipeline and stream live SSE events (`event: node_event`, `event: done`) |
-| `POST\|GET /api/v1/execute/stream/{type}/{id}` | `execution-only` or `all` | Stream live SSE execution by artifact type and database table `ID` (also `/api/v1/execute/{type}/{id}/stream`) |
-| `POST /api/v1/validate` | `execution-only` or `all` | Validate pipeline syntax, XSD, and preflight checks (`validate=true`) |
-| `POST /api/v1/validate/{type}/{id}` | `execution-only` or `all` | Validate an artifact by type and database table `ID` |
-| `GET /api/v1/runs` | `read-only` or `all` | Query `pipeline_runs` history |
-| `GET /api/v1/events` | `read-only` or `all` | Query `pipeline_events` (including `node_output`) |
-| `GET /api/v1/audit` | `read-only` or `all` | Query `flow_api_events` API audit trail |
+| `GET /api/v1/health` | Public (Optional BasicAuth) | Health check, DB session identity, caller `groups`, and configured table status |
+| `POST\|PUT /api/v1/upload/{type}` | `write`, `upload`, `all`, or Pipeline ACL (`create`/`update`) | Upload `.xml`/`.json` file (`multipart/form-data` or raw body) into `pipelines`, `options`, or `configs` (supports optional `group` for pipelines) |
+| `GET /api/v1/artifacts/{type}` | `read-only`+ or Pipeline ACL (`read`) | List artifacts (`pipelines`, `options`, `configs`); filters `pipelines` to readable items |
+| `GET /api/v1/artifacts/{type}/{name}` | `read-only`+ or Pipeline ACL (`read`) | Fetch artifact by name (use `?decrypt=true` to decrypt) |
+| `GET /api/v1/artifacts/{type}/id/{id}` | `read-only`+ or Pipeline ACL (`read`) | Fetch artifact by database table `ID` (`?decrypt=true` supported) |
+| `GET /api/v1/artifacts/{type}/{name}/export` | `read-only`+ or Pipeline ACL (`read`) | Export artifact as raw XML attachment |
+| `GET /api/v1/artifacts/{type}/id/{id}/export` | `read-only`+ or Pipeline ACL (`read`) | Export artifact by database table `ID` as raw XML attachment |
+| `POST /api/v1/artifacts/{type}` | `write`, `upload`, `all`, or Pipeline ACL (`create`/`update`) | Create/upsert artifact (`upsert=true` supported; optional `groups` array for `pipeline`) |
+| `PUT /api/v1/artifacts/{type}/{name}` | `write`, `upload`, `all`, or Pipeline ACL (`update`) | Update an existing artifact by name |
+| `PUT /api/v1/artifacts/{type}/id/{id}` | `write`, `upload`, `all`, or Pipeline ACL (`update`) | Update an existing artifact by database table `ID` |
+| `DELETE /api/v1/artifacts/{type}/{name}` | `write`, `upload`, `all`, or Pipeline ACL (`delete`) | Delete an artifact by name |
+| `DELETE /api/v1/artifacts/{type}/id/{id}` | `write`, `upload`, `all`, or Pipeline ACL (`delete`) | Delete an artifact by database table `ID` |
+| `POST /api/v1/execute` | `execution-only`, `all`, or Pipeline ACL (`execute`) | Execute a pipeline synchronously with all CLI/Builder options |
+| `POST /api/v1/execute/{type}/{id}` | `execution-only`, `all`, or Pipeline ACL (`execute`) | Execute by artifact type (`pipeline`, `options`, `config`) and database table `ID` |
+| `POST\|GET /api/v1/execute/stream` | `execution-only`, `all`, or Pipeline ACL (`execute`) | Execute a pipeline and stream live SSE events (`event: node_event`, `event: done`) |
+| `POST\|GET /api/v1/execute/stream/{type}/{id}` | `execution-only`, `all`, or Pipeline ACL (`execute`) | Stream live SSE execution by artifact type and database table `ID` (also `/api/v1/execute/{type}/{id}/stream`) |
+| `POST /api/v1/validate` | `execution-only`, `all`, or Pipeline ACL (`execute`) | Validate pipeline syntax, XSD, and semantic AST rules (`validate=true`) |
+| `POST /api/v1/validate/{type}/{id}` | `execution-only`, `all`, or Pipeline ACL (`execute`) | Validate an artifact by type and database table `ID` |
+| `POST /api/v1/crypto/keygen` | `read-only` or higher | Generate AES-256, RSA, ECDSA, Ed25519 (+ X.509 cert), or OpenPGP keypairs |
+| `POST /api/v1/crypto/encrypt` | `read-only` or higher | Encrypt XML/text payload into a `FLOWENC:v1:` AES-256-GCM envelope |
+| `POST /api/v1/crypto/decrypt` | `read-only` or higher | Decrypt a `FLOWENC:v1:` envelope |
+| `POST /api/v1/crypto/sign` | `read-only` or higher | Digitally sign XML payloads (`OPENSSL`, `PKCS7`, or `PGP`) |
+| `POST /api/v1/crypto/verify` | `read-only` or higher | Verify wrapped (`FLOWSIGNED:v1:`) or detached digital signatures |
+| `GET /api/v1/runs` | `read-only` or higher | Query `pipeline_runs` history |
+| `GET /api/v1/events` | `read-only` or higher | Query `pipeline_events` (including `node_output`) |
+| `GET /api/v1/audit` | `read-only` or higher | Query `flow_api_events` API audit trail |
 | `POST /api/v1/db/test` | `all` | Test connectivity to the startup DB or an external target DSN |
-| `GET /api/v1/users` | `all` | List BasicAuth users and permissions |
-| `POST /api/v1/users` | `all` | Create or update a BasicAuth user (automatically bcrypt-hashes password) |
-| `DELETE /api/v1/users/{username}` | `all` | Delete a BasicAuth user |
+| `GET /api/v1/users` | `all` | List BasicAuth/Windows users, roles (`all`, `scoped`, `write`, `upload`, `execution-only`, `read-only`), and `groups` |
+| `POST /api/v1/users` | `all` | Create or update a user (automatically bcrypt-hashes password; optional `groups`) |
+| `DELETE /api/v1/users/{username}` | `all` | Delete a user and clean up group memberships/direct ACLs |
+| `GET\|POST /api/v1/groups` | `all` | List or create/update API user groups (`TableAPIGroups`) |
+| `GET\|PUT\|DELETE /api/v1/groups/{name}` | `all` | Inspect, update, or delete an API user group |
+| `GET\|POST\|DELETE /api/v1/groups/{name}/members[/{username}]` | `all` | List, add, or remove user memberships (`TableAPIUserGroups`) |
+| `GET\|POST /api/v1/pipeline-groups` | `GET`: Auth; `POST`: `all` | List or create/update pipeline groups with optional `name_pattern` glob (`TablePipelineGroups`) |
+| `GET\|PUT\|DELETE /api/v1/pipeline-groups/{name}` | `GET`: Auth; `PUT\|DELETE`: `all` | Inspect, update, or delete a pipeline group |
+| `GET\|POST\|DELETE /api/v1/pipeline-groups/{name}/pipelines[/{pipeline}]` | `GET`: Auth; `POST\|DELETE`: `all` | List, add, or remove explicit pipeline memberships (`TablePipelineGroupMembers`) |
+| `GET\|POST /api/v1/acls` | `all` | List (filterable) or create/upsert granular `allow`/`deny` pipeline ACL rules (`TablePipelineACL`) |
+| `PUT\|DELETE /api/v1/acls/{id}` | `all` | Update or delete a granular pipeline ACL rule by ID |
+| `GET /api/v1/permissions/effective` (or `/api/v1/me/permissions`) | Any authenticated user (`all` to inspect others) | Compute effective per-pipeline CRUD & execute permissions (`?username=&groups=` supported for admins) |
 
 ---
 

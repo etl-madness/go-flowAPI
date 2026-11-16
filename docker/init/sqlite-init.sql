@@ -97,3 +97,52 @@ CREATE TABLE IF NOT EXISTS flow_api_users (
     created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS flow_api_groups (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL UNIQUE,
+    description TEXT,
+    created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS flow_api_user_groups (
+    group_name TEXT NOT NULL,
+    username   TEXT NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (group_name, username)
+);
+CREATE INDEX IF NOT EXISTS ix_flow_api_user_groups_username ON flow_api_user_groups (username);
+
+CREATE TABLE IF NOT EXISTS flow_pipeline_groups (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT NOT NULL UNIQUE,
+    description  TEXT,
+    name_pattern TEXT,
+    created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS flow_pipeline_group_members (
+    group_name    TEXT NOT NULL,
+    pipeline_name TEXT NOT NULL,
+    created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (group_name, pipeline_name)
+);
+CREATE INDEX IF NOT EXISTS ix_flow_pipeline_group_members_pipeline ON flow_pipeline_group_members (pipeline_name);
+
+CREATE TABLE IF NOT EXISTS flow_pipeline_acl (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    principal_type TEXT NOT NULL,
+    principal_name TEXT NOT NULL,
+    target_type    TEXT NOT NULL,
+    target_name    TEXT NOT NULL,
+    permissions    TEXT NOT NULL,
+    effect         TEXT NOT NULL DEFAULT 'allow',
+    description    TEXT,
+    created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (principal_type, principal_name, target_type, target_name, effect)
+);
+CREATE INDEX IF NOT EXISTS ix_flow_pipeline_acl_target ON flow_pipeline_acl (target_type, target_name);
+CREATE INDEX IF NOT EXISTS ix_flow_pipeline_acl_principal ON flow_pipeline_acl (principal_type, principal_name);

@@ -52,30 +52,39 @@ func (s *APIServer) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/health", s.handleHealth)
 
 	// Artifact CRUD & File Upload Routes (/api/v1/artifacts/{type} and /api/v1/upload/{type})
+	// Authenticated via RequireAuth; granular per-pipeline/pipeline-group ACLs are enforced inside handlers.
 	mux.HandleFunc("/api/v1/artifacts/", s.handleArtifactsRouter)
-	mux.HandleFunc("/api/v1/upload/", s.RequirePermission(PermUpload, s.handleUploadRouter))
+	mux.HandleFunc("/api/v1/upload/", s.RequireAuth(s.handleUploadRouter))
 
-	// Execution & Validation Routes (requires "execution-only" or "all")
-	mux.HandleFunc("/api/v1/execute", s.RequirePermission(PermExecutionOnly, s.handleExecuteSync))
-	mux.HandleFunc("/api/v1/execute/", s.RequirePermission(PermExecutionOnly, s.handleExecuteRouter))
-	mux.HandleFunc("/api/v1/execution", s.RequirePermission(PermExecutionOnly, s.handleExecuteSync))
-	mux.HandleFunc("/api/v1/execution/", s.RequirePermission(PermExecutionOnly, s.handleExecuteRouter))
-	mux.HandleFunc("/api/v1/validate", s.RequirePermission(PermExecutionOnly, s.handleValidate))
-	mux.HandleFunc("/api/v1/validate/", s.RequirePermission(PermExecutionOnly, s.handleValidateRouter))
+	// Execution & Validation Routes (granularity enforced per resolved target pipeline via AuthorizeExecutionRequest)
+	mux.HandleFunc("/api/v1/execute", s.RequireAuth(s.handleExecuteSync))
+	mux.HandleFunc("/api/v1/execute/", s.RequireAuth(s.handleExecuteRouter))
+	mux.HandleFunc("/api/v1/execution", s.RequireAuth(s.handleExecuteSync))
+	mux.HandleFunc("/api/v1/execution/", s.RequireAuth(s.handleExecuteRouter))
+	mux.HandleFunc("/api/v1/validate", s.RequireAuth(s.handleValidate))
+	mux.HandleFunc("/api/v1/validate/", s.RequireAuth(s.handleValidateRouter))
 
-	// Telemetry & Audit Event Log Queries (requires "read-only" or "all")
-	mux.HandleFunc("/api/v1/logs/runs", s.RequirePermission(PermReadOnly, s.handleListRuns))
-	mux.HandleFunc("/api/v1/runs", s.RequirePermission(PermReadOnly, s.handleListRuns))
-	mux.HandleFunc("/api/v1/logs/events", s.RequirePermission(PermReadOnly, s.handleListEvents))
-	mux.HandleFunc("/api/v1/events", s.RequirePermission(PermReadOnly, s.handleListEvents))
+	// Telemetry & Audit Event Log Queries
+	mux.HandleFunc("/api/v1/logs/runs", s.RequireAuth(s.handleListRuns))
+	mux.HandleFunc("/api/v1/runs", s.RequireAuth(s.handleListRuns))
+	mux.HandleFunc("/api/v1/logs/events", s.RequireAuth(s.handleListEvents))
+	mux.HandleFunc("/api/v1/events", s.RequireAuth(s.handleListEvents))
 	mux.HandleFunc("/api/v1/logs/api-events", s.RequirePermission(PermReadOnly, s.handleListAPIEvents))
 	mux.HandleFunc("/api/v1/audit", s.RequirePermission(PermReadOnly, s.handleListAPIEvents))
 
-	// Database Connectivity Test & User Management (requires "all")
+	// Database Connectivity Test, User Management, Groups & Granular Pipeline ACLs (requires "all")
 	mux.HandleFunc("/api/v1/databases/test", s.RequirePermission(PermAll, s.handleTestDatabase))
 	mux.HandleFunc("/api/v1/db/test", s.RequirePermission(PermAll, s.handleTestDatabase))
 	mux.HandleFunc("/api/v1/users", s.RequirePermission(PermAll, s.handleUsers))
 	mux.HandleFunc("/api/v1/users/", s.RequirePermission(PermAll, s.handleUserByName))
+	mux.HandleFunc("/api/v1/groups", s.RequirePermission(PermAll, s.handleAPIGroups))
+	mux.HandleFunc("/api/v1/groups/", s.RequirePermission(PermAll, s.handleAPIGroupByName))
+	mux.HandleFunc("/api/v1/pipeline-groups", s.RequirePermission(PermAll, s.handlePipelineGroups))
+	mux.HandleFunc("/api/v1/pipeline-groups/", s.RequirePermission(PermAll, s.handlePipelineGroupByName))
+	mux.HandleFunc("/api/v1/acls", s.RequirePermission(PermAll, s.handlePipelineACLs))
+	mux.HandleFunc("/api/v1/acls/", s.RequirePermission(PermAll, s.handlePipelineACLByID))
+	mux.HandleFunc("/api/v1/permissions/effective", s.RequireAuth(s.handleEffectivePermissions))
+	mux.HandleFunc("/api/v1/me/permissions", s.RequireAuth(s.handleEffectivePermissions))
 
 	// Cryptographic & Digital Signature Utility Routes (requires "read-only" or higher)
 	mux.HandleFunc("/api/v1/crypto/", s.RequirePermission(PermReadOnly, s.handleCryptoRouter))
@@ -97,9 +106,11 @@ func (s *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	username := ""
 	perm := ""
+	var userGroups []string
 	if user != nil {
 		username = user.Username
 		perm = user.Permission
+		userGroups = user.Groups
 	}
 
 	spid, dbUser, appName, _ := FetchDatabaseSessionIdentity(r.Context(), s.db, s.dialect)
@@ -115,7 +126,7 @@ func (s *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		DurationMs: time.Since(start).Milliseconds(),
 	})
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	respMap := map[string]any{
 		"status":           "ok",
 		"dialect":          s.dialect,
 		"authenticated_as": username,
@@ -124,26 +135,30 @@ func (s *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"db_user":          dbUser,
 		"application_name": appName,
 		"tables": map[string]string{
-			"pipeline_content": TablePipelineContent,
-			"options_content":  TableOptionsContent,
-			"config_content":   TableConfigContent,
-			"pipeline_runs":    TablePipelineRuns,
-			"pipeline_events":  TablePipelineEvents,
-			"api_events":       TableAPIAuditEvents,
-			"api_users":        TableAPIUsers,
+			"pipeline_content":       TablePipelineContent,
+			"options_content":        TableOptionsContent,
+			"config_content":         TableConfigContent,
+			"pipeline_runs":          TablePipelineRuns,
+			"pipeline_events":        TablePipelineEvents,
+			"api_events":             TableAPIAuditEvents,
+			"api_users":              TableAPIUsers,
+			"api_groups":             TableAPIGroups,
+			"api_user_groups":        TableAPIUserGroups,
+			"pipeline_groups":        TablePipelineGroups,
+			"pipeline_group_members": TablePipelineGroupMembers,
+			"pipeline_acl":           TablePipelineACL,
 		},
-	})
+	}
+	if len(userGroups) > 0 {
+		respMap["groups"] = userGroups
+	}
+	writeJSON(w, http.StatusOK, respMap)
 }
 
-// handleArtifactsRouter dispatches /api/v1/artifacts/{type}[/{name}[/export]] with appropriate RBAC checks:
-//   - GET requests require PermReadOnly (which also allows PermExecutionOnly, PermWrite, PermUpload, PermAll)
-//   - POST, PUT, DELETE requests require PermWrite (which allows PermWrite, PermUpload, PermAll)
+// handleArtifactsRouter authenticates the caller and dispatches /api/v1/artifacts/{type}[/{name}[/export]],
+// enforcing granular user/group & pipeline/pipeline-group ACLs for pipelines and global RBAC for options/configs.
 func (s *APIServer) handleArtifactsRouter(w http.ResponseWriter, r *http.Request) {
-	requiredPerm := PermWrite
-	if r.Method == http.MethodGet || r.Method == http.MethodHead {
-		requiredPerm = PermReadOnly
-	}
-	s.RequirePermission(requiredPerm, s.dispatchArtifactRequest)(w, r)
+	s.RequireAuth(s.dispatchArtifactRequest)(w, r)
 }
 
 func (s *APIServer) handleUploadRouter(w http.ResponseWriter, r *http.Request) {
@@ -169,18 +184,25 @@ func (s *APIServer) handleUploadRouter(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if canonicalType != "pipeline" {
+		if !s.authorizeNonPipelineArtifact(w, r, user, canonicalType, "", PermUpload, start) {
+			return
+		}
+	}
 	s.handleArtifactUpload(w, r, canonicalType, authUsername, start)
 }
 
 type artifactPayload struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Content     string `json:"content"`
-	XMLContent  string `json:"xml_content"`
-	Encrypted   bool   `json:"encrypted"`
-	Encrypt     bool   `json:"encrypt"`
-	SecureKey   string `json:"secure_key"`
-	Upsert      bool   `json:"upsert"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Group       string   `json:"group"`
+	Groups      []string `json:"groups"`
+	Content     string   `json:"content"`
+	XMLContent  string   `json:"xml_content"`
+	Encrypted   bool     `json:"encrypted"`
+	Encrypt     bool     `json:"encrypt"`
+	SecureKey   string   `json:"secure_key"`
+	Upsert      bool     `json:"upsert"`
 }
 
 func (p *artifactPayload) resolvedContent() string {
@@ -208,11 +230,17 @@ func extractArtifactQuerySecret(r *http.Request, bodyKey string) (decrypt bool, 
 }
 
 func artifactErrorStatusCode(err error) int {
+	if errors.Is(err, ErrPipelineForbidden) {
+		return http.StatusForbidden
+	}
 	if errors.Is(err, ErrArtifactNotFound) {
 		return http.StatusNotFound
 	}
 	if errors.Is(err, ErrArtifactExists) {
 		return http.StatusConflict
+	}
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "pipeline group ") && strings.Contains(strings.ToLower(err.Error()), "does not exist") {
+		return http.StatusBadRequest
 	}
 	return http.StatusInternalServerError
 }
@@ -243,7 +271,7 @@ func (s *APIServer) serveArtifactItemCRUD(
 	authUsername, artifactType, auditTarget string,
 	start time.Time,
 	getFn func(decrypt bool, secKey string) (*ArtifactRecord, error),
-	updateFn func(desc, content string, enc bool, secKey string) (*ArtifactRecord, error),
+	updateFn func(desc, content string, enc bool, secKey string, groups []string) (*ArtifactRecord, error),
 	deleteFn func() error,
 	deleteResp map[string]any,
 ) {
@@ -266,10 +294,15 @@ func (s *APIServer) serveArtifactItemCRUD(
 			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON body: %v", err))
 			return
 		}
+		requestedGroups := parseGroupListValues(body.Group, body.Groups, r.URL.Query().Get("group"), strings.Join(r.URL.Query()["groups"], ","))
 		_, secKey := extractArtifactQuerySecret(r, body.SecureKey)
-		rec, err := updateFn(body.Description, body.resolvedContent(), body.resolvedEncrypted(), secKey)
+		rec, err := updateFn(body.Description, body.resolvedContent(), body.resolvedEncrypted(), secKey, requestedGroups)
 		if err != nil {
 			code := artifactErrorStatusCode(err)
+			if errors.Is(err, ErrPipelineForbidden) {
+				s.writeForbiddenAudit(w, r, authUsername, artifactType, auditTarget, err.Error(), start)
+				return
+			}
 			s.recordArtifactAudit(r, authUsername, "artifact.update", artifactType, auditTarget, code, "ERROR", start, err.Error())
 			writeJSONError(w, code, err.Error())
 			return
@@ -316,6 +349,19 @@ func (s *APIServer) dispatchArtifactRequest(w http.ResponseWriter, r *http.Reque
 		artifactType = canonicalType
 	}
 
+	// For non-pipeline artifacts (options, config), enforce global RBAC permissions directly
+	if artifactType != "pipeline" {
+		reqPerm := PermWrite
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			reqPerm = PermReadOnly
+		} else if len(parts) == 2 && strings.EqualFold(parts[1], "upload") {
+			reqPerm = PermUpload
+		}
+		if !s.authorizeNonPipelineArtifact(w, r, user, artifactType, "", reqPerm, start) {
+			return
+		}
+	}
+
 	// Route 1: /api/v1/artifacts/{type}/upload (POST multipart file or raw body upload)
 	if len(parts) == 2 && strings.ToLower(parts[1]) == "upload" {
 		if r.Method != http.MethodPost && r.Method != http.MethodPut {
@@ -337,6 +383,26 @@ func (s *APIServer) dispatchArtifactRequest(w http.ResponseWriter, r *http.Reque
 				writeJSONError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
+			if artifactType == "pipeline" {
+				items, err = s.FilterAccessiblePipelines(r.Context(), user, items, ActionRead)
+				if err != nil {
+					s.recordArtifactAudit(r, authUsername, "artifact.list", artifactType, "", http.StatusInternalServerError, "ERROR", start, err.Error())
+					writeJSONError(w, http.StatusInternalServerError, err.Error())
+					return
+				}
+				if groupFilter := strings.TrimSpace(r.URL.Query().Get("group")); groupFilter != "" {
+					filtered := make([]ArtifactRecord, 0, len(items))
+					for _, rec := range items {
+						for _, g := range rec.Groups {
+							if strings.EqualFold(g, groupFilter) {
+								filtered = append(filtered, rec)
+								break
+							}
+						}
+					}
+					items = filtered
+				}
+			}
 			s.recordArtifactAudit(r, authUsername, "artifact.list", artifactType, "", http.StatusOK, "SUCCESS", start, "")
 			writeJSON(w, http.StatusOK, map[string]any{
 				"type":  artifactType,
@@ -349,10 +415,32 @@ func (s *APIServer) dispatchArtifactRequest(w http.ResponseWriter, r *http.Reque
 				writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON body: %v", err))
 				return
 			}
+			isUpsert := body.Upsert || r.URL.Query().Get("upsert") == "true"
+			requestedGroups := parseGroupListValues(body.Group, body.Groups, r.URL.Query().Get("group"), strings.Join(r.URL.Query()["groups"], ","))
+
+			if artifactType == "pipeline" {
+				trimmedName := strings.TrimSpace(body.Name)
+				existing, getErr := s.GetArtifact(r.Context(), "pipeline", trimmedName, false, "")
+				reqAction := ActionCreate
+				if getErr == nil && existing != nil && isUpsert {
+					reqAction = ActionUpdate
+				}
+				if !s.authorizePipelineOrWrite403(w, r, user, trimmedName, requestedGroups, reqAction, start) {
+					return
+				}
+				if len(requestedGroups) > 0 {
+					if err := s.validatePipelineGroupsExist(r.Context(), requestedGroups); err != nil {
+						s.recordArtifactAudit(r, authUsername, "artifact.create", artifactType, trimmedName, http.StatusBadRequest, "ERROR", start, err.Error())
+						writeJSONError(w, http.StatusBadRequest, err.Error())
+						return
+					}
+				}
+			}
+
 			_, secKey := extractArtifactQuerySecret(r, body.SecureKey)
 			var rec *ArtifactRecord
 			var err error
-			if body.Upsert || r.URL.Query().Get("upsert") == "true" {
+			if isUpsert {
 				rec, err = s.UpsertArtifact(r.Context(), artifactType, body.Name, body.Description, body.resolvedContent(), body.resolvedEncrypted(), secKey)
 			} else {
 				rec, err = s.CreateArtifact(r.Context(), artifactType, body.Name, body.Description, body.resolvedContent(), body.resolvedEncrypted(), secKey)
@@ -362,6 +450,15 @@ func (s *APIServer) dispatchArtifactRequest(w http.ResponseWriter, r *http.Reque
 				s.recordArtifactAudit(r, authUsername, "artifact.create", artifactType, body.Name, code, "ERROR", start, err.Error())
 				writeJSONError(w, code, err.Error())
 				return
+			}
+			if artifactType == "pipeline" && len(requestedGroups) > 0 {
+				if err := s.assignPipelineToGroups(r.Context(), rec.Name, requestedGroups); err != nil {
+					writeJSONError(w, http.StatusInternalServerError, err.Error())
+					return
+				}
+				if snap, snapErr := s.loadACLSnapshot(r.Context()); snapErr == nil {
+					rec.Groups = snap.groupsForPipeline(rec.Name, nil)
+				}
 			}
 			s.recordArtifactAudit(r, authUsername, "artifact.create", artifactType, rec.Name, http.StatusCreated, "SUCCESS", start, "")
 			writeJSON(w, http.StatusCreated, rec)
@@ -379,18 +476,54 @@ func (s *APIServer) dispatchArtifactRequest(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		idLabel := fmt.Sprintf("id:%d", idVal)
+		isExport := len(parts) == 4 && strings.ToLower(parts[3]) == "export"
+
+		if artifactType == "pipeline" {
+			if ok := s.authorizeExistingPipelineItem(w, r, user, true, idVal, "", isExport, start); !ok {
+				return
+			}
+		}
+
 		getByID := func(decrypt bool, secKey string) (*ArtifactRecord, error) {
 			return s.GetArtifactByID(r.Context(), artifactType, idVal, decrypt, secKey)
 		}
-		if len(parts) == 4 && strings.ToLower(parts[3]) == "export" {
+		if isExport {
 			s.serveArtifactExport(w, r, authUsername, artifactType, idLabel, start, getByID)
 			return
 		}
 		s.serveArtifactItemCRUD(
 			w, r, authUsername, artifactType, idLabel, start,
 			getByID,
-			func(desc, content string, enc bool, secKey string) (*ArtifactRecord, error) {
-				return s.UpdateArtifactByID(r.Context(), artifactType, idVal, desc, content, enc, secKey)
+			func(desc, content string, enc bool, secKey string, groups []string) (*ArtifactRecord, error) {
+				if artifactType == "pipeline" && len(groups) > 0 {
+					existing, err := s.GetArtifactByID(r.Context(), "pipeline", idVal, false, "")
+					if err != nil {
+						return nil, err
+					}
+					allowed, reason, aclErr := s.EvaluatePipelineAccess(r.Context(), user, existing.Name, groups, ActionUpdate)
+					if aclErr != nil {
+						return nil, aclErr
+					}
+					if !allowed {
+						return nil, fmt.Errorf("%w: %s", ErrPipelineForbidden, reason)
+					}
+					if err := s.validatePipelineGroupsExist(r.Context(), groups); err != nil {
+						return nil, err
+					}
+				}
+				rec, err := s.UpdateArtifactByID(r.Context(), artifactType, idVal, desc, content, enc, secKey)
+				if err != nil {
+					return nil, err
+				}
+				if artifactType == "pipeline" && len(groups) > 0 {
+					if err := s.assignPipelineToGroups(r.Context(), rec.Name, groups); err != nil {
+						return nil, err
+					}
+					if snap, snapErr := s.loadACLSnapshot(r.Context()); snapErr == nil {
+						rec.Groups = snap.groupsForPipeline(rec.Name, nil)
+					}
+				}
+				return rec, nil
 			},
 			func() error {
 				return s.DeleteArtifactByID(r.Context(), artifactType, idVal)
@@ -401,12 +534,19 @@ func (s *APIServer) dispatchArtifactRequest(w http.ResponseWriter, r *http.Reque
 	}
 
 	name := parts[1]
+	isExport := len(parts) == 3 && strings.ToLower(parts[2]) == "export"
+	if artifactType == "pipeline" {
+		if ok := s.authorizeExistingPipelineItem(w, r, user, false, 0, name, isExport, start); !ok {
+			return
+		}
+	}
+
 	getByName := func(decrypt bool, secKey string) (*ArtifactRecord, error) {
 		return s.GetArtifact(r.Context(), artifactType, name, decrypt, secKey)
 	}
 
 	// Route 3: /api/v1/artifacts/{type}/{name}/export (GET raw XML file download)
-	if len(parts) == 3 && strings.ToLower(parts[2]) == "export" {
+	if isExport {
 		s.serveArtifactExport(w, r, authUsername, artifactType, name, start, getByName)
 		return
 	}
@@ -415,8 +555,32 @@ func (s *APIServer) dispatchArtifactRequest(w http.ResponseWriter, r *http.Reque
 	s.serveArtifactItemCRUD(
 		w, r, authUsername, artifactType, name, start,
 		getByName,
-		func(desc, content string, enc bool, secKey string) (*ArtifactRecord, error) {
-			return s.UpdateArtifact(r.Context(), artifactType, name, desc, content, enc, secKey)
+		func(desc, content string, enc bool, secKey string, groups []string) (*ArtifactRecord, error) {
+			if artifactType == "pipeline" && len(groups) > 0 {
+				allowed, reason, aclErr := s.EvaluatePipelineAccess(r.Context(), user, name, groups, ActionUpdate)
+				if aclErr != nil {
+					return nil, aclErr
+				}
+				if !allowed {
+					return nil, fmt.Errorf("%w: %s", ErrPipelineForbidden, reason)
+				}
+				if err := s.validatePipelineGroupsExist(r.Context(), groups); err != nil {
+					return nil, err
+				}
+			}
+			rec, err := s.UpdateArtifact(r.Context(), artifactType, name, desc, content, enc, secKey)
+			if err != nil {
+				return nil, err
+			}
+			if artifactType == "pipeline" && len(groups) > 0 {
+				if err := s.assignPipelineToGroups(r.Context(), rec.Name, groups); err != nil {
+					return nil, err
+				}
+				if snap, snapErr := s.loadACLSnapshot(r.Context()); snapErr == nil {
+					rec.Groups = snap.groupsForPipeline(rec.Name, nil)
+				}
+			}
+			return rec, nil
 		},
 		func() error {
 			return s.DeleteArtifact(r.Context(), artifactType, name)
@@ -426,8 +590,10 @@ func (s *APIServer) dispatchArtifactRequest(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *APIServer) handleArtifactUpload(w http.ResponseWriter, r *http.Request, artifactType, authUsername string, start time.Time) {
+	user := UserFromContext(r.Context())
 	contentType := r.Header.Get("Content-Type")
-	var name, desc, secureKey string
+	var name, desc, secureKey, singleGroup string
+	var formGroups []string
 	var encrypt bool
 	var rawData []byte
 
@@ -441,6 +607,8 @@ func (s *APIServer) handleArtifactUpload(w http.ResponseWriter, r *http.Request,
 		if desc == "" {
 			desc = strings.TrimSpace(r.FormValue("desc"))
 		}
+		singleGroup = strings.TrimSpace(r.FormValue("group"))
+		formGroups = r.MultipartForm.Value["groups"]
 		secureKey = strings.TrimSpace(r.FormValue("secure_key"))
 		encrypt = r.FormValue("encrypted") == "true" || r.FormValue("encrypted") == "1" || r.FormValue("encrypt") == "true" || r.FormValue("encrypt") == "1"
 
@@ -481,6 +649,26 @@ func (s *APIServer) handleArtifactUpload(w http.ResponseWriter, r *http.Request,
 		rawData = data
 	}
 
+	requestedGroups := parseGroupListValues(singleGroup, formGroups, r.URL.Query().Get("group"), strings.Join(r.URL.Query()["groups"], ","))
+
+	if artifactType == "pipeline" {
+		existing, getErr := s.GetArtifact(r.Context(), "pipeline", name, false, "")
+		reqAction := ActionCreate
+		if getErr == nil && existing != nil {
+			reqAction = ActionUpdate
+		}
+		if !s.authorizePipelineOrWrite403(w, r, user, name, requestedGroups, reqAction, start) {
+			return
+		}
+		if len(requestedGroups) > 0 {
+			if err := s.validatePipelineGroupsExist(r.Context(), requestedGroups); err != nil {
+				s.recordArtifactAudit(r, authUsername, "artifact.upload", artifactType, name, http.StatusBadRequest, "ERROR", start, err.Error())
+				writeJSONError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
+	}
+
 	if desc == "" {
 		desc = "Uploaded via go-flowAPI"
 	}
@@ -491,6 +679,16 @@ func (s *APIServer) handleArtifactUpload(w http.ResponseWriter, r *http.Request,
 		s.recordArtifactAudit(r, authUsername, "artifact.upload", artifactType, name, http.StatusBadRequest, "ERROR", start, err.Error())
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+
+	if artifactType == "pipeline" && len(requestedGroups) > 0 {
+		if err := s.assignPipelineToGroups(r.Context(), rec.Name, requestedGroups); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if snap, snapErr := s.loadACLSnapshot(r.Context()); snapErr == nil {
+			rec.Groups = snap.groupsForPipeline(rec.Name, nil)
+		}
 	}
 
 	s.recordArtifactAudit(r, authUsername, "artifact.upload", artifactType, rec.Name, http.StatusCreated, "SUCCESS", start, "")
@@ -774,9 +972,22 @@ func (s *APIServer) executeSyncWithTarget(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
+	if resolvedName, authErr := s.AuthorizeExecutionRequest(r.Context(), UserFromContext(r.Context()), req); authErr != nil {
+		if resolvedName != "" {
+			artName = resolvedName
+		}
+		if errors.Is(authErr, ErrPipelineForbidden) {
+			s.writeForbiddenAudit(w, r, authUser, artType, artName, authErr.Error(), start)
+			return
+		}
+	}
 
 	resp, execErr := s.ExecutePipeline(r.Context(), req, nil)
 	if resp == nil && execErr != nil {
+		if errors.Is(execErr, ErrPipelineForbidden) {
+			s.writeForbiddenAudit(w, r, authUser, artType, artName, execErr.Error(), start)
+			return
+		}
 		s.recordExecutionAudit(r, "pipeline.execute", artType, artName, "", authUser, http.StatusBadRequest, "ERROR", start, execErr.Error())
 		writeJSONError(w, http.StatusBadRequest, execErr.Error())
 		return
@@ -811,8 +1022,22 @@ func (s *APIServer) validateWithTarget(w http.ResponseWriter, r *http.Request, t
 	req.Validate = true
 	artType, artName = describeExecutionTarget(req)
 
+	if resolvedName, authErr := s.AuthorizeExecutionRequest(r.Context(), UserFromContext(r.Context()), req); authErr != nil {
+		if resolvedName != "" {
+			artName = resolvedName
+		}
+		if errors.Is(authErr, ErrPipelineForbidden) {
+			s.writeForbiddenAudit(w, r, authUser, artType, artName, authErr.Error(), start)
+			return
+		}
+	}
+
 	resp, valErr := s.ExecutePipeline(r.Context(), req, nil)
 	if valErr != nil {
+		if errors.Is(valErr, ErrPipelineForbidden) {
+			s.writeForbiddenAudit(w, r, authUser, artType, artName, valErr.Error(), start)
+			return
+		}
 		s.recordExecutionAudit(r, "pipeline.validate", artType, artName, "", authUser, http.StatusUnprocessableEntity, "INVALID", start, valErr.Error())
 		writeJSONError(w, http.StatusUnprocessableEntity, valErr.Error())
 		return
@@ -834,6 +1059,17 @@ func (s *APIServer) executeStreamWithTarget(w http.ResponseWriter, r *http.Reque
 	req, artType, artName, authUser, start, ok := s.prepareExecutionRequest(w, r, targetType, targetID, "stream")
 	if !ok {
 		return
+	}
+
+	// Enforce granular pipeline authorization BEFORE writing text/event-stream headers
+	if resolvedName, authErr := s.AuthorizeExecutionRequest(r.Context(), UserFromContext(r.Context()), req); authErr != nil {
+		if resolvedName != "" {
+			artName = resolvedName
+		}
+		if errors.Is(authErr, ErrPipelineForbidden) {
+			s.writeForbiddenAudit(w, r, authUser, artType, artName, authErr.Error(), start)
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -896,6 +1132,7 @@ func (s *APIServer) executeStreamWithTarget(w http.ResponseWriter, r *http.Reque
 
 func (s *APIServer) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	start := time.Now().UTC()
+	user := UserFromContext(r.Context())
 	authUser := authUsernameFromRequest(r)
 
 	statusFilter := r.URL.Query().Get("status")
@@ -907,18 +1144,31 @@ func (s *APIServer) handleListRuns(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	runs, err = s.filterRunsForUser(r.Context(), user, runs)
+	if err != nil {
+		s.recordArtifactAudit(r, authUser, "logs.runs", "", "", http.StatusInternalServerError, "ERROR", start, err.Error())
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	s.recordArtifactAudit(r, authUser, "logs.runs", "", "", http.StatusOK, "SUCCESS", start, "")
 	writeJSON(w, http.StatusOK, map[string]any{"count": len(runs), "runs": runs})
 }
 
 func (s *APIServer) handleListEvents(w http.ResponseWriter, r *http.Request) {
 	start := time.Now().UTC()
+	user := UserFromContext(r.Context())
 	authUser := authUsernameFromRequest(r)
 
 	runID := r.URL.Query().Get("run_id")
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 
 	events, err := s.QueryPipelineEvents(r.Context(), runID, limit)
+	if err != nil {
+		s.recordArtifactAudit(r, authUser, "logs.events", "", runID, http.StatusInternalServerError, "ERROR", start, err.Error())
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	events, err = s.filterEventsForUser(r.Context(), user, events)
 	if err != nil {
 		s.recordArtifactAudit(r, authUser, "logs.events", "", runID, http.StatusInternalServerError, "ERROR", start, err.Error())
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
@@ -1028,11 +1278,12 @@ func (s *APIServer) handleUsers(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodPost:
 		var body struct {
-			Username    string `json:"username"`
-			Password    string `json:"password"`
-			Permission  string `json:"permission"`
-			Description string `json:"description"`
-			IsActive    *bool  `json:"is_active"`
+			Username    string   `json:"username"`
+			Password    string   `json:"password"`
+			Permission  string   `json:"permission"`
+			Description string   `json:"description"`
+			IsActive    *bool    `json:"is_active"`
+			Groups      []string `json:"groups"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
@@ -1047,6 +1298,20 @@ func (s *APIServer) handleUsers(w http.ResponseWriter, r *http.Request) {
 			s.recordArtifactAudit(r, actorName, "user.upsert", "user", body.Username, http.StatusBadRequest, "ERROR", start, err.Error())
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
+		}
+		for _, g := range body.Groups {
+			g = strings.TrimSpace(g)
+			if g == "" {
+				continue
+			}
+			if gErr := s.AddUserToGroup(r.Context(), g, u.Username); gErr != nil {
+				s.recordArtifactAudit(r, actorName, "user.upsert", "user", u.Username, http.StatusBadRequest, "ERROR", start, gErr.Error())
+				writeJSONError(w, http.StatusBadRequest, gErr.Error())
+				return
+			}
+		}
+		if dbGroups, gErr := s.ListGroupsForUser(r.Context(), u.Username); gErr == nil {
+			u.Groups = dbGroups
 		}
 		s.recordArtifactAudit(r, actorName, "user.upsert", "user", u.Username, http.StatusCreated, "SUCCESS", start, "")
 		writeJSON(w, http.StatusCreated, u)
