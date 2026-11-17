@@ -13,7 +13,7 @@ This guide walks through building and running `go-flowAPI` in Docker across all 
 
 | File | Purpose |
 | :--- | :--- |
-| [`Dockerfile`](./Dockerfile) | Multi-stage Alpine build (`golang:1.26-alpine` -> `alpine:3.21`) compiling static `go-flowAPI` binary |
+| [`Dockerfile`](./Dockerfile) | Multi-stage build compiling a static `go-flowAPI` binary and providing the .NET SDK, PowerShell, and `dotnet-script` in the runtime image |
 | [`.dockerignore`](./.dockerignore) | Excludes `.git`, local `.exe` binaries, and local `.db` files from the build context |
 | [`docker-compose.yml`](./docker-compose.yml) | Connects `go-flowAPI` to an existing or host database (`host.docker.internal`) |
 | [`docker-compose.sqlite.yml`](./docker-compose.sqlite.yml) | Runs `go-flowAPI` with a persistent SQLite volume (`/data/flow_api.db`) and auto-schema init |

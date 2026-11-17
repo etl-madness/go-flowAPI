@@ -14,11 +14,14 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/go-flowAPI .
 
-# Stage 2: Minimal runtime image
-FROM alpine:3.21
+# Stage 2: Runtime image with .NET SDK and PowerShell
+FROM mcr.microsoft.com/dotnet/sdk:10.0-alpine3.24
 
 RUN apk add --no-cache ca-certificates tzdata sqlite wget krb5 krb5-libs \
     && mkdir -p /app /data /krb5cache
+
+RUN dotnet tool install --global dotnet-script
+ENV PATH="$PATH:/root/.dotnet/tools"
 
 WORKDIR /app
 
