@@ -23,9 +23,9 @@ This guide walks through building and running `go-flowAPI` in Docker across all 
 | [`docker/krb5.conf`](./docker/krb5.conf) | Template Kerberos realm configuration (`EXAMPLE.COM`) |
 | [`docker/krb5-sidecar-entrypoint.sh`](./docker/krb5-sidecar-entrypoint.sh) | Sidecar entrypoint acquiring/renewing TGTs and resolving AD groups into `/krb5cache` |
 | [`docker/docker-entrypoint.sh`](./docker/docker-entrypoint.sh) | Container entrypoint that auto-initializes SQLite tables when `FLOW_API_DSN` targets SQLite |
-| [`docker/init/sqlite-init.sql`](./docker/init/sqlite-init.sql) | SQLite DDL script for all 7 `go-flowAPI` tables |
-| [`docker/init/postgres-init.sql`](./docker/init/postgres-init.sql) | PostgreSQL DDL script (`dbo` schema + all 7 tables) |
-| [`docker/init/sqlserver-init.sql`](./docker/init/sqlserver-init.sql) | SQL Server DDL script (`EXAMPLE_DB` database + all 7 `dbo.*` tables) |
+| [`docker/init/sqlite-init.sql`](./docker/init/sqlite-init.sql) | SQLite DDL script for all 12 `go-flowAPI` tables (core artifacts, telemetry, groups, and pipeline ACLs) |
+| [`docker/init/postgres-init.sql`](./docker/init/postgres-init.sql) | PostgreSQL DDL script (`dbo` schema + all 12 tables) |
+| [`docker/init/sqlserver-init.sql`](./docker/init/sqlserver-init.sql) | SQL Server DDL script (`EXAMPLE_DB` database + all 12 `dbo.*` tables) |
 
 ---
 
@@ -56,7 +56,7 @@ docker compose -f docker-compose.sqlite.yml logs -f
 
 ## Option 2: Quickstart with PostgreSQL 16 (`docker-compose.postgres.yml`)
 
-Spins up a `postgres:16-alpine` container, automatically executes [`docker/init/postgres-init.sql`](./docker/init/postgres-init.sql) on first boot to create the `dbo` schema and all 7 tables, waits for PostgreSQL to become healthy, and starts `go-flowAPI`.
+Spins up a `postgres:16-alpine` container, automatically executes [`docker/init/postgres-init.sql`](./docker/init/postgres-init.sql) on first boot to create the `dbo` schema and all 12 tables, waits for PostgreSQL to become healthy, and starts `go-flowAPI`.
 
 ```bash
 # Start PostgreSQL + go-flowAPI
@@ -76,7 +76,7 @@ docker compose -f docker-compose.postgres.yml logs -f go-flow-api
 
 ## Option 3: Quickstart with SQL Server 2022 (`docker-compose.sqlserver.yml`)
 
-Spins up `mcr.microsoft.com/mssql/server:2022-latest`, waits for the healthcheck to pass, runs the one-shot `sqlserver-init` container to execute [`docker/init/sqlserver-init.sql`](./docker/init/sqlserver-init.sql) (creating the `EXAMPLE_DB` database and all 7 `dbo.*` tables), and then starts `go-flowAPI`.
+Spins up `mcr.microsoft.com/mssql/server:2022-latest`, waits for the healthcheck to pass, runs the one-shot `sqlserver-init` container to execute [`docker/init/sqlserver-init.sql`](./docker/init/sqlserver-init.sql) (creating the `EXAMPLE_DB` database and all 12 `dbo.*` tables), and then starts `go-flowAPI`.
 
 ```bash
 # Start SQL Server + schema initializer + go-flowAPI
@@ -179,6 +179,9 @@ FLOW_SECURE_KEY=my-default-encryption-passphrase
 
 # Verbose debug logging
 FLOW_API_DEBUG=false
+
+# Default strict pipeline ACL enforcement (true by default in v1.3.1; non-admin accounts require explicit ACLs)
+FLOW_API_STRICT_ACL=true
 
 # Database-specific overrides (for sqlserver / postgres compose files)
 MSSQL_SA_PASSWORD=YourStrong!Passw0rd

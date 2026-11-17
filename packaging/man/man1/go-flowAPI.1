@@ -1,5 +1,5 @@
 .\" Man page for go-flowAPI(1)
-.TH GO-FLOWAPI 1 "November 2026" "ETL Madness Flow API" "User Commands and Daemons"
+.TH GO-FLOWAPI 1 "November 2026" "ETL Madness Flow API 1.3.1" "User Commands and Daemons"
 .SH NAME
 go-flowAPI \- REST API, artifact repository, live SSE execution gateway, and telemetry daemon for ETL Madness Flow
 .SH SYNOPSIS
@@ -113,6 +113,7 @@ RBAC permission role assigned to
 .BR \-bootstrap\-user :
 .B all
 (default),
+.BR scoped ,
 .BR execution-only ,
 .BR read-only ,
 .BR write ,
@@ -120,6 +121,19 @@ or
 .BR upload .
 Environment variable:
 .BR FLOW_API_BOOTSTRAP_PERM .
+.TP
+.B \-strict\-acl
+Enforce strict ACL-only pipeline authorization for all non-admin
+.RB ( non- all )
+accounts so users without explicit
+.I dbo.flow_pipeline_acl
+grants have zero pipeline access (default:
+.BR true ;
+pass
+.B \-strict\-acl=false
+or
+.B FLOW_API_STRICT_ACL=false
+to opt out).
 .TP
 .BI \-hash\-password " password"
 Generate a bcrypt password hash on standard output and exit immediately.
@@ -129,14 +143,31 @@ Enable verbose request and execution debug logging.
 Environment variable:
 .B FLOW_API_DEBUG
 .RB ( true " or " 1 ).
-.SH RBAC PERMISSION ROLES
+.SH RBAC PERMISSION ROLES & GRANULAR PIPELINE ACLS
+By default
+.RB ( \-strict\-acl=true ),
+all non-admin
+.RB ( non- all )
+accounts have zero access to
+.B pipeline
+artifacts and execution unless granted via explicit
+.B allow
+rules in
+.IR dbo.flow_pipeline_acl .
 .TP
 .B all
-Full administrative access across all endpoints, including user management
-.RB ( /api/v1/users ),
+Full administrative access across all endpoints, including user, group, pipeline-group, and ACL management
+.RB ( /api/v1/users ,
+.BR /api/v1/groups ,
+.BR /api/v1/pipeline-groups ,
+.BR /api/v1/acls ),
 database connectivity testing
 .RB ( /api/v1/db/test ),
 execution, CRUD, and audit logs.
+.TP
+.B scoped
+Zero global baseline rights \(em strictly governed by granular per-pipeline and per-pipeline-group ACL rules in
+.IR dbo.flow_pipeline_acl .
 .TP
 .B execution-only
 Execute and validate pipelines

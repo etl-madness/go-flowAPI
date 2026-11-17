@@ -1,6 +1,6 @@
-# Database Schema Reference (`go-flowAPI`)
+# Database Schema Reference (`go-flowAPI v1.3.1`)
 
-`go-flowAPI` does **not** auto-migrate tables at startup. Provision the required tables in your target database using the DDL scripts below before starting the API.
+`go-flowAPI` (`v1.3.1`) does **not** auto-migrate tables at startup. Provision the 12 required tables (7 core artifact/telemetry/user tables + 5 granular group & pipeline ACL tables) in your target database using the DDL scripts below before starting the API.
 
 ## Adjustable Schema & Table Constants (`tables.go`)
 

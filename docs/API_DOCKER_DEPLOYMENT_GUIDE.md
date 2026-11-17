@@ -72,9 +72,9 @@ flowchart LR
 | `docker-compose.postgres.yml` | Multi-container stack: `postgres:16-alpine` + automated `dbo.*` schema init + `go-flowAPI`. |
 | `docker-compose.sqlserver.yml` | Multi-container stack: `mssql/server:2022-latest` + one-shot `sqlserver-init` schema runner + `go-flowAPI`. |
 | `docker/docker-entrypoint.sh` | Entrypoint script that normalizes SQLite DSN paths, automatically creates tables via `sqlite3`, and starts `go-flowAPI`. |
-| `docker/init/sqlite-init.sql` | Idempotent SQLite DDL script for all 7 `go-flowAPI` tables (`CREATE TABLE IF NOT EXISTS`). |
-| `docker/init/postgres-init.sql` | PostgreSQL initialization script creating the `dbo` schema and all 7 metadata/telemetry tables. |
-| `docker/init/sqlserver-init.sql` | SQL Server initialization script creating the target database and all 7 `dbo.*` tables. |
+| `docker/init/sqlite-init.sql` | Idempotent SQLite DDL script for all 12 `go-flowAPI` tables (`CREATE TABLE IF NOT EXISTS`). |
+| `docker/init/postgres-init.sql` | PostgreSQL initialization script creating the `dbo` schema and all 12 metadata, ACL/group, and telemetry tables. |
+| `docker/init/sqlserver-init.sql` | SQL Server initialization script creating the target database and all 12 `dbo.*` tables. |
 
 ---
 
@@ -151,7 +151,7 @@ docker compose -f docker-compose.postgres.yml down
 
 ## 6. Stack 3: SQL Server 2022 Container (`docker-compose.sqlserver.yml`)
 
-Starts Microsoft SQL Server 2022 (`mcr.microsoft.com/mssql/server:2022-latest`), waits for the `sqlcmd` healthcheck to succeed, executes a one-shot `sqlserver-init` container to create the database and all 7 `dbo.*` tables, and then launches `go-flowAPI`.
+Starts Microsoft SQL Server 2022 (`mcr.microsoft.com/mssql/server:2022-latest`), waits for the `sqlcmd` healthcheck to succeed, executes a one-shot `sqlserver-init` container to create the database and all 12 `dbo.*` tables, and then launches `go-flowAPI`.
 
 ```bash
 # Start SQL Server 2022 + schema initializer + go-flowAPI
@@ -299,7 +299,8 @@ All Docker and Docker Compose deployments can be configured via environment vari
 | `FLOW_API_HOST_PORT` | *(Docker Compose)* | `5180` | Host port mapped to container port `5180`. |
 | `FLOW_API_BOOTSTRAP_USER` | `-bootstrap-user` | `""` (`admin` in quickstarts) | Optional initial BasicAuth username to seed/upsert at startup. |
 | `FLOW_API_BOOTSTRAP_PASS` | `-bootstrap-pass` | `""` (`Admin123!` in quickstarts) | Password for `FLOW_API_BOOTSTRAP_USER` (automatically bcrypt-hashed). |
-| `FLOW_API_BOOTSTRAP_PERM` | `-bootstrap-perm` | `all` | Permission scope for bootstrap user (`all`, `execution-only`, `read-only`, `write`, `upload`). |
+| `FLOW_API_BOOTSTRAP_PERM` | `-bootstrap-perm` | `all` | Permission scope for bootstrap user (`all`, `scoped`, `execution-only`, `read-only`, `write`, `upload`). |
+| `FLOW_API_STRICT_ACL` | `-strict-acl` | `true` | Enforce strict ACL-only pipeline authorization so non-`all` users require explicit `dbo.flow_pipeline_acl` grants (`false` opts out). |
 | `FLOW_SECURE_KEY` | `-secure-key` | `""` | Default AES-256-GCM passphrase for encrypting/decrypting artifacts (`FLOWENC:v1:`). |
 | `FLOW_API_DEBUG` | `-debug` | `false` | Enables verbose debug logging (`true` or `1`). |
 | `HOST_USERDOMAIN` | — | `""` | Optional Windows domain passed from host for Windows group/user identity fallback. |

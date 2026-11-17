@@ -3,9 +3,11 @@ title: go-flowAPI Documentation Hub & Complete Reference
 description: Complete reference for go-flowAPI including cross-platform compilation (Windows, Linux, FreeBSD, macOS), Docker deployment, and full REST API endpoint overview for the Flow Ecosystem.
 ---
 
-# go-flowAPI — Enterprise Orchestration & Execution Service
+# go-flowAPI — Enterprise Orchestration & Execution Service (`v1.3.1`)
 
-`go-flowAPI` is the centralized REST API, artifact repository, live Server-Sent Events (SSE) execution gateway, and multi-database telemetry hub for the **[Flow Ecosystem](https://etl-madness.github.io/flow-docs/)**. It wraps the `go-flow` ETL engine directly in-process via Go modules and provides a unified control plane for `FlowCanvas`, `py-flow-test`, CI/CD pipelines, and enterprise schedulers.
+> **Version:** `1.3.1` | **Companion Studio UI:** `FlowUI v1.3.1`
+
+`go-flowAPI` is the centralized REST API, artifact repository, live Server-Sent Events (SSE) execution gateway, granular pipeline ACL engine, and multi-database telemetry hub for the **[Flow Ecosystem](https://etl-madness.github.io/flow-docs/)**. It wraps the `go-flow` ETL engine directly in-process via Go modules and provides a unified control plane for `FlowUI`, `FlowCanvas`, `py-flow-test`, CI/CD pipelines, and enterprise schedulers.
 
 ---
 
@@ -250,7 +252,7 @@ docker run -d \
     1. **`all` administrator role** → full access across all endpoints.
     2. **Explicit `deny` rule in `dbo.flow_pipeline_acl`** → blocks matching pipeline actions (`403 Forbidden`).
     3. **Explicit `allow` rule in `dbo.flow_pipeline_acl`** → grants `create`, `read`, `update`, `delete`, `execute`, or `all` on a `pipeline`, `pipeline_group` (explicit members + `name_pattern` glob), or `*`.
-    4. **Global role baseline** (`read-only`, `execution-only`, `write` / `upload`) when `-strict-acl` is false and the user's role is not `scoped` (`scoped` grants zero global baseline rights).
+    4. **Default Deny for Pipelines (`-strict-acl=true` default)** → non-admin accounts without matching `allow` rules in `dbo.flow_pipeline_acl` have **zero pipeline access** (`403 Forbidden`). Global roles (`read-only`, `execution-only`, `write` / `upload`) govern non-pipeline endpoints (`config`, `options`, `crypto`, `audit`) and only fall back to pipelines if `-strict-acl=false` (`FLOW_API_STRICT_ACL=false`) is explicitly enabled and the user's role is not `scoped`.
 
 ```mermaid
 flowchart TD
@@ -260,7 +262,7 @@ flowchart TD
     Basic -- "Invalid / Missing" --> Deny401["401 Unauthorized"]
     Basic -- "Valid" --> AdminCheck{"Admin ('all')?"}
     AdminCheck -- "Yes" --> Handler["Execute Endpoint Handler"]
-    AdminCheck -- "No" --> EvalPerm["Evaluate Route RBAC & Pipeline ACL:\nExplicit DENY -> 403\nExplicit ALLOW -> Permitted\nElse Global Role (unless 'scoped' / -strict-acl)"]
+    AdminCheck -- "No" --> EvalPerm["Evaluate Route RBAC & Pipeline ACL:\nExplicit DENY -> 403\nExplicit ALLOW -> Permitted\nDefault (-strict-acl=true) -> 403 for Pipelines\n(-strict-acl=false opt-out -> Global Role Fallback)"]
     EvalPerm -- "Permitted" --> Handler
     EvalPerm -- "Denied" --> Deny403["403 Forbidden"]
 ```

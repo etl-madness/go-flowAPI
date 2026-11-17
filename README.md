@@ -1,9 +1,18 @@
-# `go-flowAPI` — CRUD, File Upload, Execution & Telemetry API for `Flow Ecosystem`
+# `go-flowAPI` — CRUD, File Upload, Execution & Telemetry API for `Flow Ecosystem` (`v1.3.1`)
 
-`go-flowAPI` is a unified REST API for managing `go-flow` database artifacts (`pipelines`, `options`, `configs`), uploading XML/JSON files to the database, executing pipelines with full CLI/Builder parity (including SSE live streaming and `node_output` logging), and auditing all API and pipeline events.
+> **Version:** `1.3.1` | **OpenAPI 3.0.3 Spec:** `/api/v1/openapi.json` | **Swagger UI:** `/swagger/`  
+> **Companion Studio UI:** `FlowUI v1.3.1`
+
+`go-flowAPI` is a unified REST API for managing `go-flow` database artifacts (`pipelines`, `options`, `configs`), uploading XML/JSON files to the database, executing pipelines with full CLI/Builder parity (including SSE live streaming and `node_output` logging), enforcing granular per-pipeline & per-pipeline-group ACLs, and auditing all API and pipeline events.
 
 **Online Documentation:** [https://etl-madness.github.io/flow-docs/](https://etl-madness.github.io/flow-docs/)
 
+## What's New in `v1.3.1`
+
+- **Granular Pipeline & Pipeline-Group ACLs (`dbo.flow_pipeline_acl`)**: User- and group-level `allow` / `deny` rules for `create`, `read`, `update`, `delete`, `execute`, and `all` across individual pipelines, logical pipeline groups (explicit memberships + case-insensitive `name_pattern` globs such as `fin_*`), or wildcard `*`.
+- **Default Strict Pipeline Authorization (`-strict-acl=true` by default)**: All non-admin (`non-"all"`) accounts have **no access to pipelines by default** unless granted via explicit `allow` rules in `dbo.flow_pipeline_acl` (matching the user or one of their API/AD groups, with explicit `deny` overriding `allow`). Legacy global-role fallback for pipelines requires explicit opt-out (`-strict-acl=false` or `FLOW_API_STRICT_ACL=false`).
+- **API User Groups & Pipeline Groups Management**: Dedicated endpoints (`/api/v1/groups`, `/api/v1/pipeline-groups`, `/api/v1/acls`) plus Active Directory / Windows group resolution (`X-Flow-Windows-Groups`).
+- **Effective Permissions Matrix & "What-If" Simulator**: `GET /api/v1/permissions/effective` (and `/api/v1/me/permissions`) evaluates effective per-pipeline CRUD & execution rights, `creatable_groups`, `can_create_ungrouped`, and `can_execute_inline_xml`, with admin principal inspection (`?username=...`) and simulated external/AD group testing (`?groups=...`).
 
 ## Key Features
 
@@ -18,12 +27,12 @@
    - SQLite (`sqlite://`)
    - Oracle (`oracle://`)
 4. **Database-Backed BasicAuth, Windows/AD Groups & Granular Pipeline ACLs (`auth.go`, `acl.go`)**:
-   - Authenticates against `TableAPIUsers` (`dbo.flow_api_users`) as well as Windows/AD principals and groups, supporting global roles plus per-pipeline and per-pipeline-group ACLs (`create`, `read`, `update`, `delete`, `execute` with `allow` / `deny` precedence):
+   - Authenticates against `TableAPIUsers` (`dbo.flow_api_users`) as well as Windows/AD principals and groups. **By default (`-strict-acl=true`), non-admin accounts have zero access to `pipeline` artifacts or execution unless granted via `TablePipelineACL` (`dbo.flow_pipeline_acl`)**:
      - `scoped`: Zero global rights — strictly governed by user- and group-level rules in `TablePipelineACL` (`dbo.flow_pipeline_acl`)
-     - `execution-only`: Execute and validate pipelines (`POST /api/v1/execute`, `POST /api/v1/execute/stream`, `POST /api/v1/validate`) and read/list/export artifacts & query logs
-     - `read-only`: Read/list/export artifacts and query telemetry & audit logs (`GET /api/v1/...`)
-     - `write` or `upload`: Upload files and create/update/delete/read artifacts (`/api/v1/upload/...`, `/api/v1/artifacts/...`)
-     - `all`: Full access across all endpoints including user, group, pipeline-group, and ACL management (`/api/v1/users`, `/api/v1/groups`, `/api/v1/pipeline-groups`, `/api/v1/acls`) and DB connectivity testing (`/api/v1/db/test`)
+     - `execution-only`: Non-pipeline read/crypto/telemetry access plus pipeline execution/validation when granted via `dbo.flow_pipeline_acl` (or globally if `-strict-acl=false`)
+     - `read-only`: Read/list/export `config`/`options` artifacts, query telemetry & audit logs (`GET /api/v1/...`), and read pipelines granted via `dbo.flow_pipeline_acl` (or all pipelines if `-strict-acl=false`)
+     - `write` or `upload`: Upload/CRUD `config`/`options` artifacts and create/update/delete/read pipelines granted via `dbo.flow_pipeline_acl` (or all pipelines if `-strict-acl=false`)
+     - `all`: Full administrative access across all endpoints including user, group, pipeline-group, and ACL management (`/api/v1/users`, `/api/v1/groups`, `/api/v1/pipeline-groups`, `/api/v1/acls`) and DB connectivity testing (`/api/v1/db/test`)
 5. **Full Event & Telemetry Logging (`telemetry.go`)**:
    - Every API call is logged to `TableAPIAuditEvents` (`dbo.flow_api_events`).
    - Every pipeline execution logs run summaries to `TablePipelineRuns` (`dbo.pipeline_runs`) and node events (including optional `node_output` with 64 KB UTF-8 safe truncation and secret redaction) to `TablePipelineEvents` (`dbo.pipeline_events`).
@@ -92,7 +101,7 @@ docker compose -f docker-compose.sqlite.yml up -d --build
 | `-bootstrap-user` | `FLOW_API_BOOTSTRAP_USER` | `""` | Initial API username to create/update at startup |
 | `-bootstrap-pass` | `FLOW_API_BOOTSTRAP_PASS` | `""` | Password for `-bootstrap-user` (automatically bcrypt-hashed) |
 | `-bootstrap-perm` | `FLOW_API_BOOTSTRAP_PERM` | `"all"` | Permission role for `-bootstrap-user` (`all`, `scoped`, `execution-only`, `read-only`, `write`, `upload`) |
-| `-strict-acl` | `FLOW_API_STRICT_ACL` | `false` | Enforce strict ACL-only pipeline authorization for all non-`all` users |
+| `-strict-acl` | `FLOW_API_STRICT_ACL` | `true` | Enforce strict ACL-only pipeline authorization so non-`all` users have no pipeline access without explicit ACLs (`-strict-acl=false` opts out) |
 | `-hash-password` | — | `""` | Generate and print a bcrypt hash for the given password and exit |
 | `-debug` | `FLOW_API_DEBUG` | `false` | Enable verbose debug logging |
 

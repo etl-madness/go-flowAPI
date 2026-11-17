@@ -555,6 +555,9 @@ func TestSwaggerAndBootstrap(t *testing.T) {
 		if parsed["openapi"] != "3.0.3" {
 			t.Fatalf("expected openapi 3.0.3, got %v", parsed["openapi"])
 		}
+		if info, ok := parsed["info"].(map[string]any); !ok || info["version"] != "1.3.1" {
+			t.Fatalf("expected OpenAPI info.version 1.3.1, got %v", parsed["info"])
+		}
 		paths, ok := parsed["paths"].(map[string]any)
 		if !ok || paths["/api/v1/execute"] == nil || paths["/api/v1/users"] == nil || paths["/api/v1/upload/{type}"] == nil {
 			t.Fatalf("expected OpenAPI paths to include /api/v1/execute, /api/v1/users, and /api/v1/upload/{type}")

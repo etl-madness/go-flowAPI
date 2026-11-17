@@ -210,24 +210,41 @@ Expected response:
 
 ---
 
-## Step 4: Provision Scoped Users via `POST /api/v1/users`
+## Step 4: Provision Scoped Users & Pipeline ACLs (`POST /api/v1/users` & `POST /api/v1/acls`)
 
-Once your initial `all`-permission user is active, you can create least-privilege accounts over the API (passwords are automatically bcrypt-hashed by `POST /api/v1/users`):
+Once your initial `all`-permission user is active, you can create least-privilege accounts over the API (passwords are automatically bcrypt-hashed by `POST /api/v1/users`).
+
+> **Important (`v1.3.1` Default Strict Pipeline ACLs — `-strict-acl=true`):** By default, **non-admin accounts (`non-"all"`) have zero access to pipelines unless granted via explicit `allow` rules in `dbo.flow_pipeline_acl`** (`POST /api/v1/acls`). After creating a non-admin user (or user group via `POST /api/v1/groups`), assign their per-pipeline or per-pipeline-group permissions via `POST /api/v1/acls`.
 
 ```bash
-# 1. Create an execution-only service account
+# 1. Create a scoped operator account assigned to the finance_ops group
 curl -u "admin:ChangeMe!StrongAdminPass2026" \
   -X POST http://localhost:5180/api/v1/users \
   -H "Content-Type: application/json" \
   -d '{
-    "username": "runner_svc",
-    "password": "RunnerPass!2026",
-    "permission": "execution-only",
-    "description": "CI/CD pipeline runner service account",
+    "username": "alice_ops",
+    "password": "AliceOpsPass!2026",
+    "permission": "scoped",
+    "groups": ["finance_ops"],
+    "description": "Scoped finance ETL operator",
     "is_active": true
   }'
 
-# 2. Create a read-only auditor account
+# 2. Grant finance_ops read + execute access to the finance_pipelines group
+curl -u "admin:ChangeMe!StrongAdminPass2026" \
+  -X POST http://localhost:5180/api/v1/acls \
+  -H "Content-Type: application/json" \
+  -d '{
+    "principal_type": "group",
+    "principal_name": "finance_ops",
+    "target_type": "pipeline_group",
+    "target_name": "finance_pipelines",
+    "permissions": "read,execute",
+    "effect": "allow",
+    "description": "Finance operators can read and execute finance pipelines"
+  }'
+
+# 3. Create a read-only auditor account (telemetry, audit logs, and config/options viewer)
 curl -u "admin:ChangeMe!StrongAdminPass2026" \
   -X POST http://localhost:5180/api/v1/users \
   -H "Content-Type: application/json" \
@@ -238,26 +255,15 @@ curl -u "admin:ChangeMe!StrongAdminPass2026" \
     "description": "Read-only telemetry and artifact viewer",
     "is_active": true
   }'
-
-# 3. Create an artifact uploader/writer account
-curl -u "admin:ChangeMe!StrongAdminPass2026" \
-  -X POST http://localhost:5180/api/v1/users \
-  -H "Content-Type: application/json" \
-  -d '{
-    "username": "publisher",
-    "password": "PublisherPass!2026",
-    "permission": "upload",
-    "description": "Pipeline XML uploader account",
-    "is_active": true
-  }'
 ```
 
-### Summary of Permission Scopes
+### Summary of Permission Scopes (`v1.3.1`)
 
 | Permission | Allowed Endpoints |
 | :--- | :--- |
-| **`all`** | Full access to **all** endpoints: Artifact CRUD, File Upload, Pipeline Execution/Validation, Telemetry/Audit Logs, Database Connectivity Test (`POST /api/v1/databases/test`), and User Management (`GET/POST/DELETE /api/v1/users`). |
-| **`execution-only`** | `POST /api/v1/execute`, `POST /api/v1/execute/stream`, `POST /api/v1/validate`, plus all `read-only` operations (`GET /api/v1/artifacts/{type}...`, `GET /api/v1/runs`, `GET /api/v1/events`, `GET /api/v1/audit`) |
-| **`read-only`** | `GET /api/v1/artifacts/{type}...`, `GET /api/v1/runs`, `GET /api/v1/events`, `GET /api/v1/audit` |
-| **`write`** / **`upload`** | All `read-only` artifact operations plus `POST /api/v1/upload/{type}`, `POST /api/v1/artifacts/{type}/upload`, `POST/PUT/DELETE /api/v1/artifacts/{type}...` |
+| **`all`** | Full access to **all** endpoints: Artifact CRUD, File Upload, Pipeline Execution/Validation, Telemetry/Audit Logs, Database Connectivity Test (`POST /api/v1/db/test`), User Management (`/api/v1/users`), User Groups (`/api/v1/groups`), Pipeline Groups (`/api/v1/pipeline-groups`), and Pipeline ACLs (`/api/v1/acls`). |
+| **`scoped`** | Zero global baseline rights — strictly governed by granular per-pipeline and per-pipeline-group ACLs in `dbo.flow_pipeline_acl` (recommended default for non-admin accounts). |
+| **`execution-only`** | Non-pipeline read/crypto/telemetry operations (`GET /api/v1/artifacts/{config\|options}...`, `GET /api/v1/runs`, `GET /api/v1/events`, `GET /api/v1/audit`), plus pipeline execution/validation when granted via `dbo.flow_pipeline_acl` (or globally if `-strict-acl=false`). |
+| **`read-only`** | `GET /api/v1/artifacts/{config\|options}...`, `GET /api/v1/runs`, `GET /api/v1/events`, `GET /api/v1/audit`, plus pipeline read/export when granted via `dbo.flow_pipeline_acl` (or globally if `-strict-acl=false`). |
+| **`write`** / **`upload`** | `config`/`options` upload & CRUD, telemetry read operations, plus pipeline CRUD when granted via `dbo.flow_pipeline_acl` (or globally if `-strict-acl=false`). |
 | **Combined** | Comma-separated combinations such as `"read-only,execution-only"` or `"upload,execution-only"` are also supported. |

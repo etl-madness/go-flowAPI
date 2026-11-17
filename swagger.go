@@ -338,19 +338,20 @@ func (s *APIServer) BuildOpenAPISpec(r *http.Request) map[string]any {
 		"openapi": "3.0.3",
 		"info": map[string]any{
 			"title":   "go-flowAPI — CRUD, File Upload, Execution & Telemetry API",
-			"version": "1.0.0",
+			"version": "1.3.1",
 			"description": "Unified REST API for managing `go-flow` database artifacts (`pipeline`, `options`, `config`), " +
 				"uploading XML/JSON files to the database, executing and validating pipelines (with full CLI/Builder parity, " +
 				"live SSE streaming, and `node_output` logging), and querying execution & API audit telemetry.\n\n" +
-				"### Authentication & Role Permissions\n" +
-				"All `/api/v1/*` endpoints require HTTP Basic Authentication against `dbo.flow_api_users` (`TableAPIUsers`).\n\n" +
+				"### Authentication, Role Permissions & Default Strict Pipeline ACLs\n" +
+				"All `/api/v1/*` endpoints require HTTP Basic Authentication (or Windows/AD header resolution) against `dbo.flow_api_users` (`TableAPIUsers`). " +
+				"By default (`-strict-acl=true`), **all non-admin (`non-\"all\"`) accounts have zero pipeline access unless granted via explicit `allow` rules in `dbo.flow_pipeline_acl`**.\n\n" +
 				"| Permission Role | Capabilities |\n" +
 				"| :--- | :--- |\n" +
 				"| `scoped` | Zero global permissions — strictly governed by granular per-pipeline and per-pipeline-group ACL rules in `dbo.flow_pipeline_acl` |\n" +
-				"| `execution-only` | Execute and validate pipelines (`/api/v1/execute`, `/api/v1/execute/stream`, `/api/v1/validate`) plus read/list/export artifacts and query logs (subject to ACL `deny` rules or `-strict-acl`) |\n" +
-				"| `read-only` | Read/list/export artifacts and query run, event, and audit logs |\n" +
-				"| `write` / `upload` | Upload files and create, update, delete, or read artifacts |\n" +
-				"| `all` | Full administrative access to all endpoints including `/api/v1/users`, `/api/v1/groups`, `/api/v1/pipeline-groups`, `/api/v1/acls`, and `/api/v1/databases/test` |",
+				"| `execution-only` | Non-pipeline read/crypto/log access plus pipeline execution/validation when granted via `dbo.flow_pipeline_acl` (or globally if `-strict-acl=false` opt-out is set) |\n" +
+				"| `read-only` | Read/list/export `config`/`options` artifacts, query run/event/audit logs, and read pipelines granted via `dbo.flow_pipeline_acl` (or all pipelines if `-strict-acl=false`) |\n" +
+				"| `write` / `upload` | Upload/CRUD `config`/`options` artifacts and manage pipelines granted via `dbo.flow_pipeline_acl` (or all pipelines if `-strict-acl=false`) |\n" +
+				"| `all` | Full administrative access to all endpoints including `/api/v1/users`, `/api/v1/groups`, `/api/v1/pipeline-groups`, `/api/v1/acls`, and `/api/v1/db/test` |",
 		},
 		"servers": []map[string]any{
 			{"url": serverURL, "description": "Active go-flowAPI Server"},
@@ -896,9 +897,12 @@ func buildOpenAPIComponents() map[string]any {
 			"EffectivePipelinePermissions": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"pipeline": oaiProp("string", "", "fin_daily_gl"),
-					"groups":   map[string]any{"type": "array", "items": oaiProp("string", "", "finance_pipelines")},
-					"actions":  map[string]any{"type": "object", "additionalProperties": oaiProp("boolean", "", true)},
+					"pipeline":        oaiProp("string", "", "fin_daily_gl"),
+					"pipeline_name":   oaiProp("string", "", "fin_daily_gl"),
+					"groups":          map[string]any{"type": "array", "items": oaiProp("string", "", "finance_pipelines")},
+					"actions":         map[string]any{"type": "object", "additionalProperties": oaiProp("boolean", "", true)},
+					"allowed_actions": map[string]any{"type": "array", "items": oaiProp("string", "", "read")},
+					"denied_actions":  map[string]any{"type": "array", "items": oaiProp("string", "", "delete")},
 				},
 			},
 			"EffectivePermissionsResponse": map[string]any{
@@ -907,7 +911,7 @@ func buildOpenAPIComponents() map[string]any {
 					"username":               oaiProp("string", "", "alice"),
 					"global_permission":      oaiProp("string", "", "scoped"),
 					"groups":                 map[string]any{"type": "array", "items": oaiProp("string", "", "finance_ops")},
-					"strict_acl":             oaiProp("boolean", "", false),
+					"strict_acl":             oaiProp("boolean", "", true),
 					"can_create_ungrouped":   oaiProp("boolean", "", false),
 					"creatable_groups":       map[string]any{"type": "array", "items": oaiProp("string", "", "finance_pipelines")},
 					"can_execute_inline_xml": oaiProp("boolean", "", false),

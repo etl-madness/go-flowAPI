@@ -3,11 +3,11 @@ title: go-flowAPI Complete Endpoints & RBAC Reference
 description: Comprehensive overview of all go-flowAPI REST and Server-Sent Events (SSE) endpoints, RBAC & granular pipeline ACL permissions, request/response schemas, and telemetry behavior
 ---
 
-# `go-flowAPI` — Complete API Endpoints, RBAC & Granular ACL Reference
+# `go-flowAPI` — Complete API Endpoints, RBAC & Granular ACL Reference (`v1.3.1`)
 
-> **Unified REST & Server-Sent Events (SSE) API Reference**  
+> **Version:** `1.3.1` | **Unified REST & Server-Sent Events (SSE) API Reference**  
 > **OpenAPI 3.0.3 Spec:** `/api/v1/openapi.json` | **Interactive Swagger UI:** `/swagger/` (or `/docs`)  
-> **Authentication & Authorization:** Database-Backed HTTP BasicAuth, Windows/AD Group Resolution (`dbo.flow_api_users`), API User Groups (`dbo.flow_api_groups`), Pipeline Groups (`dbo.flow_pipeline_groups`), and Granular Pipeline ACLs (`dbo.flow_pipeline_acl`)
+> **Authentication & Authorization:** Database-Backed HTTP BasicAuth, Windows/AD Group Resolution (`dbo.flow_api_users`), API User Groups (`dbo.flow_api_groups`), Pipeline Groups (`dbo.flow_pipeline_groups`), and Default-Strict Granular Pipeline ACLs (`dbo.flow_pipeline_acl`, `-strict-acl=true` by default)
 
 This document provides a complete architectural and operational overview of every endpoint exposed by **`go-flowAPI`**, including global Role-Based Access Control (RBAC), granular user/group pipeline CRUD & execution ACLs (`allow` / `deny`), artifact addressing (by unique `name` or database `id`), synchronous and live SSE pipeline execution, cryptographic utilities, and per-node database session telemetry.
 
@@ -587,9 +587,9 @@ flowchart TD
     CHECK_DENY -->|"No"| CHECK_ALLOW{"3. Any matching ACL rule<br/>with effect = 'allow'<br/>granting action (or 'all')?"}
     CHECK_ALLOW -->|"Yes"| ALLOW_ACL["ALLOW"]
 
-    CHECK_ALLOW -->|"No"| STRICT{"4. Server -strict-acl<br/>OR user.Permission == 'scoped'?"}
-    STRICT -->|"Yes"| DENY_STRICT["DENY (403 Forbidden)"]
-    STRICT -->|"No"| GLOBAL["Fallback to Global Role<br/>(read-only / execution-only / write / upload)"]
+    CHECK_ALLOW -->|"No"| STRICT{"4. Server -strict-acl (default: true)<br/>OR user.Permission == 'scoped'?"}
+    STRICT -->|"Yes (Default)"| DENY_STRICT["DENY (403 Forbidden)<br/>No pipeline access without ACLs"]
+    STRICT -->|"No (-strict-acl=false opt-out)"| GLOBAL["Fallback to Global Role<br/>(read-only / execution-only / write / upload)"]
 ```
 
 > **Note on `create` Authorization for `scoped` / `-strict-acl` Users:** Creating a brand-new pipeline is permitted when the user holds `create` (or `all`) via:
@@ -729,7 +729,7 @@ curl -u admin:Admin123! \
   "http://localhost:8080/api/v1/permissions/effective?username=alice&groups=CORP%5CProd_Approvers"
 ```
 
-**Example Response (`EffectivePermissionsResponse`):**
+**Example Response (`EffectivePermissionsSummary` / `EffectivePermissionsResponse`):**
 ```json
 {
   "username": "alice",
@@ -746,6 +746,7 @@ curl -u admin:Admin123! \
   "pipelines": [
     {
       "pipeline": "fin_daily_orders",
+      "pipeline_name": "fin_daily_orders",
       "groups": [
         "finance_pipelines"
       ],
@@ -755,7 +756,14 @@ curl -u admin:Admin123! \
         "update": true,
         "delete": false,
         "execute": true
-      }
+      },
+      "allowed_actions": [
+        "create",
+        "execute",
+        "read",
+        "update"
+      ],
+      "denied_actions": []
     }
   ]
 }
