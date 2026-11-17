@@ -29,6 +29,7 @@ type ServerConfig struct {
 	ServiceName      string
 	Debug            bool
 	StrictACL        bool
+	DisableStrictACL bool
 	BootstrapUser    string
 	BootstrapPass    string
 	BootstrapPerm    string
@@ -49,7 +50,7 @@ func LoadStartupConfig(args []string) (*ServerConfig, error) {
 	logFileFlag := fs.String("log-file", "", "Optional file path to append server logs (or FLOW_API_LOG_FILE)")
 	serviceNameFlag := fs.String("service-name", "GoFlowAPI", "Service name when running under the Windows Service Control Manager")
 	debugFlag := fs.Bool("debug", false, "Enable verbose debug logging")
-	strictACLFlag := fs.Bool("strict-acl", false, "Enforce strict ACL-only pipeline authorization for all non-admin users (or FLOW_API_STRICT_ACL)")
+	strictACLFlag := fs.Bool("strict-acl", true, "Enforce strict ACL-only pipeline authorization for all non-admin users so accounts without ACLs have no pipeline access (default: true; set -strict-acl=false or FLOW_API_STRICT_ACL=false for legacy global pipeline roles)")
 	bootstrapUserFlag := fs.String("bootstrap-user", "", "Initial API username to seed/upsert at startup (or FLOW_API_BOOTSTRAP_USER)")
 	bootstrapPassFlag := fs.String("bootstrap-pass", "", "Password for -bootstrap-user (or FLOW_API_BOOTSTRAP_PASS)")
 	bootstrapPermFlag := fs.String("bootstrap-perm", PermAll, "Permission role for -bootstrap-user (default: all)")
@@ -109,9 +110,18 @@ func LoadStartupConfig(args []string) (*ServerConfig, error) {
 		}
 	}
 
+	strictFlagExplicit := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "strict-acl" {
+			strictFlagExplicit = true
+		}
+	})
 	strictACL := *strictACLFlag
-	if !strictACL {
-		if envStrict := strings.ToLower(strings.TrimSpace(os.Getenv("FLOW_API_STRICT_ACL"))); envStrict == "true" || envStrict == "1" {
+	if !strictFlagExplicit {
+		switch strings.ToLower(strings.TrimSpace(os.Getenv("FLOW_API_STRICT_ACL"))) {
+		case "false", "0", "no", "off":
+			strictACL = false
+		case "true", "1", "yes", "on":
 			strictACL = true
 		}
 	}
@@ -146,6 +156,7 @@ func LoadStartupConfig(args []string) (*ServerConfig, error) {
 		ServiceName:      serviceName,
 		Debug:            debug,
 		StrictACL:        strictACL,
+		DisableStrictACL: !strictACL,
 		BootstrapUser:    bootstrapUser,
 		BootstrapPass:    bootstrapPass,
 		BootstrapPerm:    bootstrapPerm,

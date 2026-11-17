@@ -42,7 +42,7 @@ flowchart TD
     PUBLIC -->|"No"| AUTH["AuthenticateRequest (auth.go)<br/>1. HTTP BasicAuth against flow_api_users<br/>2. Windows/AD User &amp; Group Fallback<br/>3. Resolve API Groups (flow_api_user_groups)"]
 
     AUTH -->|"401 Unauthorized"| ERR401["Log auth.failed / auth.missing<br/>to flow_api_events &amp; return 401"]
-    AUTH -->|"Authenticated"| RBAC{"Route RBAC + Pipeline ACL<br/>(all -&gt; Explicit DENY -&gt; Explicit ALLOW -&gt; Global Role)"}
+    AUTH -->|"Authenticated"| RBAC{"Route RBAC + Pipeline ACL<br/>(all -&gt; Explicit DENY -&gt; Explicit ALLOW -&gt; Default DENY)"}
 
     RBAC -->|"403 Forbidden"| ERR403["Log auth.forbidden<br/>to flow_api_events &amp; return 403"]
     RBAC -->|"Authorized"| ROUTER["Dispatch to Domain Handler"]
@@ -96,15 +96,15 @@ flowchart LR
     A_RULES -.->|"Grants or Denies Pipeline CRUD + Execute"| C_MUTATE & C_RUN & C_VIEW
 ```
 
-| Role Name | Read / Export `config` & `options`, Logs & Crypto | Read / Export `pipeline` Artifacts | Execute, Stream & Validate Pipelines | Upload, Create, Update & Delete Pipelines | Upload, Create, Update & Delete `config` / `options` | Manage Users, Groups, ACLs & Test DBs |
+| Role Name | Read / Export `config` & `options`, Audit & Crypto | Read / Export `pipeline` Artifacts | Execute, Stream & Validate Pipelines | Upload, Create, Update & Delete Pipelines | Upload, Create, Update & Delete `config` / `options` | Manage Users, Groups, ACLs & Test DBs |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **`scoped`** | ❌ | 🔒 *Per-ACL (`read`)* | 🔒 *Per-ACL (`execute`)* | 🔒 *Per-ACL (`create`, `update`, `delete`)* | ❌ | ❌ *(Self-inspect `/me/permissions` allowed)* |
-| **`read-only`** | ✅ | ✅ *(Unless ACL `deny`)* | 🔒 *Only if ACL `allow`* | 🔒 *Only if ACL `allow`* | ❌ | ❌ |
-| **`execution-only`** | ✅ | ✅ *(Unless ACL `deny`)* | ✅ *(Unless ACL `deny`)* | 🔒 *Only if ACL `allow`* | ❌ | ❌ |
-| **`write`** / **`upload`** | ✅ | ✅ *(Unless ACL `deny`)* | 🔒 *Only if combined or ACL `allow`* | ✅ *(Unless ACL `deny`)* | ✅ | ❌ |
+| **`scoped`** *(Recommended default)* | ❌ | 🔒 *Per-ACL (`read`)* | 🔒 *Per-ACL (`execute`)* | 🔒 *Per-ACL (`create`, `update`, `delete`)* | ❌ | ❌ *(Self-inspect `/me/permissions` allowed)* |
+| **`read-only`** | ✅ | 🔒 *Per-ACL (`read`)* | 🔒 *Per-ACL (`execute`)* | 🔒 *Per-ACL (`create`, `update`, `delete`)* | ❌ | ❌ |
+| **`execution-only`** | ✅ | 🔒 *Per-ACL (`read`)* | 🔒 *Per-ACL (`execute`)* | 🔒 *Per-ACL (`create`, `update`, `delete`)* | ❌ | ❌ |
+| **`write`** / **`upload`** | ✅ | 🔒 *Per-ACL (`read`)* | 🔒 *Per-ACL (`execute`)* | 🔒 *Per-ACL (`create`, `update`, `delete`)* | ✅ | ❌ |
 | **`all`** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
-> **Strict ACL Mode (`-strict-acl` / `FLOW_API_STRICT_ACL=true`):** When enabled on the server, all non-`all` roles ignore global pipeline baseline permissions and behave like `scoped` for pipeline CRUD and execution — every pipeline action requires an explicit `allow` rule in `dbo.flow_pipeline_acl` (with zero matching `deny` rules).
+> **Default Strict Pipeline ACLs (`-strict-acl=true` by default):** By default, **non-admin accounts (`non-"all"`) have zero access to pipelines if they do not have ACLs set**. Every pipeline CRUD (`create`, `read`, `update`, `delete`), execution/validation/SSE stream (`execute`), and pipeline run/event visibility action requires an explicit `allow` rule in `dbo.flow_pipeline_acl` (matching the user or one of their groups, with zero matching `deny` rules). Legacy global pipeline fallback is only used if explicitly opted into via `-strict-acl=false` / `FLOW_API_STRICT_ACL=false`.
 
 ---
 

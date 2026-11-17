@@ -251,17 +251,84 @@ func TestRoleBasedPermissions(t *testing.T) {
 		t.Fatalf("expected 401 for unauthenticated request, got %d", resp.StatusCode)
 	}
 
-	// 2. read_user (read-only) cannot upload or execute, but can GET artifacts/runs/events
+	// 2. Default strict ACL behavior: non-admin users WITHOUT ACLs have NO access to pipelines
 	createBody := `{"name":"test_pipe","content":` + mustJSONString(samplePipelineXML) + `}`
-	req, _ = http.NewRequest(http.MethodPost, ts.URL+"/api/v1/artifacts/pipeline", strings.NewReader(createBody))
-	req.SetBasicAuth("read_user", "read_pass")
-	resp, err = client.Do(req)
-	if err != nil {
-		t.Fatalf("POST /api/v1/artifacts/pipeline failed: %v", err)
+	for _, u := range []struct{ user, pass string }{
+		{"read_user", "read_pass"},
+		{"exec_user", "exec_pass"},
+		{"upload_user", "upload_pass"},
+		{"write_user", "write_pass"},
+	} {
+		req, _ = http.NewRequest(http.MethodPost, ts.URL+"/api/v1/artifacts/pipeline", strings.NewReader(createBody))
+		req.SetBasicAuth(u.user, u.pass)
+		resp, err = client.Do(req)
+		if err != nil {
+			t.Fatalf("POST /api/v1/artifacts/pipeline as %s failed: %v", u.user, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("expected 403 when non-admin %s without ACL attempts pipeline create, got %d", u.user, resp.StatusCode)
+		}
 	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("expected 403 when read-only user attempts write, got %d", resp.StatusCode)
+
+	// Admin seeds initial pipeline so we can verify non-admins with no ACLs see 0 pipelines and get 403 on read/execute
+	seedReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/artifacts/pipeline", strings.NewReader(`{"name":"admin_only_pipe","content":`+mustJSONString(samplePipelineXML)+`}`))
+	seedReq.SetBasicAuth("admin_user", "admin_pass")
+	seedResp, err := client.Do(seedReq)
+	if err != nil || seedResp.StatusCode != http.StatusCreated {
+		t.Fatalf("admin seed pipeline failed: status=%v err=%v", seedResp, err)
+	}
+	seedResp.Body.Close()
+
+	for _, u := range []struct{ user, pass string }{
+		{"read_user", "read_pass"},
+		{"exec_user", "exec_pass"},
+		{"upload_user", "upload_pass"},
+		{"write_user", "write_pass"},
+	} {
+		listReq, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/artifacts/pipeline", nil)
+		listReq.SetBasicAuth(u.user, u.pass)
+		listResp, _ := client.Do(listReq)
+		listBody, _ := io.ReadAll(listResp.Body)
+		listResp.Body.Close()
+		if listResp.StatusCode != http.StatusOK || !strings.Contains(string(listBody), `"count":0`) {
+			t.Fatalf("expected non-admin %s without ACLs to see 0 pipelines, got %d: %s", u.user, listResp.StatusCode, string(listBody))
+		}
+
+		getReq, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/artifacts/pipeline/admin_only_pipe", nil)
+		getReq.SetBasicAuth(u.user, u.pass)
+		getResp, _ := client.Do(getReq)
+		getResp.Body.Close()
+		if getResp.StatusCode != http.StatusForbidden {
+			t.Fatalf("expected 403 for non-admin %s reading admin_only_pipe without ACL, got %d", u.user, getResp.StatusCode)
+		}
+
+		execNoACLReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/execute", strings.NewReader(`{"file":"admin_only_pipe"}`))
+		execNoACLReq.SetBasicAuth(u.user, u.pass)
+		execNoACLResp, _ := client.Do(execNoACLReq)
+		execNoACLResp.Body.Close()
+		if execNoACLResp.StatusCode != http.StatusForbidden {
+			t.Fatalf("expected 403 for non-admin %s executing admin_only_pipe without ACL, got %d", u.user, execNoACLResp.StatusCode)
+		}
+	}
+
+	// Verify /api/v1/permissions/effective never emits null arrays when user has 0 groups and 0 ACLs
+	effReq, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/me/permissions", nil)
+	effReq.SetBasicAuth("read_user", "read_pass")
+	effResp, err := client.Do(effReq)
+	if err != nil {
+		t.Fatalf("GET /api/v1/me/permissions failed: %v", err)
+	}
+	effBytes, _ := io.ReadAll(effResp.Body)
+	effResp.Body.Close()
+	effJSON := string(effBytes)
+	if effResp.StatusCode != http.StatusOK ||
+		strings.Contains(effJSON, `"groups":null`) ||
+		strings.Contains(effJSON, `"creatable_groups":null`) ||
+		strings.Contains(effJSON, `"pipelines":null`) ||
+		!strings.Contains(effJSON, `"groups":[]`) ||
+		!strings.Contains(effJSON, `"strict_acl":true`) {
+		t.Fatalf("expected non-null arrays and strict_acl:true in effective permissions, got (%d): %s", effResp.StatusCode, effJSON)
 	}
 
 	req, _ = http.NewRequest(http.MethodPost, ts.URL+"/api/v1/execute", strings.NewReader(`{"file_xml":`+mustJSONString(samplePipelineXML)+`}`))
@@ -275,7 +342,22 @@ func TestRoleBasedPermissions(t *testing.T) {
 		t.Fatalf("expected 403 when read-only user attempts execution, got %d", resp.StatusCode)
 	}
 
-	// 3. upload_user (upload) can upload & write artifacts, cannot execute
+	// Grant explicit pipeline ACLs for test_pipe to upload_user, exec_user, and read_user
+	for _, aclPayload := range []string{
+		`{"principal_type":"user","principal_name":"upload_user","target_type":"pipeline","target_name":"test_pipe","permissions":"create,read,update","effect":"allow"}`,
+		`{"principal_type":"user","principal_name":"exec_user","target_type":"pipeline","target_name":"test_pipe","permissions":"read,execute","effect":"allow"}`,
+		`{"principal_type":"user","principal_name":"read_user","target_type":"pipeline","target_name":"test_pipe","permissions":"read","effect":"allow"}`,
+	} {
+		aclReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/acls", strings.NewReader(aclPayload))
+		aclReq.SetBasicAuth("admin_user", "admin_pass")
+		aclResp, aclErr := client.Do(aclReq)
+		if aclErr != nil || aclResp.StatusCode != http.StatusCreated {
+			t.Fatalf("failed granting ACL %s: resp=%v err=%v", aclPayload, aclResp, aclErr)
+		}
+		aclResp.Body.Close()
+	}
+
+	// 3. With explicit ACLs, upload_user can create/update test_pipe, cannot execute
 	req, _ = http.NewRequest(http.MethodPost, ts.URL+"/api/v1/artifacts/pipeline", strings.NewReader(createBody))
 	req.SetBasicAuth("upload_user", "upload_pass")
 	resp, err = client.Do(req)
@@ -529,6 +611,25 @@ func TestExecuteAndStreamByArtifactTypeAndTableID(t *testing.T) {
 		pipeRec.ID,
 	)
 	optRec := createArtifact("options", "id_test_opt", optionsXML)
+
+	// Without ACLs, read_user gets 403 reading pipeline by ID; grant explicit ACLs to read_user & exec_user
+	noACLGetReq, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/v1/artifacts/pipeline/id/%d", ts.URL, pipeRec.ID), nil)
+	noACLGetReq.SetBasicAuth("read_user", "read_pass")
+	noACLGetResp, _ := client.Do(noACLGetReq)
+	noACLGetResp.Body.Close()
+	if noACLGetResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 reading pipeline by ID before ACL grant, got %d", noACLGetResp.StatusCode)
+	}
+
+	for _, aclPayload := range []string{
+		`{"principal_type":"user","principal_name":"read_user","target_type":"pipeline","target_name":"id_test_pipe","permissions":"read","effect":"allow"}`,
+		`{"principal_type":"user","principal_name":"exec_user","target_type":"*","target_name":"*","permissions":"read,execute","effect":"allow"}`,
+	} {
+		aclReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/acls", strings.NewReader(aclPayload))
+		aclReq.SetBasicAuth("admin_user", "admin_pass")
+		aclResp, _ := client.Do(aclReq)
+		aclResp.Body.Close()
+	}
 
 	// 2. Verify GET /api/v1/artifacts/{type}/id/{id} returns the record by table ID
 	getReq, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/v1/artifacts/pipeline/id/%d", ts.URL, pipeRec.ID), nil)
@@ -1276,6 +1377,19 @@ func TestStoreHandlersAndUsersCRUD(t *testing.T) {
 		t.Fatalf("UTF-16BE decode failed: %q", got)
 	}
 
+	// Grant explicit ACLs so upload_user, write_user, read_user, and exec_user can exercise pipeline CRUD/upload/validate handlers
+	ctx := context.Background()
+	for _, rule := range []PipelineACL{
+		{PrincipalType: "user", PrincipalName: "upload_user", TargetType: "*", TargetName: "*", Permissions: "create,read,update", Effect: "allow"},
+		{PrincipalType: "user", PrincipalName: "write_user", TargetType: "*", TargetName: "*", Permissions: "create,read,update,delete", Effect: "allow"},
+		{PrincipalType: "user", PrincipalName: "read_user", TargetType: "*", TargetName: "*", Permissions: "read", Effect: "allow"},
+		{PrincipalType: "user", PrincipalName: "exec_user", TargetType: "*", TargetName: "*", Permissions: "read,execute", Effect: "allow"},
+	} {
+		if _, err := apiSrv.UpsertPipelineACL(ctx, rule); err != nil {
+			t.Fatalf("UpsertPipelineACL failed: %v", err)
+		}
+	}
+
 	// 2. Raw upload via /api/v1/upload/pipeline
 	code, upBytes := doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/upload/pipeline?name=raw_uploaded&description=raw_desc", "upload_user", "upload_pass", samplePipelineXML, nil)
 	if code != http.StatusCreated {
@@ -1560,7 +1674,17 @@ func TestExecutorAdvancedFeatures(t *testing.T) {
 		t.Fatalf("transformXMLWithXSLT failed: %v", err)
 	}
 
-	// Execute pipeline using SQL URI + config_xml + vars
+	// Execute pipeline using SQL URI + config_xml + vars (grant wildcard execute ACL to exec_user first)
+	if _, err := apiSrv.UpsertPipelineACL(ctx, PipelineACL{
+		PrincipalType: "user",
+		PrincipalName: "exec_user",
+		TargetType:    "*",
+		TargetName:    "*",
+		Permissions:   "execute",
+		Effect:        "allow",
+	}); err != nil {
+		t.Fatalf("UpsertPipelineACL for exec_user failed: %v", err)
+	}
 	overrideCfgXML := `<?xml version="1.0" encoding="UTF-8"?><Flow><Variables><Variable Name="EXTRA" Value="123"/></Variables></Flow>`
 	code, execBytes := doAuthJSON(t, client, http.MethodPost, ts.URL+"/api/v1/execute?preflight=false&debug=true&vars=FOO=bar", "exec_user", "exec_pass", map[string]any{
 		"file":       sqlURI,
@@ -1730,6 +1854,14 @@ func TestRemainingCoverageBranches(t *testing.T) {
 	apiSrv, ts, _ := setupTestServer(t)
 	client := ts.Client()
 	ctx := context.Background()
+
+	// Grant wildcard execute/read ACLs so exec_user and read_user can exercise inline/file/runs coverage branches
+	_, _ = apiSrv.UpsertPipelineACL(ctx, PipelineACL{
+		PrincipalType: "user", PrincipalName: "exec_user", TargetType: "*", TargetName: "*", Permissions: "read,execute", Effect: "allow",
+	})
+	_, _ = apiSrv.UpsertPipelineACL(ctx, PipelineACL{
+		PrincipalType: "user", PrincipalName: "read_user", TargetType: "*", TargetName: "*", Permissions: "read", Effect: "allow",
+	})
 
 	// 1. QueryPipelineRuns without status filter so all columns of recorded runs are scanned
 	// First run a pipeline so pipeline_runs is populated
@@ -2385,22 +2517,43 @@ func TestGranularACLExecutionPrecedenceWindowsAndStrictMode(t *testing.T) {
 		t.Fatalf("expected AD group member to receive 403 on hr_secret_pipe, got %d", c)
 	}
 
-	// 6. StrictACL mode (-strict-acl / FLOW_API_STRICT_ACL=true) disables legacy global pipeline fallback for non-admin users
-	strictCfg, err := LoadStartupConfig([]string{"-dsn", "sqlite://strict.db", "-strict-acl"})
-	if err != nil || !strictCfg.StrictACL {
-		t.Fatalf("expected -strict-acl flag to set StrictACL=true, cfg=%+v err=%v", strictCfg, err)
+	// 6. StrictACL mode is ON by default (StrictACL=true / DisableStrictACL=false), and -strict-acl=false opts out
+	defaultCfg, err := LoadStartupConfig([]string{"-dsn", "sqlite://default.db"})
+	if err != nil || !defaultCfg.StrictACL || defaultCfg.DisableStrictACL {
+		t.Fatalf("expected StrictACL=true by default from LoadStartupConfig, cfg=%+v err=%v", defaultCfg, err)
+	}
+	optOutCfg, err := LoadStartupConfig([]string{"-dsn", "sqlite://legacy.db", "-strict-acl=false"})
+	if err != nil || optOutCfg.StrictACL || !optOutCfg.DisableStrictACL {
+		t.Fatalf("expected -strict-acl=false to set StrictACL=false and DisableStrictACL=true, cfg=%+v err=%v", optOutCfg, err)
 	}
 
-	apiSrv.cfg.StrictACL = true
-	defer func() { apiSrv.cfg.StrictACL = false }()
-
-	// Under StrictACL, read_user has no ACL entries -> sees 0 pipelines and gets 403 on direct pipeline read
+	// By default on apiSrv, read_user and exec_user have no allow ACL entries -> see 0 pipelines and get 403 on direct pipeline read/execute
 	code, strictList := doReq(http.MethodGet, "/api/v1/artifacts/pipeline", "read_user", "read_pass", "", nil)
 	if code != http.StatusOK || !strings.Contains(string(strictList), `"count":0`) {
-		t.Fatalf("expected read_user with no ACLs under StrictACL to list 0 pipelines, got %d: %s", code, string(strictList))
+		t.Fatalf("expected read_user with no ACLs by default to list 0 pipelines, got %d: %s", code, string(strictList))
 	}
 	if c, _ := doReq(http.MethodPost, "/api/v1/execute", "exec_user", "exec_pass", `{"file":"fin_exec_pipe"}`, nil); c != http.StatusForbidden {
-		t.Fatalf("expected exec_user without ACL under StrictACL to get 403 on execute, got %d", c)
+		t.Fatalf("expected exec_user without ACL by default to get 403 on execute, got %d", c)
+	}
+
+	// Also verify admin inspecting read_user (0 groups, 0 ACLs) receives all pipelines with false actions and non-null slices
+	code, adminEffNoACL := doReq(http.MethodGet, "/api/v1/permissions/effective?username=read_user", "admin_user", "admin_pass", "", nil)
+	if code != http.StatusOK ||
+		strings.Contains(string(adminEffNoACL), `"groups":null`) ||
+		!strings.Contains(string(adminEffNoACL), `"actions":{`) ||
+		!strings.Contains(string(adminEffNoACL), `"pipeline":"fin_exec_pipe"`) {
+		t.Fatalf("unexpected admin effective permissions payload for no-ACL user (%d): %s", code, string(adminEffNoACL))
+	}
+
+	// Opt-out check: when DisableStrictACL=true, legacy global read_user sees pipelines and explicit DENY still blocks exec_user on hr_secret_pipe
+	apiSrv.cfg.DisableStrictACL = true
+	defer func() { apiSrv.cfg.DisableStrictACL = false }()
+	code, legacyList := doReq(http.MethodGet, "/api/v1/artifacts/pipeline", "read_user", "read_pass", "", nil)
+	if code != http.StatusOK || !strings.Contains(string(legacyList), "fin_exec_pipe") {
+		t.Fatalf("expected read_user to list pipelines when DisableStrictACL=true, got %d: %s", code, string(legacyList))
+	}
+	if c, _ := doReq(http.MethodPost, "/api/v1/execute", "exec_user", "exec_pass", `{"file":"hr_secret_pipe"}`, nil); c != http.StatusForbidden {
+		t.Fatalf("expected explicit deny to still block exec_user when DisableStrictACL=true, got %d", c)
 	}
 }
 

@@ -79,11 +79,26 @@ type PipelineACL struct {
 
 // EffectivePipelinePermission summarizes resolved permissions for a principal on a single pipeline.
 type EffectivePipelinePermission struct {
-	PipelineID     int64    `json:"pipeline_id,omitempty"`
-	PipelineName   string   `json:"pipeline_name"`
-	Groups         []string `json:"groups,omitempty"`
-	AllowedActions []string `json:"allowed_actions"`
-	DeniedActions  []string `json:"denied_actions,omitempty"`
+	PipelineID     int64           `json:"pipeline_id,omitempty"`
+	Pipeline       string          `json:"pipeline"`
+	PipelineName   string          `json:"pipeline_name"`
+	Groups         []string        `json:"groups"`
+	Actions        map[string]bool `json:"actions"`
+	AllowedActions []string        `json:"allowed_actions"`
+	DeniedActions  []string        `json:"denied_actions"`
+}
+
+// EffectivePermissionsSummary represents the complete effective permissions payload for /api/v1/permissions/effective.
+type EffectivePermissionsSummary struct {
+	Username            string                        `json:"username"`
+	GlobalPermission    string                        `json:"global_permission"`
+	Groups              []string                      `json:"groups"`
+	StrictACL           bool                          `json:"strict_acl"`
+	CanCreateUngrouped  bool                          `json:"can_create_ungrouped"`
+	CreatableGroups     []string                      `json:"creatable_groups"`
+	CanExecuteInlineXML bool                          `json:"can_execute_inline_xml"`
+	Count               int                           `json:"count"`
+	Pipelines           []EffectivePipelinePermission `json:"pipelines"`
 }
 
 func isMissingTableError(err error) bool {
@@ -879,6 +894,11 @@ func (s *APIServer) DeletePipelineACLByID(ctx context.Context, id int64) error {
 
 // ListPipelineACLs returns ACL rules filtered by optional principal/target criteria.
 func (s *APIServer) ListPipelineACLs(ctx context.Context, principalType, principalName, targetType, targetName string) ([]PipelineACL, error) {
+	rules, _, err := s.listPipelineACLsInternal(ctx, principalType, principalName, targetType, targetName)
+	return rules, err
+}
+
+func (s *APIServer) listPipelineACLsInternal(ctx context.Context, principalType, principalName, targetType, targetName string) ([]PipelineACL, bool, error) {
 	table := resolveTableName(s.dialect, TablePipelineACL)
 
 	var clauses []string
@@ -918,9 +938,9 @@ func (s *APIServer) ListPipelineACLs(ctx context.Context, principalType, princip
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		if isMissingTableError(err) {
-			return []PipelineACL{}, nil
+			return []PipelineACL{}, true, nil
 		}
-		return nil, err
+		return nil, false, err
 	}
 	defer rows.Close()
 
@@ -928,14 +948,14 @@ func (s *APIServer) ListPipelineACLs(ctx context.Context, principalType, princip
 	for rows.Next() {
 		var r PipelineACL
 		if err := rows.Scan(&r.ID, &r.PrincipalType, &r.PrincipalName, &r.TargetType, &r.TargetName, &r.Permissions, &r.Effect, &r.Description); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		rules = append(rules, r)
 	}
 	if rules == nil {
 		rules = []PipelineACL{}
 	}
-	return rules, rows.Err()
+	return rules, false, rows.Err()
 }
 
 // =============================================================================
@@ -946,6 +966,7 @@ type aclSnapshot struct {
 	pipelineGroups        []PipelineGroup
 	groupsByPipelineLower map[string][]string // lower(pipeline_name) -> canonical group names
 	acls                  []PipelineACL
+	aclTableMissing       bool
 }
 
 func (s *APIServer) loadACLSnapshot(ctx context.Context) (*aclSnapshot, error) {
@@ -970,11 +991,12 @@ func (s *APIServer) loadACLSnapshot(ctx context.Context) (*aclSnapshot, error) {
 		}
 	}
 
-	acls, err := s.ListPipelineACLs(ctx, "", "", "", "")
+	acls, missingTable, err := s.listPipelineACLsInternal(ctx, "", "", "", "")
 	if err != nil {
 		return nil, err
 	}
 	snap.acls = acls
+	snap.aclTableMissing = missingTable
 	return snap, nil
 }
 
@@ -1005,6 +1027,9 @@ func (snap *aclSnapshot) groupsForPipeline(pipelineName string, extraGroups []st
 	}
 	for _, eg := range extraGroups {
 		add(eg)
+	}
+	if len(out) == 0 {
+		return []string{}
 	}
 	sort.Strings(out)
 	return out
@@ -1160,7 +1185,24 @@ func (snap *aclSnapshot) evaluate(user *APIUser, pipelineName string, candidateG
 }
 
 func (s *APIServer) isStrictACL() bool {
-	return s != nil && s.cfg != nil && s.cfg.StrictACL
+	if s == nil || s.cfg == nil {
+		return true
+	}
+	return !s.cfg.DisableStrictACL
+}
+
+// effectiveStrictForSnapshot returns whether strict ACL-only pipeline authorization is active.
+// By default this is true whenever TablePipelineACL exists (so non-admin accounts have no pipeline
+// access unless ACLs are configured), while gracefully preserving legacy 7-table schema compatibility
+// when TablePipelineACL has not been created and StrictACL was not explicitly forced.
+func (s *APIServer) effectiveStrictForSnapshot(snap *aclSnapshot) bool {
+	if !s.isStrictACL() {
+		return false
+	}
+	if snap != nil && snap.aclTableMissing && (s == nil || s.cfg == nil || !s.cfg.StrictACL) {
+		return false
+	}
+	return true
 }
 
 // EvaluatePipelineAccess checks whether user is authorized to perform action on pipelineName (and optional candidateGroups).
@@ -1175,7 +1217,7 @@ func (s *APIServer) EvaluatePipelineAccess(ctx context.Context, user *APIUser, p
 	if err != nil {
 		return false, "", err
 	}
-	allowed, reason := snap.evaluate(user, pipelineName, candidateGroups, action, s.isStrictACL())
+	allowed, reason := snap.evaluate(user, pipelineName, candidateGroups, action, s.effectiveStrictForSnapshot(snap))
 	return allowed, reason, nil
 }
 
@@ -1186,7 +1228,7 @@ func (s *APIServer) FilterAccessiblePipelines(ctx context.Context, user *APIUser
 	if err != nil {
 		return nil, err
 	}
-	strict := s.isStrictACL()
+	strict := s.effectiveStrictForSnapshot(snap)
 	out := make([]ArtifactRecord, 0, len(items))
 	for _, rec := range items {
 		if rec.Type != "pipeline" {
@@ -1206,22 +1248,24 @@ func (s *APIServer) FilterAccessiblePipelines(ctx context.Context, user *APIUser
 
 // CanUserExecuteInlineOrExternal checks whether user is allowed to execute raw inline XML,
 // local filesystem paths, or external sql:// URIs that are not registered in TablePipelineContent.
-func (s *APIServer) CanUserExecuteInlineOrExternal(user *APIUser) bool {
+func (s *APIServer) CanUserExecuteInlineOrExternal(ctx context.Context, user *APIUser) bool {
 	if user == nil || !user.IsActive {
 		return false
 	}
 	if user.HasPermission(PermAll) {
 		return true
 	}
-	if s.isStrictACL() {
+	snap, err := s.loadACLSnapshot(ctx)
+	if err != nil {
 		return false
 	}
-	// Legacy global execution-only / write roles retain inline/local parity; 'scoped' users cannot bypass pipeline ACLs.
-	return user.HasPermission(PermExecutionOnly)
+	strict := s.effectiveStrictForSnapshot(snap)
+	allowed, _ := snap.evaluate(user, "", nil, ActionExecute, strict)
+	return allowed
 }
 
-// ComputeEffectivePermissions calculates effective CRUD + execute permissions across all stored pipelines for a target user.
-func (s *APIServer) ComputeEffectivePermissions(ctx context.Context, targetUser *APIUser) ([]EffectivePipelinePermission, error) {
+// ComputeEffectivePermissionsSummary builds a null-safe effective permissions summary for a target user.
+func (s *APIServer) ComputeEffectivePermissionsSummary(ctx context.Context, targetUser *APIUser, includeAllPipelines bool) (*EffectivePermissionsSummary, error) {
 	pipelines, err := s.ListArtifacts(ctx, "pipeline", false)
 	if err != nil {
 		return nil, err
@@ -1230,33 +1274,82 @@ func (s *APIServer) ComputeEffectivePermissions(ctx context.Context, targetUser 
 	if err != nil {
 		return nil, err
 	}
-	strict := s.isStrictACL()
+	strict := s.effectiveStrictForSnapshot(snap)
+
+	groups := []string{}
+	if targetUser != nil && len(targetUser.Groups) > 0 {
+		groups = append(groups, targetUser.Groups...)
+	}
+
+	canCreateUngrouped := false
+	canExecuteInline := false
+	creatableGroups := []string{}
+	if targetUser != nil && targetUser.IsActive {
+		canCreateUngrouped, _ = snap.evaluate(targetUser, "", nil, ActionCreate, strict)
+		canExecuteInline, _ = snap.evaluate(targetUser, "", nil, ActionExecute, strict)
+		for _, pg := range snap.pipelineGroups {
+			if ok, _ := snap.evaluate(targetUser, "", []string{pg.Name}, ActionCreate, strict); ok {
+				creatableGroups = append(creatableGroups, pg.Name)
+			}
+		}
+	}
 
 	result := make([]EffectivePipelinePermission, 0, len(pipelines))
 	for _, p := range pipelines {
-		var allowed, denied []string
+		allowed := []string{}
+		denied := []string{}
+		actionsMap := make(map[string]bool, len(canonicalActionOrder))
 		for _, act := range canonicalActionOrder {
 			ok, reason := snap.evaluate(targetUser, p.Name, nil, act, strict)
+			actionsMap[act] = ok
 			if ok {
 				allowed = append(allowed, act)
 			} else if strings.HasPrefix(reason, "explicitly denied") {
 				denied = append(denied, act)
 			}
 		}
-		if len(allowed) > 0 || len(denied) > 0 || targetUser.HasPermission(PermAll) {
-			if allowed == nil {
-				allowed = []string{}
-			}
+		if includeAllPipelines || len(allowed) > 0 || (targetUser != nil && targetUser.HasPermission(PermAll)) {
 			result = append(result, EffectivePipelinePermission{
 				PipelineID:     p.ID,
+				Pipeline:       p.Name,
 				PipelineName:   p.Name,
 				Groups:         snap.groupsForPipeline(p.Name, nil),
+				Actions:        actionsMap,
 				AllowedActions: allowed,
 				DeniedActions:  denied,
 			})
 		}
 	}
-	return result, nil
+
+	uname := ""
+	gperm := ""
+	isScopedRole := false
+	if targetUser != nil {
+		uname = targetUser.Username
+		gperm = targetUser.Permission
+		isScopedRole = normalizePermToken(targetUser.Permission) == PermScoped
+	}
+
+	return &EffectivePermissionsSummary{
+		Username:            uname,
+		GlobalPermission:    gperm,
+		Groups:              groups,
+		StrictACL:           strict || isScopedRole,
+		CanCreateUngrouped:  canCreateUngrouped,
+		CreatableGroups:     creatableGroups,
+		CanExecuteInlineXML: canExecuteInline,
+		Count:               len(result),
+		Pipelines:           result,
+	}, nil
+}
+
+// ComputeEffectivePermissions calculates effective CRUD + execute permissions across all stored pipelines for a target user.
+func (s *APIServer) ComputeEffectivePermissions(ctx context.Context, targetUser *APIUser) ([]EffectivePipelinePermission, error) {
+	summary, err := s.ComputeEffectivePermissionsSummary(ctx, targetUser, false)
+	if err != nil {
+		return nil, err
+	}
+	return summary.Pipelines, nil
 }
 
 // ExtractPipelineNameFromRunFilePath extracts the canonical pipeline name from pipeline_runs.file_path

@@ -664,7 +664,7 @@ func (s *APIServer) AuthorizeExecutionRequest(ctx context.Context, user *APIUser
 		return "", nil
 	}
 
-	canInlineOrExternal := s.CanUserExecuteInlineOrExternal(user)
+	canInlineOrExternal := s.CanUserExecuteInlineOrExternal(ctx, user)
 
 	// Normalize ArtifactType + ID on a working copy
 	resolvedReq := req

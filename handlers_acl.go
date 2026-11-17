@@ -190,7 +190,7 @@ func (s *APIServer) filterRunsForUser(ctx context.Context, user *APIUser, runs [
 	if err != nil {
 		return nil, err
 	}
-	strict := s.isStrictACL()
+	strict := s.effectiveStrictForSnapshot(snap)
 	hasGlobalRead := !strict && user.HasPermission(PermReadOnly)
 	if hasGlobalRead && len(snap.acls) == 0 {
 		return runs, nil
@@ -225,7 +225,7 @@ func (s *APIServer) filterEventsForUser(ctx context.Context, user *APIUser, even
 	if err != nil {
 		return nil, err
 	}
-	strict := s.isStrictACL()
+	strict := s.effectiveStrictForSnapshot(snap)
 	hasGlobalRead := !strict && user.HasPermission(PermReadOnly)
 	if hasGlobalRead && len(snap.acls) == 0 {
 		return events, nil
@@ -791,19 +791,13 @@ func (s *APIServer) handleEffectivePermissions(w http.ResponseWriter, r *http.Re
 		}
 	}
 
-	effective, err := s.ComputeEffectivePermissions(r.Context(), targetUser)
+	includeAllPipelines := caller.HasPermission(PermAll)
+	summary, err := s.ComputeEffectivePermissionsSummary(r.Context(), targetUser, includeAllPipelines)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	s.recordArtifactAudit(r, caller.Username, "acl.effective", "acl", targetUser.Username, http.StatusOK, "SUCCESS", start, "")
-	writeJSON(w, http.StatusOK, map[string]any{
-		"username":          targetUser.Username,
-		"global_permission": targetUser.Permission,
-		"groups":            targetUser.Groups,
-		"strict_acl":        s.isStrictACL(),
-		"count":             len(effective),
-		"pipelines":         effective,
-	})
+	writeJSON(w, http.StatusOK, summary)
 }

@@ -18,7 +18,7 @@ fi
 
 FLOW_VERSION=$(resolve_version)
 GOARCH_TARGET=$(normalize_goarch "${GOARCH:-${1:-}}")
-FREEBSD_MAJOR="${FREEBSD_MAJOR:-14}"
+FREEBSD_MAJOR="${FREEBSD_MAJOR:-15}"
 
 case "$GOARCH_TARGET" in
     amd64) FBSD_ARCH="amd64" ;;
