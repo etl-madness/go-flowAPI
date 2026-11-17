@@ -2636,3 +2636,319 @@ func TestLegacySevenTableSchemaGracefulFallback(t *testing.T) {
 		t.Fatalf("expected 403 fail-closed on 7-table schema for scoped_u, got %d", scopedResp.StatusCode)
 	}
 }
+
+func TestGranularACLCompleteEndpointsKerberosAndHelpers(t *testing.T) {
+	// 1. Unit test Kerberos SPN / krb5.conf / AD DSN helpers in db.go
+	tmpDir := t.TempDir()
+	krb5ConfPath := filepath.Join(tmpDir, "krb5.conf")
+	krb5Content := "# comment\n; semicolon comment\n[libdefaults]\n  default_realm = RSYSLAB.COM\n"
+	if err := os.WriteFile(krb5ConfPath, []byte(krb5Content), 0600); err != nil {
+		t.Fatalf("write krb5.conf: %v", err)
+	}
+	if got := defaultRealmFromKrb5Conf(krb5ConfPath); got != "RSYSLAB.COM" {
+		t.Fatalf("expected RSYSLAB.COM from explicit krb5.conf, got %q", got)
+	}
+	t.Setenv("KRB5_CONFIG", krb5ConfPath)
+	if got := defaultRealmFromKrb5Conf(""); got != "RSYSLAB.COM" {
+		t.Fatalf("expected RSYSLAB.COM from KRB5_CONFIG env, got %q", got)
+	}
+	if got := defaultRealmFromKrb5Conf(filepath.Join(tmpDir, "missing_krb5.conf")); got != "" {
+		t.Fatalf("expected empty realm for missing krb5.conf, got %q", got)
+	}
+
+	t.Setenv("AD_REALM", "")
+	if got := qualifyKerberosServerSPN("HTTP/myhost", "RSYSLAB.COM", ""); got != "HTTP/myhost" {
+		t.Fatalf("non-MSSQLSvc SPN should be unchanged, got %q", got)
+	}
+	if got := qualifyKerberosServerSPN("MSSQLSvc/t15p.rsyslab.com:1433", "RSYSLAB.COM", ""); got != "MSSQLSvc/t15p.rsyslab.com:1433" {
+		t.Fatalf("already qualified SPN should be unchanged, got %q", got)
+	}
+	if got := qualifyKerberosServerSPN("MSSQLSvc/t15p:1433", "", krb5ConfPath); got != "MSSQLSvc/t15p.RSYSLAB.COM:1433" {
+		t.Fatalf("expected SPN qualified via krb5.conf, got %q", got)
+	}
+	if got := qualifyKerberosServerSPN("MSSQLSvc/t15p:1433", "NODOTREALM", filepath.Join(tmpDir, "none.conf")); got != "MSSQLSvc/t15p:1433" {
+		t.Fatalf("expected non-FQDN realm to leave SPN unchanged, got %q", got)
+	}
+
+	t.Setenv("KRB5_PRINCIPAL", "CORP\\svc_kerb@RSYSLAB.COM")
+	if got := resolveKerberosPrincipalUser(); got != "svc_kerb" {
+		t.Fatalf("expected svc_kerb from KRB5_PRINCIPAL, got %q", got)
+	}
+	t.Setenv("KRB5_PRINCIPAL", "")
+
+	adoDSN := "Data Source=sql01;Initial Catalog=FlowDB;Authentication=ActiveDirectoryIntegrated;fedauth=ActiveDirectoryIntegrated;"
+	if !isOnPremADIntegratedDSN(adoDSN) {
+		t.Fatalf("expected on-prem AD integrated DSN to be detected")
+	}
+	if isOnPremADIntegratedDSN("Server=tcp:my.database.windows.net;Authentication=ActiveDirectoryIntegrated;") {
+		t.Fatalf("expected Azure SQL DSN not to be treated as on-prem AD integrated")
+	}
+	strippedDSN := stripADIntegratedParams(adoDSN)
+	if strings.Contains(strings.ToLower(strippedDSN), "activedirectoryintegrated") || !strings.Contains(strippedDSN, "Data Source=sql01") {
+		t.Fatalf("unexpected stripped DSN: %q", strippedDSN)
+	}
+	if same := stripADIntegratedParams("sqlserver://host:1433?database=FlowDB"); same != "sqlserver://host:1433?database=FlowDB" {
+		t.Fatalf("expected sqlserver:// URL unchanged, got %q", same)
+	}
+	if drv, dial, _ := ParseDSN(adoDSN); drv != "sqlserver" || dial != "sqlserver" {
+		t.Fatalf("expected sqlserver driver for on-prem AD integrated DSN, got %s / %s", drv, dial)
+	}
+	if prov, err := getRegisteredAuthProvider("ntlm"); err != nil || prov == nil {
+		t.Fatalf("getRegisteredAuthProvider failed: %v", err)
+	} else {
+		_, _ = prov.GetIntegratedAuthenticator(msdsn.Config{Parameters: map[string]string{"k": "v"}})
+	}
+
+	// 2. Unit test NormalizeACLActions & ExtractPipelineNameFromRunFilePath edge cases
+	for _, raw := range []string{"insert", "view", "edit", "remove", "exec", "write", "upload", "all", "create, ,read"} {
+		if _, _, err := NormalizeACLActions(raw); err != nil {
+			t.Fatalf("NormalizeACLActions(%q) unexpected error: %v", raw, err)
+		}
+	}
+	for _, bad := range []string{"", " , ", "super_admin_invalid"} {
+		if _, _, err := NormalizeACLActions(bad); err == nil {
+			t.Fatalf("NormalizeACLActions(%q) expected error", bad)
+		}
+	}
+	if got := ExtractPipelineNameFromRunFilePath("db://pipeline/id/42(fin_daily)"); got != "fin_daily" {
+		t.Fatalf("expected fin_daily, got %q", got)
+	}
+	if got := ExtractPipelineNameFromRunFilePath("db://pipeline/id/42"); got != "" {
+		t.Fatalf("expected empty name when parens absent, got %q", got)
+	}
+	if got := ExtractPipelineNameFromRunFilePath(""); got != "" {
+		t.Fatalf("expected empty name for blank path, got %q", got)
+	}
+
+	// 3. Full HTTP & store exercise for API Groups, Pipeline Groups, ACLs, Effective Permissions, and Bootstrap
+	apiSrv, ts, _ := setupTestServer(t)
+	client := ts.Client()
+	ctx := context.Background()
+
+	doReq := func(method, p, body string) (int, []byte) {
+		t.Helper()
+		var rdr io.Reader
+		if body != "" {
+			rdr = strings.NewReader(body)
+		}
+		req, err := http.NewRequest(method, ts.URL+p, rdr)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		req.SetBasicAuth("admin_user", "admin_pass")
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("Do(%s %s): %v", method, p, err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, b
+	}
+
+	// API Groups CRUD + members + error paths
+	if c, _ := doReq(http.MethodPost, "/api/v1/groups", `{"name":"ops_team","description":"Ops","members":["read_user"]}`); c != http.StatusCreated {
+		t.Fatalf("expected 201 creating ops_team with initial member, got %d", c)
+	}
+	// Upsert existing API group (exercises UPDATE branch)
+	if c, _ := doReq(http.MethodPost, "/api/v1/groups", `{"name":"ops_team","description":"Ops Updated","members":["read_user"]}`); c != http.StatusCreated {
+		t.Fatalf("expected 201 upserting ops_team, got %d", c)
+	}
+	if c, b := doReq(http.MethodGet, "/api/v1/groups", ""); c != http.StatusOK || !strings.Contains(string(b), "ops_team") {
+		t.Fatalf("expected 200 listing groups, got %d: %s", c, string(b))
+	}
+	if c, _ := doReq(http.MethodGet, "/api/v1/groups/", ""); c != http.StatusOK {
+		t.Fatalf("expected 200 on /api/v1/groups/ trailing slash, got %d", c)
+	}
+	if c, _ := doReq(http.MethodGet, "/api/v1/groups/ops_team", ""); c != http.StatusOK {
+		t.Fatalf("expected 200 reading ops_team, got %d", c)
+	}
+	if c, _ := doReq(http.MethodGet, "/api/v1/groups/missing_grp", ""); c != http.StatusNotFound {
+		t.Fatalf("expected 404 reading missing group, got %d", c)
+	}
+	if c, _ := doReq(http.MethodPost, "/api/v1/groups", `{bad`); c != http.StatusBadRequest {
+		t.Fatalf("expected 400 invalid JSON on POST /groups, got %d", c)
+	}
+	if c, _ := doReq(http.MethodPost, "/api/v1/groups", `{"name":""}`); c != http.StatusBadRequest {
+		t.Fatalf("expected 400 empty group name, got %d", c)
+	}
+	if c, _ := doReq(http.MethodPut, "/api/v1/groups/ops_team", `{bad`); c != http.StatusBadRequest {
+		t.Fatalf("expected 400 invalid JSON on PUT /groups/ops_team, got %d", c)
+	}
+	if c, _ := doReq(http.MethodDelete, "/api/v1/groups/missing_grp", ""); c != http.StatusNotFound {
+		t.Fatalf("expected 404 deleting missing group, got %d", c)
+	}
+	if c, _ := doReq(http.MethodPatch, "/api/v1/groups", ""); c != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 on PATCH /groups, got %d", c)
+	}
+	if c, _ := doReq(http.MethodPatch, "/api/v1/groups/ops_team", ""); c != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 on PATCH /groups/ops_team, got %d", c)
+	}
+	if c, _ := doReq(http.MethodGet, "/api/v1/groups/ops_team/unknown", ""); c != http.StatusBadRequest {
+		t.Fatalf("expected 400 on unknown group sub-route, got %d", c)
+	}
+	if c, _ := doReq(http.MethodGet, "/api/v1/groups/missing_grp/members", ""); c != http.StatusNotFound {
+		t.Fatalf("expected 404 listing members of missing group, got %d", c)
+	}
+	if c, _ := doReq(http.MethodPost, "/api/v1/groups/ops_team/members", `{bad`); c != http.StatusBadRequest {
+		t.Fatalf("expected 400 invalid JSON adding member, got %d", c)
+	}
+	if c, _ := doReq(http.MethodPost, "/api/v1/groups/ops_team/members", `{}`); c != http.StatusBadRequest {
+		t.Fatalf("expected 400 missing member username, got %d", c)
+	}
+	if c, _ := doReq(http.MethodPost, "/api/v1/groups/missing_grp/members", `{"username":"read_user"}`); c != http.StatusNotFound {
+		t.Fatalf("expected 404 adding member to missing group, got %d", c)
+	}
+	if c, _ := doReq(http.MethodDelete, "/api/v1/groups/ops_team/members", ""); c != http.StatusBadRequest {
+		t.Fatalf("expected 400 deleting member with no username, got %d", c)
+	}
+	if c, _ := doReq(http.MethodDelete, "/api/v1/groups/ops_team/members/nobody", ""); c != http.StatusNotFound {
+		t.Fatalf("expected 404 removing non-member, got %d", c)
+	}
+	if c, _ := doReq(http.MethodPatch, "/api/v1/groups/ops_team/members", ""); c != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 on PATCH /groups/ops_team/members, got %d", c)
+	}
+
+	// Pipeline Groups CRUD + pipelines + error paths
+	if c, _ := doReq(http.MethodPost, "/api/v1/pipeline-groups", `{"name":"etl_pg","description":"ETL","name_pattern":"etl_*","pipelines":["etl_one"]}`); c != http.StatusCreated {
+		t.Fatalf("expected 201 creating etl_pg, got %d", c)
+	}
+	if c, _ := doReq(http.MethodPut, "/api/v1/pipeline-groups/etl_pg", `{"description":"ETL v2","name_pattern":"etl_*","pipelines":["etl_one"]}`); c != http.StatusOK {
+		t.Fatalf("expected 200 updating etl_pg, got %d", c)
+	}
+	if c, b := doReq(http.MethodGet, "/api/v1/pipeline-groups", ""); c != http.StatusOK || !strings.Contains(string(b), "etl_pg") {
+		t.Fatalf("expected 200 listing pipeline-groups, got %d: %s", c, string(b))
+	}
+	if c, _ := doReq(http.MethodGet, "/api/v1/pipeline-groups/", ""); c != http.StatusOK {
+		t.Fatalf("expected 200 on /api/v1/pipeline-groups/, got %d", c)
+	}
+	if c, _ := doReq(http.MethodGet, "/api/v1/pipeline-groups/etl_pg", ""); c != http.StatusOK {
+		t.Fatalf("expected 200 reading etl_pg, got %d", c)
+	}
+	if c, _ := doReq(http.MethodGet, "/api/v1/pipeline-groups/etl_pg/pipelines", ""); c != http.StatusOK {
+		t.Fatalf("expected 200 listing pipelines in etl_pg, got %d", c)
+	}
+	if c, _ := doReq(http.MethodPost, "/api/v1/pipeline-groups/etl_pg/pipelines", `{"pipeline":"etl_two"}`); c != http.StatusCreated {
+		t.Fatalf("expected 201 adding etl_two to etl_pg, got %d", c)
+	}
+	if c, _ := doReq(http.MethodDelete, "/api/v1/pipeline-groups/etl_pg/pipelines/etl_two", ""); c != http.StatusOK {
+		t.Fatalf("expected 200 removing etl_two from etl_pg, got %d", c)
+	}
+	if c, _ := doReq(http.MethodPost, "/api/v1/pipeline-groups", `{"name":"bad_pat","name_pattern":"["}`); c != http.StatusBadRequest {
+		t.Fatalf("expected 400 for malformed glob pattern, got %d", c)
+	}
+	if c, _ := doReq(http.MethodPost, "/api/v1/pipeline-groups", `{"name":""}`); c != http.StatusBadRequest {
+		t.Fatalf("expected 400 for empty pipeline group name, got %d", c)
+	}
+	if c, _ := doReq(http.MethodDelete, "/api/v1/pipeline-groups/etl_pg", ""); c != http.StatusOK {
+		t.Fatalf("expected 200 deleting etl_pg, got %d", c)
+	}
+	if c, _ := doReq(http.MethodDelete, "/api/v1/pipeline-groups/etl_pg", ""); c != http.StatusNotFound {
+		t.Fatalf("expected 404 deleting already-deleted etl_pg, got %d", c)
+	}
+
+	// ACLs upsert update, wildcard validation, query filters, error branches, and EffectivePermissions
+	c, aclBytes := doReq(http.MethodPost, "/api/v1/acls", `{"principal_type":"group","principal_name":"ops_team","target_type":"*","permissions":"read"}`)
+	if c != http.StatusCreated {
+		t.Fatalf("expected 201 creating wildcard ACL, got %d: %s", c, string(aclBytes))
+	}
+	// Upsert same principal+target+effect updates existing ACL row in place
+	if c, _ := doReq(http.MethodPost, "/api/v1/acls", `{"principal_type":"group","principal_name":"ops_team","target_type":"*","target_name":"*","permissions":"read,execute","description":"Updated"}`); c != http.StatusCreated {
+		t.Fatalf("expected 201 updating existing ACL via upsert, got %d", c)
+	}
+	if c, _ := doReq(http.MethodGet, "/api/v1/acls?principal_type=group&principal_name=ops_team&target_type=*&target_name=*", ""); c != http.StatusOK {
+		t.Fatalf("expected 200 filtering ACLs by all 4 params, got %d", c)
+	}
+	if c, _ := doReq(http.MethodGet, "/api/v1/acls/", ""); c != http.StatusOK {
+		t.Fatalf("expected 200 on /api/v1/acls/, got %d", c)
+	}
+	for _, badACL := range []string{
+		`{bad`,
+		`{"principal_type":"bad","principal_name":"u","target_type":"*","permissions":"read"}`,
+		`{"principal_type":"user","principal_name":"","target_type":"*","permissions":"read"}`,
+		`{"principal_type":"user","principal_name":"u","target_type":"bad","permissions":"read"}`,
+		`{"principal_type":"user","principal_name":"u","target_type":"*","target_name":"not_star","permissions":"read"}`,
+		`{"principal_type":"user","principal_name":"u","target_type":"pipeline","target_name":"","permissions":"read"}`,
+		`{"principal_type":"user","principal_name":"u","target_type":"*","permissions":"read","effect":"maybe"}`,
+	} {
+		if code, _ := doReq(http.MethodPost, "/api/v1/acls", badACL); code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for invalid ACL %s, got %d", badACL, code)
+		}
+	}
+	if c, _ := doReq(http.MethodPatch, "/api/v1/acls", ""); c != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 on PATCH /acls, got %d", c)
+	}
+	if c, _ := doReq(http.MethodPut, "/api/v1/acls/notanint", `{}`); c != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid ACL ID, got %d", c)
+	}
+	if c, _ := doReq(http.MethodPut, "/api/v1/acls/99999", `{"principal_type":"user","principal_name":"u","target_type":"*","permissions":"read"}`); c != http.StatusNotFound {
+		t.Fatalf("expected 404 updating missing ACL ID, got %d", c)
+	}
+	if c, _ := doReq(http.MethodPut, "/api/v1/acls/1", `{bad`); c != http.StatusBadRequest {
+		t.Fatalf("expected 400 invalid JSON on PUT /acls/1, got %d", c)
+	}
+	if c, _ := doReq(http.MethodPut, "/api/v1/acls/1", `{"principal_type":"bad"}`); c != http.StatusBadRequest {
+		t.Fatalf("expected 400 invalid rule on PUT /acls/1, got %d", c)
+	}
+	if c, _ := doReq(http.MethodDelete, "/api/v1/acls/99999", ""); c != http.StatusNotFound {
+		t.Fatalf("expected 404 deleting missing ACL ID, got %d", c)
+	}
+	if c, _ := doReq(http.MethodPatch, "/api/v1/acls/1", ""); c != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 on PATCH /acls/1, got %d", c)
+	}
+	if c, _ := doReq(http.MethodPost, "/api/v1/permissions/effective", ""); c != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 on POST /permissions/effective, got %d", c)
+	}
+	if c, _ := doReq(http.MethodGet, "/api/v1/permissions/effective?groups=ops_team", ""); c != http.StatusOK {
+		t.Fatalf("expected 200 simulating groups on /permissions/effective, got %d", c)
+	}
+
+	// Exercise ComputeEffectivePermissions, pipeline creation with non-existent group, PUT by ID with groups, and user deletion cleanup
+	if c, _ := doReq(http.MethodPost, "/api/v1/artifacts/pipeline", `{"name":"p_bad_grp","group":"nonexistent_pg","content":`+mustJSONString(samplePipelineXML)+`}`); c != http.StatusBadRequest {
+		t.Fatalf("expected 400 creating pipeline in nonexistent group, got %d", c)
+	}
+	_, _ = doReq(http.MethodPost, "/api/v1/pipeline-groups", `{"name":"valid_pg"}`)
+	_, pBytes := doReq(http.MethodPost, "/api/v1/artifacts/pipeline", `{"name":"p_by_id_grp","content":`+mustJSONString(samplePipelineXML)+`}`)
+	var pRec ArtifactRecord
+	_ = json.Unmarshal(pBytes, &pRec)
+	if c, _ := doReq(http.MethodPut, fmt.Sprintf("/api/v1/artifacts/pipeline/id/%d", pRec.ID), `{"description":"upd","group":"valid_pg","content":`+mustJSONString(samplePipelineXML)+`}`); c != http.StatusOK {
+		t.Fatalf("expected 200 updating pipeline by ID with group, got %d", c)
+	}
+	if perms, err := apiSrv.ComputeEffectivePermissions(ctx, &APIUser{Username: "read_user", Permission: PermScoped, Groups: []string{"ops_team"}, IsActive: true}); err != nil || len(perms) == 0 {
+		t.Fatalf("ComputeEffectivePermissions failed: len=%d err=%v", len(perms), err)
+	}
+	if c, _ := doReq(http.MethodDelete, "/api/v1/users/read_user", ""); c != http.StatusOK {
+		t.Fatalf("expected 200 deleting read_user (triggering CleanupUserReferences), got %d", c)
+	}
+
+	// 4. Exercise configureLogOutput("") and runAPIServer bootstrap user paths
+	if lf, err := configureLogOutput(""); err != nil || lf != nil {
+		t.Fatalf("expected nil,nil for empty log path, got %v, %v", lf, err)
+	}
+	if err := runAPIServer(ctx, &ServerConfig{
+		ConnectionString: apiSrv.cfg.ConnectionString,
+		ListenAddr:       "127.0.0.1:0",
+		BootstrapUser:    "boot_admin",
+		BootstrapPass:    "",
+	}, nil); err == nil {
+		t.Fatalf("expected error when BootstrapUser is set without BootstrapPass")
+	}
+	bootCtx, bootCancel := context.WithCancel(context.Background())
+	bootErrCh := make(chan error, 1)
+	go func() {
+		bootErrCh <- runAPIServer(bootCtx, &ServerConfig{
+			ConnectionString: apiSrv.cfg.ConnectionString,
+			ListenAddr:       "127.0.0.1:0",
+			BootstrapUser:    "boot_admin",
+			BootstrapPass:    "BootPass!123",
+			BootstrapPerm:    PermAll,
+		}, func() {
+			bootCancel()
+		})
+	}()
+	if err := <-bootErrCh; err != nil {
+		t.Fatalf("runAPIServer with bootstrap user failed: %v", err)
+	}
+}

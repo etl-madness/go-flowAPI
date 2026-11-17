@@ -340,33 +340,203 @@ func (s *APIServer) HasWindowsACLOrGroupRegistration(ctx context.Context, window
 	return len(matched) > 0, matched
 }
 
+type groupStoreSpec struct {
+	groupTable  string
+	memberTable string
+	memberCol   string
+	aclTypeCol  string
+	aclTypeVal  string
+	aclNameCol  string
+	groupLabel  string
+}
+
+var (
+	apiGroupStoreSpec = groupStoreSpec{
+		groupTable:  TableAPIGroups,
+		memberTable: TableAPIUserGroups,
+		memberCol:   "username",
+		aclTypeCol:  "principal_type",
+		aclTypeVal:  PrincipalGroup,
+		aclNameCol:  "principal_name",
+		groupLabel:  "group",
+	}
+	pipelineGroupStoreSpec = groupStoreSpec{
+		groupTable:  TablePipelineGroups,
+		memberTable: TablePipelineGroupMembers,
+		memberCol:   "pipeline_name",
+		aclTypeCol:  "target_type",
+		aclTypeVal:  TargetPipelineGroup,
+		aclNameCol:  "target_name",
+		groupLabel:  "pipeline group",
+	}
+)
+
+type groupRowUpsert struct {
+	tableKey   string
+	name       string
+	label      string
+	updateCols []string
+	updateArgs []any
+	insertCols []string
+	insertArgs []any
+}
+
+func (s *APIServer) upsertNamedGroupRow(ctx context.Context, op groupRowUpsert) error {
+	table := resolveTableName(s.dialect, op.tableKey)
+	var existingID int64
+	checkQuery := fmt.Sprintf("SELECT id FROM %s WHERE LOWER(name) = LOWER(%s)", table, Placeholder(s.dialect, 1))
+	err := s.db.QueryRowContext(ctx, checkQuery, op.name).Scan(&existingID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("failed querying %s: %w", table, err)
+	}
+
+	if err == nil && existingID > 0 {
+		setParts := make([]string, len(op.updateCols))
+		for i, col := range op.updateCols {
+			setParts[i] = fmt.Sprintf("%s = %s", col, Placeholder(s.dialect, i+1))
+		}
+		updQuery := fmt.Sprintf("UPDATE %s SET %s WHERE id = %s", table, strings.Join(setParts, ", "), Placeholder(s.dialect, len(op.updateCols)+1))
+		args := append(append([]any{}, op.updateArgs...), existingID)
+		if _, err := s.db.ExecContext(ctx, updQuery, args...); err != nil {
+			return fmt.Errorf("failed updating %s %q in %s: %w", op.label, op.name, table, err)
+		}
+		return nil
+	}
+
+	insQuery := BuildInsertQuery(s.dialect, op.tableKey, op.insertCols)
+	if _, err := s.db.ExecContext(ctx, insQuery, op.insertArgs...); err != nil {
+		return fmt.Errorf("failed creating %s %q in %s: %w", op.label, op.name, table, err)
+	}
+	return nil
+}
+
+func (s *APIServer) queryGroupMemberSlice(ctx context.Context, spec groupStoreSpec, groupName string) []string {
+	memTable := resolveTableName(s.dialect, spec.memberTable)
+	memQuery := fmt.Sprintf("SELECT %s FROM %s WHERE LOWER(group_name) = LOWER(%s) ORDER BY %s ASC", spec.memberCol, memTable, Placeholder(s.dialect, 1), spec.memberCol)
+	rows, err := s.db.QueryContext(ctx, memQuery, groupName)
+	members := []string{}
+	if err != nil {
+		return members
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var val string
+		if err := rows.Scan(&val); err == nil {
+			members = append(members, val)
+		}
+	}
+	return members
+}
+
+func (s *APIServer) populateGroupMembers(ctx context.Context, spec groupStoreSpec, assign func(groupLower, member string)) {
+	memTable := resolveTableName(s.dialect, spec.memberTable)
+	mRows, err := s.db.QueryContext(ctx, fmt.Sprintf("SELECT group_name, %s FROM %s ORDER BY %s ASC", spec.memberCol, memTable, spec.memberCol))
+	if err != nil {
+		return
+	}
+	defer mRows.Close()
+	for mRows.Next() {
+		var gName, mName string
+		if err := mRows.Scan(&gName, &mName); err == nil {
+			assign(strings.ToLower(strings.TrimSpace(gName)), mName)
+		}
+	}
+}
+
+func (s *APIServer) deleteNamedGroup(ctx context.Context, name string, spec groupStoreSpec) error {
+	name = strings.TrimSpace(name)
+	table := resolveTableName(s.dialect, spec.groupTable)
+	res, err := s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE LOWER(name) = LOWER(%s)", table, Placeholder(s.dialect, 1)), name)
+	if err != nil {
+		return err
+	}
+	if affected, err := res.RowsAffected(); err == nil && affected == 0 {
+		return ErrArtifactNotFound
+	}
+	s.cleanupEntityReferences(ctx, groupStoreSpec{
+		memberTable: spec.memberTable,
+		memberCol:   "group_name",
+		aclTypeCol:  spec.aclTypeCol,
+		aclTypeVal:  spec.aclTypeVal,
+		aclNameCol:  spec.aclNameCol,
+	}, name)
+	return nil
+}
+
+func (s *APIServer) addNamedGroupMember(ctx context.Context, groupName, memberName string, spec groupStoreSpec, lookupGroupName func(context.Context, string) (string, error)) error {
+	groupName = strings.TrimSpace(groupName)
+	memberName = strings.TrimSpace(memberName)
+	if groupName == "" || memberName == "" {
+		return fmt.Errorf("group_name and %s are required", spec.memberCol)
+	}
+
+	canonicalGroup, err := lookupGroupName(ctx, groupName)
+	if err != nil {
+		return fmt.Errorf("%s %q not found: %w", spec.groupLabel, groupName, err)
+	}
+
+	memTable := resolveTableName(s.dialect, spec.memberTable)
+	checkQuery := fmt.Sprintf(
+		"SELECT %s FROM %s WHERE LOWER(group_name) = LOWER(%s) AND LOWER(%s) = LOWER(%s)",
+		spec.memberCol, memTable, Placeholder(s.dialect, 1), spec.memberCol, Placeholder(s.dialect, 2),
+	)
+	var existing string
+	if err := s.db.QueryRowContext(ctx, checkQuery, canonicalGroup, memberName).Scan(&existing); err == nil {
+		return nil
+	}
+
+	insQuery := BuildInsertQuery(s.dialect, spec.memberTable, []string{"group_name", spec.memberCol})
+	_, err = s.db.ExecContext(ctx, insQuery, canonicalGroup, memberName)
+	return err
+}
+
+func (s *APIServer) removeNamedGroupMember(ctx context.Context, groupName, memberName string, spec groupStoreSpec) error {
+	groupName = strings.TrimSpace(groupName)
+	memberName = strings.TrimSpace(memberName)
+	memTable := resolveTableName(s.dialect, spec.memberTable)
+	query := fmt.Sprintf(
+		"DELETE FROM %s WHERE LOWER(group_name) = LOWER(%s) AND LOWER(%s) = LOWER(%s)",
+		memTable, Placeholder(s.dialect, 1), spec.memberCol, Placeholder(s.dialect, 2),
+	)
+	res, err := s.db.ExecContext(ctx, query, groupName, memberName)
+	if err != nil {
+		return err
+	}
+	if affected, err := res.RowsAffected(); err == nil && affected == 0 {
+		return ErrArtifactNotFound
+	}
+	return nil
+}
+
+func (s *APIServer) cleanupEntityReferences(ctx context.Context, spec groupStoreSpec, target string) {
+	if s == nil || s.db == nil || strings.TrimSpace(target) == "" {
+		return
+	}
+	p1 := Placeholder(s.dialect, 1)
+	memTable := resolveTableName(s.dialect, spec.memberTable)
+	_, _ = s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE LOWER(%s) = LOWER(%s)", memTable, spec.memberCol, p1), target)
+
+	aclTable := resolveTableName(s.dialect, TablePipelineACL)
+	_, _ = s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE LOWER(%s) = '%s' AND LOWER(%s) = LOWER(%s)", aclTable, spec.aclTypeCol, spec.aclTypeVal, spec.aclNameCol, p1), target)
+}
+
 // UpsertAPIGroup creates or updates a user group in TableAPIGroups and optionally adds initial members.
 func (s *APIServer) UpsertAPIGroup(ctx context.Context, name, description string, members []string) (*APIGroup, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil, fmt.Errorf("group name is required")
 	}
-
-	table := resolveTableName(s.dialect, TableAPIGroups)
-	var existingID int64
-	checkQuery := fmt.Sprintf("SELECT id FROM %s WHERE LOWER(name) = LOWER(%s)", table, Placeholder(s.dialect, 1))
-	err := s.db.QueryRowContext(ctx, checkQuery, name).Scan(&existingID)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("failed querying %s: %w", table, err)
+	if err := s.upsertNamedGroupRow(ctx, groupRowUpsert{
+		tableKey:   TableAPIGroups,
+		name:       name,
+		label:      apiGroupStoreSpec.groupLabel,
+		updateCols: []string{"description"},
+		updateArgs: []any{description},
+		insertCols: []string{"name", "description"},
+		insertArgs: []any{name, description},
+	}); err != nil {
+		return nil, err
 	}
-
-	if err == nil && existingID > 0 {
-		updQuery := fmt.Sprintf("UPDATE %s SET description = %s WHERE id = %s", table, Placeholder(s.dialect, 1), Placeholder(s.dialect, 2))
-		if _, err := s.db.ExecContext(ctx, updQuery, description, existingID); err != nil {
-			return nil, fmt.Errorf("failed updating group %q in %s: %w", name, table, err)
-		}
-	} else {
-		insQuery := BuildInsertQuery(s.dialect, TableAPIGroups, []string{"name", "description"})
-		if _, err := s.db.ExecContext(ctx, insQuery, name, description); err != nil {
-			return nil, fmt.Errorf("failed creating group %q in %s: %w", name, table, err)
-		}
-	}
-
 	for _, m := range members {
 		if trimmed := strings.TrimSpace(m); trimmed != "" {
 			if err := s.AddUserToGroup(ctx, name, trimmed); err != nil {
@@ -374,7 +544,6 @@ func (s *APIServer) UpsertAPIGroup(ctx context.Context, name, description string
 			}
 		}
 	}
-
 	return s.GetAPIGroup(ctx, name)
 }
 
@@ -391,22 +560,7 @@ func (s *APIServer) GetAPIGroup(ctx context.Context, name string) (*APIGroup, er
 		}
 		return nil, err
 	}
-
-	memTable := resolveTableName(s.dialect, TableAPIUserGroups)
-	memQuery := fmt.Sprintf("SELECT username FROM %s WHERE LOWER(group_name) = LOWER(%s) ORDER BY username ASC", memTable, Placeholder(s.dialect, 1))
-	rows, err := s.db.QueryContext(ctx, memQuery, grp.Name)
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var u string
-			if err := rows.Scan(&u); err == nil {
-				grp.Members = append(grp.Members, u)
-			}
-		}
-	}
-	if grp.Members == nil {
-		grp.Members = []string{}
-	}
+	grp.Members = s.queryGroupMemberSlice(ctx, apiGroupStoreSpec, grp.Name)
 	return &grp, nil
 }
 
@@ -422,7 +576,7 @@ func (s *APIServer) ListAPIGroups(ctx context.Context) ([]APIGroup, error) {
 	}
 	defer rows.Close()
 
-	var groups []APIGroup
+	groups := []APIGroup{}
 	idxByLower := make(map[string]int)
 	for rows.Next() {
 		var g APIGroup
@@ -436,91 +590,33 @@ func (s *APIServer) ListAPIGroups(ctx context.Context) ([]APIGroup, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if groups == nil {
-		return []APIGroup{}, nil
-	}
-
-	memTable := resolveTableName(s.dialect, TableAPIUserGroups)
-	mRows, mErr := s.db.QueryContext(ctx, fmt.Sprintf("SELECT group_name, username FROM %s ORDER BY username ASC", memTable))
-	if mErr == nil {
-		defer mRows.Close()
-		for mRows.Next() {
-			var gName, uName string
-			if err := mRows.Scan(&gName, &uName); err == nil {
-				if idx, ok := idxByLower[strings.ToLower(strings.TrimSpace(gName))]; ok {
-					groups[idx].Members = append(groups[idx].Members, uName)
-				}
-			}
+	s.populateGroupMembers(ctx, apiGroupStoreSpec, func(gLower, member string) {
+		if idx, ok := idxByLower[gLower]; ok {
+			groups[idx].Members = append(groups[idx].Members, member)
 		}
-	}
+	})
 	return groups, nil
 }
 
 // DeleteAPIGroup deletes a user group and cleans up its memberships and ACL rules.
 func (s *APIServer) DeleteAPIGroup(ctx context.Context, name string) error {
-	name = strings.TrimSpace(name)
-	table := resolveTableName(s.dialect, TableAPIGroups)
-	res, err := s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE LOWER(name) = LOWER(%s)", table, Placeholder(s.dialect, 1)), name)
-	if err != nil {
-		return err
-	}
-	if affected, err := res.RowsAffected(); err == nil && affected == 0 {
-		return ErrArtifactNotFound
-	}
-
-	memTable := resolveTableName(s.dialect, TableAPIUserGroups)
-	_, _ = s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE LOWER(group_name) = LOWER(%s)", memTable, Placeholder(s.dialect, 1)), name)
-
-	aclTable := resolveTableName(s.dialect, TablePipelineACL)
-	_, _ = s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE LOWER(principal_type) = 'group' AND LOWER(principal_name) = LOWER(%s)", aclTable, Placeholder(s.dialect, 1)), name)
-	return nil
+	return s.deleteNamedGroup(ctx, name, apiGroupStoreSpec)
 }
 
 // AddUserToGroup adds a username to an API group (idempotent).
 func (s *APIServer) AddUserToGroup(ctx context.Context, groupName, username string) error {
-	groupName = strings.TrimSpace(groupName)
-	username = strings.TrimSpace(username)
-	if groupName == "" || username == "" {
-		return fmt.Errorf("group_name and username are required")
-	}
-
-	grp, err := s.GetAPIGroup(ctx, groupName)
-	if err != nil {
-		return fmt.Errorf("group %q not found: %w", groupName, err)
-	}
-
-	memTable := resolveTableName(s.dialect, TableAPIUserGroups)
-	checkQuery := fmt.Sprintf(
-		"SELECT username FROM %s WHERE LOWER(group_name) = LOWER(%s) AND LOWER(username) = LOWER(%s)",
-		memTable, Placeholder(s.dialect, 1), Placeholder(s.dialect, 2),
-	)
-	var existing string
-	if err := s.db.QueryRowContext(ctx, checkQuery, grp.Name, username).Scan(&existing); err == nil {
-		return nil // already a member
-	}
-
-	insQuery := BuildInsertQuery(s.dialect, TableAPIUserGroups, []string{"group_name", "username"})
-	_, err = s.db.ExecContext(ctx, insQuery, grp.Name, username)
-	return err
+	return s.addNamedGroupMember(ctx, groupName, username, apiGroupStoreSpec, func(c context.Context, g string) (string, error) {
+		grp, err := s.GetAPIGroup(c, g)
+		if err != nil {
+			return "", err
+		}
+		return grp.Name, nil
+	})
 }
 
 // RemoveUserFromGroup removes a username from an API group.
 func (s *APIServer) RemoveUserFromGroup(ctx context.Context, groupName, username string) error {
-	groupName = strings.TrimSpace(groupName)
-	username = strings.TrimSpace(username)
-	memTable := resolveTableName(s.dialect, TableAPIUserGroups)
-	query := fmt.Sprintf(
-		"DELETE FROM %s WHERE LOWER(group_name) = LOWER(%s) AND LOWER(username) = LOWER(%s)",
-		memTable, Placeholder(s.dialect, 1), Placeholder(s.dialect, 2),
-	)
-	res, err := s.db.ExecContext(ctx, query, groupName, username)
-	if err != nil {
-		return err
-	}
-	if affected, err := res.RowsAffected(); err == nil && affected == 0 {
-		return ErrArtifactNotFound
-	}
-	return nil
+	return s.removeNamedGroupMember(ctx, groupName, username, apiGroupStoreSpec)
 }
 
 // =============================================================================
@@ -539,30 +635,17 @@ func (s *APIServer) UpsertPipelineGroup(ctx context.Context, name, description, 
 			return nil, fmt.Errorf("invalid name_pattern %q: %w", namePattern, err)
 		}
 	}
-
-	table := resolveTableName(s.dialect, TablePipelineGroups)
-	var existingID int64
-	checkQuery := fmt.Sprintf("SELECT id FROM %s WHERE LOWER(name) = LOWER(%s)", table, Placeholder(s.dialect, 1))
-	err := s.db.QueryRowContext(ctx, checkQuery, name).Scan(&existingID)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("failed querying %s: %w", table, err)
+	if err := s.upsertNamedGroupRow(ctx, groupRowUpsert{
+		tableKey:   TablePipelineGroups,
+		name:       name,
+		label:      pipelineGroupStoreSpec.groupLabel,
+		updateCols: []string{"description", "name_pattern"},
+		updateArgs: []any{description, namePattern},
+		insertCols: []string{"name", "description", "name_pattern"},
+		insertArgs: []any{name, description, namePattern},
+	}); err != nil {
+		return nil, err
 	}
-
-	if err == nil && existingID > 0 {
-		updQuery := fmt.Sprintf(
-			"UPDATE %s SET description = %s, name_pattern = %s WHERE id = %s",
-			table, Placeholder(s.dialect, 1), Placeholder(s.dialect, 2), Placeholder(s.dialect, 3),
-		)
-		if _, err := s.db.ExecContext(ctx, updQuery, description, namePattern, existingID); err != nil {
-			return nil, fmt.Errorf("failed updating pipeline group %q: %w", name, err)
-		}
-	} else {
-		insQuery := BuildInsertQuery(s.dialect, TablePipelineGroups, []string{"name", "description", "name_pattern"})
-		if _, err := s.db.ExecContext(ctx, insQuery, name, description, namePattern); err != nil {
-			return nil, fmt.Errorf("failed creating pipeline group %q: %w", name, err)
-		}
-	}
-
 	for _, p := range pipelines {
 		if trimmed := strings.TrimSpace(p); trimmed != "" {
 			if err := s.AddPipelineToGroup(ctx, name, trimmed); err != nil {
@@ -570,7 +653,6 @@ func (s *APIServer) UpsertPipelineGroup(ctx context.Context, name, description, 
 			}
 		}
 	}
-
 	return s.GetPipelineGroup(ctx, name)
 }
 
@@ -590,22 +672,7 @@ func (s *APIServer) GetPipelineGroup(ctx context.Context, name string) (*Pipelin
 		}
 		return nil, err
 	}
-
-	memTable := resolveTableName(s.dialect, TablePipelineGroupMembers)
-	memQuery := fmt.Sprintf("SELECT pipeline_name FROM %s WHERE LOWER(group_name) = LOWER(%s) ORDER BY pipeline_name ASC", memTable, Placeholder(s.dialect, 1))
-	rows, err := s.db.QueryContext(ctx, memQuery, grp.Name)
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var p string
-			if err := rows.Scan(&p); err == nil {
-				grp.Pipelines = append(grp.Pipelines, p)
-			}
-		}
-	}
-	if grp.Pipelines == nil {
-		grp.Pipelines = []string{}
-	}
+	grp.Pipelines = s.queryGroupMemberSlice(ctx, pipelineGroupStoreSpec, grp.Name)
 	return &grp, nil
 }
 
@@ -621,7 +688,7 @@ func (s *APIServer) ListPipelineGroups(ctx context.Context) ([]PipelineGroup, er
 	}
 	defer rows.Close()
 
-	var groups []PipelineGroup
+	groups := []PipelineGroup{}
 	idxByLower := make(map[string]int)
 	for rows.Next() {
 		var g PipelineGroup
@@ -635,115 +702,55 @@ func (s *APIServer) ListPipelineGroups(ctx context.Context) ([]PipelineGroup, er
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if groups == nil {
-		return []PipelineGroup{}, nil
-	}
-
-	memTable := resolveTableName(s.dialect, TablePipelineGroupMembers)
-	mRows, mErr := s.db.QueryContext(ctx, fmt.Sprintf("SELECT group_name, pipeline_name FROM %s ORDER BY pipeline_name ASC", memTable))
-	if mErr == nil {
-		defer mRows.Close()
-		for mRows.Next() {
-			var gName, pName string
-			if err := mRows.Scan(&gName, &pName); err == nil {
-				if idx, ok := idxByLower[strings.ToLower(strings.TrimSpace(gName))]; ok {
-					groups[idx].Pipelines = append(groups[idx].Pipelines, pName)
-				}
-			}
+	s.populateGroupMembers(ctx, pipelineGroupStoreSpec, func(gLower, pipeline string) {
+		if idx, ok := idxByLower[gLower]; ok {
+			groups[idx].Pipelines = append(groups[idx].Pipelines, pipeline)
 		}
-	}
+	})
 	return groups, nil
 }
 
 // DeletePipelineGroup deletes a pipeline group and cleans up its memberships and ACL rules.
 func (s *APIServer) DeletePipelineGroup(ctx context.Context, name string) error {
-	name = strings.TrimSpace(name)
-	table := resolveTableName(s.dialect, TablePipelineGroups)
-	res, err := s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE LOWER(name) = LOWER(%s)", table, Placeholder(s.dialect, 1)), name)
-	if err != nil {
-		return err
-	}
-	if affected, err := res.RowsAffected(); err == nil && affected == 0 {
-		return ErrArtifactNotFound
-	}
-
-	memTable := resolveTableName(s.dialect, TablePipelineGroupMembers)
-	_, _ = s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE LOWER(group_name) = LOWER(%s)", memTable, Placeholder(s.dialect, 1)), name)
-
-	aclTable := resolveTableName(s.dialect, TablePipelineACL)
-	_, _ = s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE LOWER(target_type) = 'pipeline_group' AND LOWER(target_name) = LOWER(%s)", aclTable, Placeholder(s.dialect, 1)), name)
-	return nil
+	return s.deleteNamedGroup(ctx, name, pipelineGroupStoreSpec)
 }
 
 // AddPipelineToGroup assigns a pipeline name to an existing pipeline group (idempotent).
 func (s *APIServer) AddPipelineToGroup(ctx context.Context, groupName, pipelineName string) error {
-	groupName = strings.TrimSpace(groupName)
-	pipelineName = strings.TrimSpace(pipelineName)
-	if groupName == "" || pipelineName == "" {
-		return fmt.Errorf("group_name and pipeline_name are required")
-	}
-
-	grp, err := s.GetPipelineGroup(ctx, groupName)
-	if err != nil {
-		return fmt.Errorf("pipeline group %q not found: %w", groupName, err)
-	}
-
-	memTable := resolveTableName(s.dialect, TablePipelineGroupMembers)
-	checkQuery := fmt.Sprintf(
-		"SELECT pipeline_name FROM %s WHERE LOWER(group_name) = LOWER(%s) AND LOWER(pipeline_name) = LOWER(%s)",
-		memTable, Placeholder(s.dialect, 1), Placeholder(s.dialect, 2),
-	)
-	var existing string
-	if err := s.db.QueryRowContext(ctx, checkQuery, grp.Name, pipelineName).Scan(&existing); err == nil {
-		return nil // already assigned
-	}
-
-	insQuery := BuildInsertQuery(s.dialect, TablePipelineGroupMembers, []string{"group_name", "pipeline_name"})
-	_, err = s.db.ExecContext(ctx, insQuery, grp.Name, pipelineName)
-	return err
+	return s.addNamedGroupMember(ctx, groupName, pipelineName, pipelineGroupStoreSpec, func(c context.Context, g string) (string, error) {
+		grp, err := s.GetPipelineGroup(c, g)
+		if err != nil {
+			return "", err
+		}
+		return grp.Name, nil
+	})
 }
 
 // RemovePipelineFromGroup unassigns a pipeline from a pipeline group.
 func (s *APIServer) RemovePipelineFromGroup(ctx context.Context, groupName, pipelineName string) error {
-	groupName = strings.TrimSpace(groupName)
-	pipelineName = strings.TrimSpace(pipelineName)
-	memTable := resolveTableName(s.dialect, TablePipelineGroupMembers)
-	query := fmt.Sprintf(
-		"DELETE FROM %s WHERE LOWER(group_name) = LOWER(%s) AND LOWER(pipeline_name) = LOWER(%s)",
-		memTable, Placeholder(s.dialect, 1), Placeholder(s.dialect, 2),
-	)
-	res, err := s.db.ExecContext(ctx, query, groupName, pipelineName)
-	if err != nil {
-		return err
-	}
-	if affected, err := res.RowsAffected(); err == nil && affected == 0 {
-		return ErrArtifactNotFound
-	}
-	return nil
+	return s.removeNamedGroupMember(ctx, groupName, pipelineName, pipelineGroupStoreSpec)
 }
 
 // CleanupPipelineReferences removes group memberships and direct pipeline ACL entries when a pipeline is deleted.
 func (s *APIServer) CleanupPipelineReferences(ctx context.Context, pipelineName string) {
-	if s == nil || s.db == nil || strings.TrimSpace(pipelineName) == "" {
-		return
-	}
-	memTable := resolveTableName(s.dialect, TablePipelineGroupMembers)
-	_, _ = s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE LOWER(pipeline_name) = LOWER(%s)", memTable, Placeholder(s.dialect, 1)), pipelineName)
-
-	aclTable := resolveTableName(s.dialect, TablePipelineACL)
-	_, _ = s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE LOWER(target_type) = 'pipeline' AND LOWER(target_name) = LOWER(%s)", aclTable, Placeholder(s.dialect, 1)), pipelineName)
+	s.cleanupEntityReferences(ctx, groupStoreSpec{
+		memberTable: TablePipelineGroupMembers,
+		memberCol:   "pipeline_name",
+		aclTypeCol:  "target_type",
+		aclTypeVal:  TargetPipeline,
+		aclNameCol:  "target_name",
+	}, pipelineName)
 }
 
 // CleanupUserReferences removes user group memberships and direct user ACL entries when a user is deleted.
 func (s *APIServer) CleanupUserReferences(ctx context.Context, username string) {
-	if s == nil || s.db == nil || strings.TrimSpace(username) == "" {
-		return
-	}
-	memTable := resolveTableName(s.dialect, TableAPIUserGroups)
-	_, _ = s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE LOWER(username) = LOWER(%s)", memTable, Placeholder(s.dialect, 1)), username)
-
-	aclTable := resolveTableName(s.dialect, TablePipelineACL)
-	_, _ = s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE LOWER(principal_type) = 'user' AND LOWER(principal_name) = LOWER(%s)", aclTable, Placeholder(s.dialect, 1)), username)
+	s.cleanupEntityReferences(ctx, groupStoreSpec{
+		memberTable: TableAPIUserGroups,
+		memberCol:   "username",
+		aclTypeCol:  "principal_type",
+		aclTypeVal:  PrincipalUser,
+		aclNameCol:  "principal_name",
+	}, username)
 }
 
 // =============================================================================

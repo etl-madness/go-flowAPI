@@ -122,11 +122,11 @@ func (s *APIServer) authorizeExistingPipelineItem(
 ) bool {
 	if isExport {
 		if r.Method != http.MethodGet {
-			writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
+			writeJSONError(w, http.StatusMethodNotAllowed, errMsgMethodNotAllowed)
 			return false
 		}
 	} else if r.Method != http.MethodGet && r.Method != http.MethodPut && r.Method != http.MethodDelete {
-		writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		writeJSONError(w, http.StatusMethodNotAllowed, errMsgMethodNotAllowed)
 		return false
 	}
 
@@ -179,6 +179,26 @@ func (s *APIServer) authorizeExistingPipelineItem(
 	return s.authorizePipelineOrWrite403(w, r, user, existing.Name, nil, reqAction, start)
 }
 
+const (
+	errMsgMethodNotAllowed = "Method not allowed"
+	fmtMsgInvalidJSON      = "invalid JSON: %v"
+	auditStatusSuccess     = "SUCCESS"
+	auditStatusError       = "ERROR"
+)
+
+func canViewTelemetryForPipelinePath(snap *aclSnapshot, user *APIUser, filePath string, hasGlobalRead, strict bool) bool {
+	pName := ExtractPipelineNameFromRunFilePath(filePath)
+	if pName == "" {
+		return hasGlobalRead
+	}
+	canRead, _ := snap.evaluate(user, pName, nil, ActionRead, strict)
+	if canRead {
+		return true
+	}
+	canExec, _ := snap.evaluate(user, pName, nil, ActionExecute, strict)
+	return canExec
+}
+
 func (s *APIServer) filterRunsForUser(ctx context.Context, user *APIUser, runs []RunSummaryRecord) ([]RunSummaryRecord, error) {
 	if user == nil || !user.IsActive {
 		return []RunSummaryRecord{}, nil
@@ -198,16 +218,7 @@ func (s *APIServer) filterRunsForUser(ctx context.Context, user *APIUser, runs [
 
 	filtered := make([]RunSummaryRecord, 0, len(runs))
 	for _, run := range runs {
-		pName := ExtractPipelineNameFromRunFilePath(run.FilePath)
-		if pName == "" {
-			if hasGlobalRead {
-				filtered = append(filtered, run)
-			}
-			continue
-		}
-		canRead, _ := snap.evaluate(user, pName, nil, ActionRead, strict)
-		canExec, _ := snap.evaluate(user, pName, nil, ActionExecute, strict)
-		if canRead || canExec {
+		if canViewTelemetryForPipelinePath(snap, user, run.FilePath, hasGlobalRead, strict) {
 			filtered = append(filtered, run)
 		}
 	}
@@ -246,22 +257,7 @@ func (s *APIServer) filterEventsForUser(ctx context.Context, user *APIUser, even
 	filtered := make([]PipelineEventRecord, 0, len(events))
 	for _, ev := range events {
 		fp, knownRun := filePathByRunID[ev.RunID]
-		if !knownRun {
-			if hasGlobalRead {
-				filtered = append(filtered, ev)
-			}
-			continue
-		}
-		pName := ExtractPipelineNameFromRunFilePath(fp)
-		if pName == "" {
-			if hasGlobalRead {
-				filtered = append(filtered, ev)
-			}
-			continue
-		}
-		canRead, _ := snap.evaluate(user, pName, nil, ActionRead, strict)
-		canExec, _ := snap.evaluate(user, pName, nil, ActionExecute, strict)
-		if canRead || canExec {
+		if (!knownRun && hasGlobalRead) || (knownRun && canViewTelemetryForPipelinePath(snap, user, fp, hasGlobalRead, strict)) {
 			filtered = append(filtered, ev)
 		}
 	}
@@ -269,56 +265,162 @@ func (s *APIServer) filterEventsForUser(ctx context.Context, user *APIUser, even
 }
 
 // =============================================================================
-// 1. User Groups Endpoints (/api/v1/groups[/{name}[/members[/{username}]]])
+// Shared Named Group HTTP Handler Machinery (API Groups & Pipeline Groups)
 // =============================================================================
 
-func (s *APIServer) handleAPIGroups(w http.ResponseWriter, r *http.Request) {
+type namedGroupHandlerSpec struct {
+	pathPrefix         string
+	memberSubPath      string
+	auditPrefix        string
+	auditType          string
+	collectionKey      string
+	memberListKey      string
+	memberQueryKey     string
+	removedGroupKey    string
+	removedMemberKey   string
+	missingMemberMsg   string
+	missingDeleteMsg   string
+	badSubPathMsg      string
+	listGroups         func(ctx context.Context) (int, any, error)
+	getGroup           func(ctx context.Context, name string) (string, []string, any, error)
+	upsertFromBody     func(ctx context.Context, body io.Reader, overrideName string) (string, string, any, bool, error)
+	deleteGroup        func(ctx context.Context, name string) error
+	parseMemberTargets func(r *http.Request) ([]string, error)
+	addMember          func(ctx context.Context, groupName, member string) error
+	removeMember       func(ctx context.Context, groupName, member string) error
+}
+
+func decodeOptionalJSON(r *http.Request, dst any) error {
+	if r.Body == nil || r.ContentLength == 0 {
+		return nil
+	}
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	return nil
+}
+
+func extractDeleteMemberTarget(queryVal string, extraParts []string) string {
+	target := strings.TrimSpace(queryVal)
+	if target != "" || len(extraParts) == 0 {
+		return target
+	}
+	raw := strings.Join(extraParts, "/")
+	if unescaped, err := url.PathUnescape(raw); err == nil {
+		return strings.TrimSpace(unescaped)
+	}
+	return strings.TrimSpace(raw)
+}
+
+func (s *APIServer) serveNamedGroupCollection(w http.ResponseWriter, r *http.Request, spec namedGroupHandlerSpec) {
 	start := time.Now().UTC()
 	actor := authUsernameFromRequest(r)
 
 	switch r.Method {
 	case http.MethodGet:
-		groups, err := s.ListAPIGroups(r.Context())
+		count, items, err := spec.listGroups(r.Context())
 		if err != nil {
-			s.recordArtifactAudit(r, actor, "group.list", "group", "", http.StatusInternalServerError, "ERROR", start, err.Error())
+			s.recordArtifactAudit(r, actor, spec.auditPrefix+".list", spec.auditType, "", http.StatusInternalServerError, auditStatusError, start, err.Error())
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		s.recordArtifactAudit(r, actor, "group.list", "group", "", http.StatusOK, "SUCCESS", start, "")
-		writeJSON(w, http.StatusOK, map[string]any{"count": len(groups), "groups": groups})
+		s.recordArtifactAudit(r, actor, spec.auditPrefix+".list", spec.auditType, "", http.StatusOK, auditStatusSuccess, start, "")
+		writeJSON(w, http.StatusOK, map[string]any{"count": count, spec.collectionKey: items})
 
 	case http.MethodPost:
-		var body struct {
-			Name        string   `json:"name"`
-			Description string   `json:"description"`
-			Members     []string `json:"members"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
+		attemptedName, canonicalName, grpObj, badJSON, err := spec.upsertFromBody(r.Context(), r.Body, "")
+		if badJSON {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf(fmtMsgInvalidJSON, err))
 			return
 		}
-		grp, err := s.UpsertAPIGroup(r.Context(), body.Name, body.Description, body.Members)
 		if err != nil {
-			s.recordArtifactAudit(r, actor, "group.upsert", "group", body.Name, http.StatusBadRequest, "ERROR", start, err.Error())
+			s.recordArtifactAudit(r, actor, spec.auditPrefix+".upsert", spec.auditType, attemptedName, http.StatusBadRequest, auditStatusError, start, err.Error())
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		s.recordArtifactAudit(r, actor, "group.upsert", "group", grp.Name, http.StatusCreated, "SUCCESS", start, "")
-		writeJSON(w, http.StatusCreated, grp)
+		s.recordArtifactAudit(r, actor, spec.auditPrefix+".upsert", spec.auditType, canonicalName, http.StatusCreated, auditStatusSuccess, start, "")
+		writeJSON(w, http.StatusCreated, grpObj)
 
 	default:
-		writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		writeJSONError(w, http.StatusMethodNotAllowed, errMsgMethodNotAllowed)
 	}
 }
 
-func (s *APIServer) handleAPIGroupByName(w http.ResponseWriter, r *http.Request) {
+func (s *APIServer) serveNamedGroupMembers(w http.ResponseWriter, r *http.Request, groupName string, extraParts []string, start time.Time, spec namedGroupHandlerSpec) {
+	actor := authUsernameFromRequest(r)
+
+	switch r.Method {
+	case http.MethodGet:
+		canonicalName, members, _, err := spec.getGroup(r.Context(), groupName)
+		if err != nil {
+			code := artifactErrorStatusCode(err)
+			s.recordArtifactAudit(r, actor, spec.auditPrefix+".member.list", spec.auditType, groupName, code, auditStatusError, start, err.Error())
+			writeJSONError(w, code, err.Error())
+			return
+		}
+		s.recordArtifactAudit(r, actor, spec.auditPrefix+".member.list", spec.auditType, canonicalName, http.StatusOK, auditStatusSuccess, start, "")
+		writeJSON(w, http.StatusOK, map[string]any{"group": canonicalName, "count": len(members), spec.memberListKey: members})
+
+	case http.MethodPost:
+		targets, err := spec.parseMemberTargets(r)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf(fmtMsgInvalidJSON, err))
+			return
+		}
+		if len(targets) == 0 {
+			writeJSONError(w, http.StatusBadRequest, spec.missingMemberMsg)
+			return
+		}
+		if err := s.addMembersWithAudit(w, r, groupName, targets, start, spec); err != nil {
+			return
+		}
+		_, _, grpObj, _ := spec.getGroup(r.Context(), groupName)
+		s.recordArtifactAudit(r, actor, spec.auditPrefix+".member.add", spec.auditType, groupName, http.StatusCreated, auditStatusSuccess, start, "")
+		writeJSON(w, http.StatusCreated, grpObj)
+
+	case http.MethodDelete:
+		target := extractDeleteMemberTarget(r.URL.Query().Get(spec.memberQueryKey), extraParts)
+		if target == "" {
+			writeJSONError(w, http.StatusBadRequest, spec.missingDeleteMsg)
+			return
+		}
+		if err := spec.removeMember(r.Context(), groupName, target); err != nil {
+			code := artifactErrorStatusCode(err)
+			s.recordArtifactAudit(r, actor, spec.auditPrefix+".member.remove", spec.auditType, groupName, code, auditStatusError, start, err.Error())
+			writeJSONError(w, code, err.Error())
+			return
+		}
+		s.recordArtifactAudit(r, actor, spec.auditPrefix+".member.remove", spec.auditType, groupName, http.StatusOK, auditStatusSuccess, start, "")
+		writeJSON(w, http.StatusOK, map[string]any{"removed": true, spec.removedGroupKey: groupName, spec.removedMemberKey: target})
+
+	default:
+		writeJSONError(w, http.StatusMethodNotAllowed, errMsgMethodNotAllowed)
+	}
+}
+
+func (s *APIServer) addMembersWithAudit(w http.ResponseWriter, r *http.Request, groupName string, targets []string, start time.Time, spec namedGroupHandlerSpec) error {
+	actor := authUsernameFromRequest(r)
+	for _, m := range targets {
+		if err := spec.addMember(r.Context(), groupName, m); err != nil {
+			code := http.StatusBadRequest
+			if errors.Is(err, ErrArtifactNotFound) {
+				code = http.StatusNotFound
+			}
+			s.recordArtifactAudit(r, actor, spec.auditPrefix+".member.add", spec.auditType, groupName, code, auditStatusError, start, err.Error())
+			writeJSONError(w, code, err.Error())
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *APIServer) serveNamedGroupByName(w http.ResponseWriter, r *http.Request, spec namedGroupHandlerSpec) {
 	start := time.Now().UTC()
 	actor := authUsernameFromRequest(r)
 
-	rel := strings.TrimPrefix(r.URL.Path, "/api/v1/groups/")
-	rel = strings.TrimSuffix(rel, "/")
+	rel := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, spec.pathPrefix), "/")
 	if rel == "" {
-		s.handleAPIGroups(w, r)
+		s.serveNamedGroupCollection(w, r, spec)
 		return
 	}
 
@@ -326,131 +428,194 @@ func (s *APIServer) handleAPIGroupByName(w http.ResponseWriter, r *http.Request)
 	groupName, _ := url.PathUnescape(parts[0])
 	groupName = strings.TrimSpace(groupName)
 
-	// Sub-route: /api/v1/groups/{name}/members[/{username}]
-	if len(parts) >= 2 && strings.EqualFold(parts[1], "members") {
-		switch r.Method {
-		case http.MethodGet:
-			grp, err := s.GetAPIGroup(r.Context(), groupName)
-			if err != nil {
-				code := artifactErrorStatusCode(err)
-				s.recordArtifactAudit(r, actor, "group.member.list", "group", groupName, code, "ERROR", start, err.Error())
-				writeJSONError(w, code, err.Error())
-				return
-			}
-			s.recordArtifactAudit(r, actor, "group.member.list", "group", grp.Name, http.StatusOK, "SUCCESS", start, "")
-			writeJSON(w, http.StatusOK, map[string]any{"group": grp.Name, "count": len(grp.Members), "members": grp.Members})
-
-		case http.MethodPost:
-			var body struct {
-				Username  string   `json:"username"`
-				Usernames []string `json:"usernames"`
-				Members   []string `json:"members"`
-			}
-			if r.Body != nil && r.ContentLength != 0 {
-				if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
-					writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
-					return
-				}
-			}
-			combinedList := append([]string{}, body.Usernames...)
-			combinedList = append(combinedList, body.Members...)
-			targets := parseGroupListValues(body.Username, combinedList, r.URL.Query().Get("username"))
-			if len(targets) == 0 {
-				writeJSONError(w, http.StatusBadRequest, "username is required")
-				return
-			}
-			for _, u := range targets {
-				if err := s.AddUserToGroup(r.Context(), groupName, u); err != nil {
-					code := http.StatusBadRequest
-					if errors.Is(err, ErrArtifactNotFound) {
-						code = http.StatusNotFound
-					}
-					s.recordArtifactAudit(r, actor, "group.member.add", "group", groupName, code, "ERROR", start, err.Error())
-					writeJSONError(w, code, err.Error())
-					return
-				}
-			}
-			grp, _ := s.GetAPIGroup(r.Context(), groupName)
-			s.recordArtifactAudit(r, actor, "group.member.add", "group", groupName, http.StatusCreated, "SUCCESS", start, "")
-			writeJSON(w, http.StatusCreated, grp)
-
-		case http.MethodDelete:
-			targetUser := strings.TrimSpace(r.URL.Query().Get("username"))
-			if targetUser == "" && len(parts) >= 3 {
-				rawMember := strings.Join(parts[2:], "/")
-				if unescaped, err := url.PathUnescape(rawMember); err == nil {
-					targetUser = strings.TrimSpace(unescaped)
-				} else {
-					targetUser = strings.TrimSpace(rawMember)
-				}
-			}
-			if targetUser == "" {
-				writeJSONError(w, http.StatusBadRequest, "username is required in path or ?username= query parameter")
-				return
-			}
-			if err := s.RemoveUserFromGroup(r.Context(), groupName, targetUser); err != nil {
-				code := artifactErrorStatusCode(err)
-				s.recordArtifactAudit(r, actor, "group.member.remove", "group", groupName, code, "ERROR", start, err.Error())
-				writeJSONError(w, code, err.Error())
-				return
-			}
-			s.recordArtifactAudit(r, actor, "group.member.remove", "group", groupName, http.StatusOK, "SUCCESS", start, "")
-			writeJSON(w, http.StatusOK, map[string]any{"removed": true, "group": groupName, "username": targetUser})
-
-		default:
-			writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
-		}
+	if len(parts) >= 2 && strings.EqualFold(parts[1], spec.memberSubPath) {
+		s.serveNamedGroupMembers(w, r, groupName, parts[2:], start, spec)
 		return
 	}
-
 	if len(parts) != 1 {
-		writeJSONError(w, http.StatusBadRequest, "expected /api/v1/groups/{name} or /api/v1/groups/{name}/members")
+		writeJSONError(w, http.StatusBadRequest, spec.badSubPathMsg)
 		return
 	}
 
 	switch r.Method {
 	case http.MethodGet:
-		grp, err := s.GetAPIGroup(r.Context(), groupName)
+		canonicalName, _, grpObj, err := spec.getGroup(r.Context(), groupName)
 		if err != nil {
 			code := artifactErrorStatusCode(err)
-			s.recordArtifactAudit(r, actor, "group.read", "group", groupName, code, "ERROR", start, err.Error())
+			s.recordArtifactAudit(r, actor, spec.auditPrefix+".read", spec.auditType, groupName, code, auditStatusError, start, err.Error())
 			writeJSONError(w, code, err.Error())
 			return
 		}
-		s.recordArtifactAudit(r, actor, "group.read", "group", grp.Name, http.StatusOK, "SUCCESS", start, "")
-		writeJSON(w, http.StatusOK, grp)
+		s.recordArtifactAudit(r, actor, spec.auditPrefix+".read", spec.auditType, canonicalName, http.StatusOK, auditStatusSuccess, start, "")
+		writeJSON(w, http.StatusOK, grpObj)
 
 	case http.MethodPut:
-		var body struct {
-			Description string   `json:"description"`
-			Members     []string `json:"members"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
+		_, canonicalName, grpObj, badJSON, err := spec.upsertFromBody(r.Context(), r.Body, groupName)
+		if badJSON {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf(fmtMsgInvalidJSON, err))
 			return
 		}
-		grp, err := s.UpsertAPIGroup(r.Context(), groupName, body.Description, body.Members)
 		if err != nil {
-			s.recordArtifactAudit(r, actor, "group.update", "group", groupName, http.StatusBadRequest, "ERROR", start, err.Error())
+			s.recordArtifactAudit(r, actor, spec.auditPrefix+".update", spec.auditType, groupName, http.StatusBadRequest, auditStatusError, start, err.Error())
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		s.recordArtifactAudit(r, actor, "group.update", "group", grp.Name, http.StatusOK, "SUCCESS", start, "")
-		writeJSON(w, http.StatusOK, grp)
+		s.recordArtifactAudit(r, actor, spec.auditPrefix+".update", spec.auditType, canonicalName, http.StatusOK, auditStatusSuccess, start, "")
+		writeJSON(w, http.StatusOK, grpObj)
 
 	case http.MethodDelete:
-		if err := s.DeleteAPIGroup(r.Context(), groupName); err != nil {
+		if err := spec.deleteGroup(r.Context(), groupName); err != nil {
 			code := artifactErrorStatusCode(err)
-			s.recordArtifactAudit(r, actor, "group.delete", "group", groupName, code, "ERROR", start, err.Error())
+			s.recordArtifactAudit(r, actor, spec.auditPrefix+".delete", spec.auditType, groupName, code, auditStatusError, start, err.Error())
 			writeJSONError(w, code, err.Error())
 			return
 		}
-		s.recordArtifactAudit(r, actor, "group.delete", "group", groupName, http.StatusOK, "SUCCESS", start, "")
+		s.recordArtifactAudit(r, actor, spec.auditPrefix+".delete", spec.auditType, groupName, http.StatusOK, auditStatusSuccess, start, "")
 		writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "name": groupName})
 
 	default:
-		writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		writeJSONError(w, http.StatusMethodNotAllowed, errMsgMethodNotAllowed)
 	}
+}
+
+func (s *APIServer) apiGroupSpec() namedGroupHandlerSpec {
+	return namedGroupHandlerSpec{
+		pathPrefix:       "/api/v1/groups/",
+		memberSubPath:    "members",
+		auditPrefix:      "group",
+		auditType:        "group",
+		collectionKey:    "groups",
+		memberListKey:    "members",
+		memberQueryKey:   "username",
+		removedGroupKey:  "group",
+		removedMemberKey: "username",
+		missingMemberMsg: "username is required",
+		missingDeleteMsg: "username is required in path or ?username= query parameter",
+		badSubPathMsg:    "expected /api/v1/groups/{name} or /api/v1/groups/{name}/members",
+		listGroups: func(ctx context.Context) (int, any, error) {
+			groups, err := s.ListAPIGroups(ctx)
+			return len(groups), groups, err
+		},
+		getGroup: func(ctx context.Context, name string) (string, []string, any, error) {
+			grp, err := s.GetAPIGroup(ctx, name)
+			if err != nil {
+				return "", nil, nil, err
+			}
+			return grp.Name, grp.Members, grp, nil
+		},
+		upsertFromBody: func(ctx context.Context, body io.Reader, overrideName string) (string, string, any, bool, error) {
+			var payload struct {
+				Name        string   `json:"name"`
+				Description string   `json:"description"`
+				Members     []string `json:"members"`
+			}
+			if err := json.NewDecoder(body).Decode(&payload); err != nil {
+				return "", "", nil, true, err
+			}
+			targetName := payload.Name
+			if overrideName != "" {
+				targetName = overrideName
+			}
+			grp, err := s.UpsertAPIGroup(ctx, targetName, payload.Description, payload.Members)
+			if err != nil {
+				return targetName, "", nil, false, err
+			}
+			return targetName, grp.Name, grp, false, nil
+		},
+		deleteGroup: s.DeleteAPIGroup,
+		parseMemberTargets: func(r *http.Request) ([]string, error) {
+			var body struct {
+				Username  string   `json:"username"`
+				Usernames []string `json:"usernames"`
+				Members   []string `json:"members"`
+			}
+			if err := decodeOptionalJSON(r, &body); err != nil {
+				return nil, err
+			}
+			combined := append(append([]string{}, body.Usernames...), body.Members...)
+			return parseGroupListValues(body.Username, combined, r.URL.Query().Get("username")), nil
+		},
+		addMember:    s.AddUserToGroup,
+		removeMember: s.RemoveUserFromGroup,
+	}
+}
+
+func (s *APIServer) pipelineGroupSpec() namedGroupHandlerSpec {
+	return namedGroupHandlerSpec{
+		pathPrefix:       "/api/v1/pipeline-groups/",
+		memberSubPath:    "pipelines",
+		auditPrefix:      "pipeline_group",
+		auditType:        "pipeline_group",
+		collectionKey:    "pipeline_groups",
+		memberListKey:    "pipelines",
+		memberQueryKey:   "pipeline",
+		removedGroupKey:  "pipeline_group",
+		removedMemberKey: "pipeline",
+		missingMemberMsg: "pipeline name is required",
+		missingDeleteMsg: "pipeline name is required in path or ?pipeline= query parameter",
+		badSubPathMsg:    "expected /api/v1/pipeline-groups/{name} or /api/v1/pipeline-groups/{name}/pipelines",
+		listGroups: func(ctx context.Context) (int, any, error) {
+			groups, err := s.ListPipelineGroups(ctx)
+			return len(groups), groups, err
+		},
+		getGroup: func(ctx context.Context, name string) (string, []string, any, error) {
+			grp, err := s.GetPipelineGroup(ctx, name)
+			if err != nil {
+				return "", nil, nil, err
+			}
+			return grp.Name, grp.Pipelines, grp, nil
+		},
+		upsertFromBody: func(ctx context.Context, body io.Reader, overrideName string) (string, string, any, bool, error) {
+			var payload struct {
+				Name        string   `json:"name"`
+				Description string   `json:"description"`
+				NamePattern string   `json:"name_pattern"`
+				Pipelines   []string `json:"pipelines"`
+			}
+			if err := json.NewDecoder(body).Decode(&payload); err != nil {
+				return "", "", nil, true, err
+			}
+			targetName := payload.Name
+			if overrideName != "" {
+				targetName = overrideName
+			}
+			grp, err := s.UpsertPipelineGroup(ctx, targetName, payload.Description, payload.NamePattern, payload.Pipelines)
+			if err != nil {
+				return targetName, "", nil, false, err
+			}
+			return targetName, grp.Name, grp, false, nil
+		},
+		deleteGroup: s.DeletePipelineGroup,
+		parseMemberTargets: func(r *http.Request) ([]string, error) {
+			var body struct {
+				Pipeline     string   `json:"pipeline"`
+				PipelineName string   `json:"pipeline_name"`
+				Pipelines    []string `json:"pipelines"`
+			}
+			if err := decodeOptionalJSON(r, &body); err != nil {
+				return nil, err
+			}
+			single := strings.TrimSpace(body.Pipeline)
+			if single == "" {
+				single = strings.TrimSpace(body.PipelineName)
+			}
+			return parseGroupListValues(single, body.Pipelines, r.URL.Query().Get("pipeline")), nil
+		},
+		addMember:    s.AddPipelineToGroup,
+		removeMember: s.RemovePipelineFromGroup,
+	}
+}
+
+// =============================================================================
+// 1. User Groups Endpoints (/api/v1/groups[/{name}[/members[/{username}]]])
+// =============================================================================
+
+func (s *APIServer) handleAPIGroups(w http.ResponseWriter, r *http.Request) {
+	s.serveNamedGroupCollection(w, r, s.apiGroupSpec())
+}
+
+func (s *APIServer) handleAPIGroupByName(w http.ResponseWriter, r *http.Request) {
+	s.serveNamedGroupByName(w, r, s.apiGroupSpec())
 }
 
 // =============================================================================
@@ -458,188 +623,11 @@ func (s *APIServer) handleAPIGroupByName(w http.ResponseWriter, r *http.Request)
 // =============================================================================
 
 func (s *APIServer) handlePipelineGroups(w http.ResponseWriter, r *http.Request) {
-	start := time.Now().UTC()
-	actor := authUsernameFromRequest(r)
-
-	switch r.Method {
-	case http.MethodGet:
-		groups, err := s.ListPipelineGroups(r.Context())
-		if err != nil {
-			s.recordArtifactAudit(r, actor, "pipeline_group.list", "pipeline_group", "", http.StatusInternalServerError, "ERROR", start, err.Error())
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		s.recordArtifactAudit(r, actor, "pipeline_group.list", "pipeline_group", "", http.StatusOK, "SUCCESS", start, "")
-		writeJSON(w, http.StatusOK, map[string]any{"count": len(groups), "pipeline_groups": groups})
-
-	case http.MethodPost:
-		var body struct {
-			Name        string   `json:"name"`
-			Description string   `json:"description"`
-			NamePattern string   `json:"name_pattern"`
-			Pipelines   []string `json:"pipelines"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
-			return
-		}
-		grp, err := s.UpsertPipelineGroup(r.Context(), body.Name, body.Description, body.NamePattern, body.Pipelines)
-		if err != nil {
-			s.recordArtifactAudit(r, actor, "pipeline_group.upsert", "pipeline_group", body.Name, http.StatusBadRequest, "ERROR", start, err.Error())
-			writeJSONError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		s.recordArtifactAudit(r, actor, "pipeline_group.upsert", "pipeline_group", grp.Name, http.StatusCreated, "SUCCESS", start, "")
-		writeJSON(w, http.StatusCreated, grp)
-
-	default:
-		writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
-	}
+	s.serveNamedGroupCollection(w, r, s.pipelineGroupSpec())
 }
 
 func (s *APIServer) handlePipelineGroupByName(w http.ResponseWriter, r *http.Request) {
-	start := time.Now().UTC()
-	actor := authUsernameFromRequest(r)
-
-	rel := strings.TrimPrefix(r.URL.Path, "/api/v1/pipeline-groups/")
-	rel = strings.TrimSuffix(rel, "/")
-	if rel == "" {
-		s.handlePipelineGroups(w, r)
-		return
-	}
-
-	parts := strings.Split(rel, "/")
-	groupName, _ := url.PathUnescape(parts[0])
-	groupName = strings.TrimSpace(groupName)
-
-	// Sub-route: /api/v1/pipeline-groups/{name}/pipelines[/{pipeline}]
-	if len(parts) >= 2 && strings.EqualFold(parts[1], "pipelines") {
-		switch r.Method {
-		case http.MethodGet:
-			grp, err := s.GetPipelineGroup(r.Context(), groupName)
-			if err != nil {
-				code := artifactErrorStatusCode(err)
-				s.recordArtifactAudit(r, actor, "pipeline_group.member.list", "pipeline_group", groupName, code, "ERROR", start, err.Error())
-				writeJSONError(w, code, err.Error())
-				return
-			}
-			s.recordArtifactAudit(r, actor, "pipeline_group.member.list", "pipeline_group", grp.Name, http.StatusOK, "SUCCESS", start, "")
-			writeJSON(w, http.StatusOK, map[string]any{"group": grp.Name, "count": len(grp.Pipelines), "pipelines": grp.Pipelines})
-
-		case http.MethodPost:
-			var body struct {
-				Pipeline     string   `json:"pipeline"`
-				PipelineName string   `json:"pipeline_name"`
-				Pipelines    []string `json:"pipelines"`
-			}
-			if r.Body != nil && r.ContentLength != 0 {
-				if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
-					writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
-					return
-				}
-			}
-			singlePipe := strings.TrimSpace(body.Pipeline)
-			if singlePipe == "" {
-				singlePipe = strings.TrimSpace(body.PipelineName)
-			}
-			targets := parseGroupListValues(singlePipe, body.Pipelines, r.URL.Query().Get("pipeline"))
-			if len(targets) == 0 {
-				writeJSONError(w, http.StatusBadRequest, "pipeline name is required")
-				return
-			}
-			for _, p := range targets {
-				if err := s.AddPipelineToGroup(r.Context(), groupName, p); err != nil {
-					code := http.StatusBadRequest
-					if errors.Is(err, ErrArtifactNotFound) {
-						code = http.StatusNotFound
-					}
-					s.recordArtifactAudit(r, actor, "pipeline_group.member.add", "pipeline_group", groupName, code, "ERROR", start, err.Error())
-					writeJSONError(w, code, err.Error())
-					return
-				}
-			}
-			grp, _ := s.GetPipelineGroup(r.Context(), groupName)
-			s.recordArtifactAudit(r, actor, "pipeline_group.member.add", "pipeline_group", groupName, http.StatusCreated, "SUCCESS", start, "")
-			writeJSON(w, http.StatusCreated, grp)
-
-		case http.MethodDelete:
-			targetPipe := strings.TrimSpace(r.URL.Query().Get("pipeline"))
-			if targetPipe == "" && len(parts) >= 3 {
-				rawPipe := strings.Join(parts[2:], "/")
-				if unescaped, err := url.PathUnescape(rawPipe); err == nil {
-					targetPipe = strings.TrimSpace(unescaped)
-				} else {
-					targetPipe = strings.TrimSpace(rawPipe)
-				}
-			}
-			if targetPipe == "" {
-				writeJSONError(w, http.StatusBadRequest, "pipeline name is required in path or ?pipeline= query parameter")
-				return
-			}
-			if err := s.RemovePipelineFromGroup(r.Context(), groupName, targetPipe); err != nil {
-				code := artifactErrorStatusCode(err)
-				s.recordArtifactAudit(r, actor, "pipeline_group.member.remove", "pipeline_group", groupName, code, "ERROR", start, err.Error())
-				writeJSONError(w, code, err.Error())
-				return
-			}
-			s.recordArtifactAudit(r, actor, "pipeline_group.member.remove", "pipeline_group", groupName, http.StatusOK, "SUCCESS", start, "")
-			writeJSON(w, http.StatusOK, map[string]any{"removed": true, "pipeline_group": groupName, "pipeline": targetPipe})
-
-		default:
-			writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
-		}
-		return
-	}
-
-	if len(parts) != 1 {
-		writeJSONError(w, http.StatusBadRequest, "expected /api/v1/pipeline-groups/{name} or /api/v1/pipeline-groups/{name}/pipelines")
-		return
-	}
-
-	switch r.Method {
-	case http.MethodGet:
-		grp, err := s.GetPipelineGroup(r.Context(), groupName)
-		if err != nil {
-			code := artifactErrorStatusCode(err)
-			s.recordArtifactAudit(r, actor, "pipeline_group.read", "pipeline_group", groupName, code, "ERROR", start, err.Error())
-			writeJSONError(w, code, err.Error())
-			return
-		}
-		s.recordArtifactAudit(r, actor, "pipeline_group.read", "pipeline_group", grp.Name, http.StatusOK, "SUCCESS", start, "")
-		writeJSON(w, http.StatusOK, grp)
-
-	case http.MethodPut:
-		var body struct {
-			Description string   `json:"description"`
-			NamePattern string   `json:"name_pattern"`
-			Pipelines   []string `json:"pipelines"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
-			return
-		}
-		grp, err := s.UpsertPipelineGroup(r.Context(), groupName, body.Description, body.NamePattern, body.Pipelines)
-		if err != nil {
-			s.recordArtifactAudit(r, actor, "pipeline_group.update", "pipeline_group", groupName, http.StatusBadRequest, "ERROR", start, err.Error())
-			writeJSONError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		s.recordArtifactAudit(r, actor, "pipeline_group.update", "pipeline_group", grp.Name, http.StatusOK, "SUCCESS", start, "")
-		writeJSON(w, http.StatusOK, grp)
-
-	case http.MethodDelete:
-		if err := s.DeletePipelineGroup(r.Context(), groupName); err != nil {
-			code := artifactErrorStatusCode(err)
-			s.recordArtifactAudit(r, actor, "pipeline_group.delete", "pipeline_group", groupName, code, "ERROR", start, err.Error())
-			writeJSONError(w, code, err.Error())
-			return
-		}
-		s.recordArtifactAudit(r, actor, "pipeline_group.delete", "pipeline_group", groupName, http.StatusOK, "SUCCESS", start, "")
-		writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "name": groupName})
-
-	default:
-		writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
-	}
+	s.serveNamedGroupByName(w, r, s.pipelineGroupSpec())
 }
 
 // =============================================================================
@@ -661,31 +649,31 @@ func (s *APIServer) handlePipelineACLs(w http.ResponseWriter, r *http.Request) {
 			q.Get("target_name"),
 		)
 		if err != nil {
-			s.recordArtifactAudit(r, actor, "acl.list", "acl", "", http.StatusInternalServerError, "ERROR", start, err.Error())
+			s.recordArtifactAudit(r, actor, "acl.list", "acl", "", http.StatusInternalServerError, auditStatusError, start, err.Error())
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		s.recordArtifactAudit(r, actor, "acl.list", "acl", "", http.StatusOK, "SUCCESS", start, "")
+		s.recordArtifactAudit(r, actor, "acl.list", "acl", "", http.StatusOK, auditStatusSuccess, start, "")
 		writeJSON(w, http.StatusOK, map[string]any{"count": len(rules), "acls": rules})
 
 	case http.MethodPost:
 		var rule PipelineACL
 		if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
-			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf(fmtMsgInvalidJSON, err))
 			return
 		}
 		saved, err := s.UpsertPipelineACL(r.Context(), rule)
 		if err != nil {
-			s.recordArtifactAudit(r, actor, "acl.upsert", "acl", rule.TargetName, http.StatusBadRequest, "ERROR", start, err.Error())
+			s.recordArtifactAudit(r, actor, "acl.upsert", "acl", rule.TargetName, http.StatusBadRequest, auditStatusError, start, err.Error())
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		auditLabel := fmt.Sprintf("%s:%s->%s:%s(%s)", saved.PrincipalType, saved.PrincipalName, saved.TargetType, saved.TargetName, saved.Effect)
-		s.recordArtifactAudit(r, actor, "acl.upsert", "acl", auditLabel, http.StatusCreated, "SUCCESS", start, "")
+		s.recordArtifactAudit(r, actor, "acl.upsert", "acl", auditLabel, http.StatusCreated, auditStatusSuccess, start, "")
 		writeJSON(w, http.StatusCreated, saved)
 
 	default:
-		writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		writeJSONError(w, http.StatusMethodNotAllowed, errMsgMethodNotAllowed)
 	}
 }
 
@@ -711,7 +699,7 @@ func (s *APIServer) handlePipelineACLByID(w http.ResponseWriter, r *http.Request
 	case http.MethodPut:
 		var rule PipelineACL
 		if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
-			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf(fmtMsgInvalidJSON, err))
 			return
 		}
 		updated, err := s.UpdatePipelineACLByID(r.Context(), idVal, rule)
@@ -720,31 +708,31 @@ func (s *APIServer) handlePipelineACLByID(w http.ResponseWriter, r *http.Request
 			if code == http.StatusInternalServerError {
 				code = http.StatusBadRequest
 			}
-			s.recordArtifactAudit(r, actor, "acl.update", "acl", idLabel, code, "ERROR", start, err.Error())
+			s.recordArtifactAudit(r, actor, "acl.update", "acl", idLabel, code, auditStatusError, start, err.Error())
 			writeJSONError(w, code, err.Error())
 			return
 		}
-		s.recordArtifactAudit(r, actor, "acl.update", "acl", idLabel, http.StatusOK, "SUCCESS", start, "")
+		s.recordArtifactAudit(r, actor, "acl.update", "acl", idLabel, http.StatusOK, auditStatusSuccess, start, "")
 		writeJSON(w, http.StatusOK, updated)
 
 	case http.MethodDelete:
 		if err := s.DeletePipelineACLByID(r.Context(), idVal); err != nil {
 			code := artifactErrorStatusCode(err)
-			s.recordArtifactAudit(r, actor, "acl.delete", "acl", idLabel, code, "ERROR", start, err.Error())
+			s.recordArtifactAudit(r, actor, "acl.delete", "acl", idLabel, code, auditStatusError, start, err.Error())
 			writeJSONError(w, code, err.Error())
 			return
 		}
-		s.recordArtifactAudit(r, actor, "acl.delete", "acl", idLabel, http.StatusOK, "SUCCESS", start, "")
+		s.recordArtifactAudit(r, actor, "acl.delete", "acl", idLabel, http.StatusOK, auditStatusSuccess, start, "")
 		writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "id": idVal})
 
 	default:
-		writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		writeJSONError(w, http.StatusMethodNotAllowed, errMsgMethodNotAllowed)
 	}
 }
 
 func (s *APIServer) handleEffectivePermissions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		writeJSONError(w, http.StatusMethodNotAllowed, errMsgMethodNotAllowed)
 		return
 	}
 	start := time.Now().UTC()

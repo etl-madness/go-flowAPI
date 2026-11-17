@@ -325,6 +325,86 @@ func (s *APIServer) serveArtifactItemCRUD(
 	}
 }
 
+type pipelineWriteAuth struct {
+	auditEvent    string
+	name          string
+	allowUpdate   bool
+	groups        []string
+	startedAt     time.Time
+}
+
+func (s *APIServer) authorizePipelineWrite(w http.ResponseWriter, r *http.Request, opts pipelineWriteAuth) bool {
+	user := UserFromContext(r.Context())
+	authUsername := authUsernameFromRequest(r)
+	trimmedName := strings.TrimSpace(opts.name)
+	reqAction := ActionCreate
+	if opts.allowUpdate {
+		if existing, getErr := s.GetArtifact(r.Context(), TargetPipeline, trimmedName, false, ""); getErr == nil && existing != nil {
+			reqAction = ActionUpdate
+		}
+	}
+	if !s.authorizePipelineOrWrite403(w, r, user, trimmedName, opts.groups, reqAction, opts.startedAt) {
+		return false
+	}
+	if len(opts.groups) > 0 {
+		if err := s.validatePipelineGroupsExist(r.Context(), opts.groups); err != nil {
+			s.recordArtifactAudit(r, authUsername, opts.auditEvent, TargetPipeline, trimmedName, http.StatusBadRequest, auditStatusError, opts.startedAt, err.Error())
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return false
+		}
+	}
+	return true
+}
+
+func (s *APIServer) assignAndPopulatePipelineGroups(ctx context.Context, rec *ArtifactRecord, groups []string) error {
+	if len(groups) == 0 {
+		return nil
+	}
+	if err := s.assignPipelineToGroups(ctx, rec.Name, groups); err != nil {
+		return err
+	}
+	if snap, snapErr := s.loadACLSnapshot(ctx); snapErr == nil {
+		rec.Groups = snap.groupsForPipeline(rec.Name, nil)
+	}
+	return nil
+}
+
+func (s *APIServer) updateArtifactItemWithGroups(
+	ctx context.Context,
+	user *APIUser,
+	artifactType string,
+	groups []string,
+	resolveName func() (string, error),
+	doUpdate func() (*ArtifactRecord, error),
+) (*ArtifactRecord, error) {
+	if artifactType == TargetPipeline && len(groups) > 0 {
+		pName, err := resolveName()
+		if err != nil {
+			return nil, err
+		}
+		allowed, reason, aclErr := s.EvaluatePipelineAccess(ctx, user, pName, groups, ActionUpdate)
+		if aclErr != nil {
+			return nil, aclErr
+		}
+		if !allowed {
+			return nil, fmt.Errorf("%w: %s", ErrPipelineForbidden, reason)
+		}
+		if err := s.validatePipelineGroupsExist(ctx, groups); err != nil {
+			return nil, err
+		}
+	}
+	rec, err := doUpdate()
+	if err != nil {
+		return nil, err
+	}
+	if artifactType == TargetPipeline {
+		if err := s.assignAndPopulatePipelineGroups(ctx, rec, groups); err != nil {
+			return nil, err
+		}
+	}
+	return rec, nil
+}
+
 func (s *APIServer) dispatchArtifactRequest(w http.ResponseWriter, r *http.Request) {
 	start := time.Now().UTC()
 	user := UserFromContext(r.Context())
@@ -418,23 +498,14 @@ func (s *APIServer) dispatchArtifactRequest(w http.ResponseWriter, r *http.Reque
 			isUpsert := body.Upsert || r.URL.Query().Get("upsert") == "true"
 			requestedGroups := parseGroupListValues(body.Group, body.Groups, r.URL.Query().Get("group"), strings.Join(r.URL.Query()["groups"], ","))
 
-			if artifactType == "pipeline" {
-				trimmedName := strings.TrimSpace(body.Name)
-				existing, getErr := s.GetArtifact(r.Context(), "pipeline", trimmedName, false, "")
-				reqAction := ActionCreate
-				if getErr == nil && existing != nil && isUpsert {
-					reqAction = ActionUpdate
-				}
-				if !s.authorizePipelineOrWrite403(w, r, user, trimmedName, requestedGroups, reqAction, start) {
-					return
-				}
-				if len(requestedGroups) > 0 {
-					if err := s.validatePipelineGroupsExist(r.Context(), requestedGroups); err != nil {
-						s.recordArtifactAudit(r, authUsername, "artifact.create", artifactType, trimmedName, http.StatusBadRequest, "ERROR", start, err.Error())
-						writeJSONError(w, http.StatusBadRequest, err.Error())
-						return
-					}
-				}
+			if artifactType == TargetPipeline && !s.authorizePipelineWrite(w, r, pipelineWriteAuth{
+				auditEvent:  "artifact.create",
+				name:        body.Name,
+				allowUpdate: isUpsert,
+				groups:      requestedGroups,
+				startedAt:   start,
+			}) {
+				return
 			}
 
 			_, secKey := extractArtifactQuerySecret(r, body.SecureKey)
@@ -451,13 +522,10 @@ func (s *APIServer) dispatchArtifactRequest(w http.ResponseWriter, r *http.Reque
 				writeJSONError(w, code, err.Error())
 				return
 			}
-			if artifactType == "pipeline" && len(requestedGroups) > 0 {
-				if err := s.assignPipelineToGroups(r.Context(), rec.Name, requestedGroups); err != nil {
+			if artifactType == TargetPipeline {
+				if err := s.assignAndPopulatePipelineGroups(r.Context(), rec, requestedGroups); err != nil {
 					writeJSONError(w, http.StatusInternalServerError, err.Error())
 					return
-				}
-				if snap, snapErr := s.loadACLSnapshot(r.Context()); snapErr == nil {
-					rec.Groups = snap.groupsForPipeline(rec.Name, nil)
 				}
 			}
 			s.recordArtifactAudit(r, authUsername, "artifact.create", artifactType, rec.Name, http.StatusCreated, "SUCCESS", start, "")
@@ -478,7 +546,7 @@ func (s *APIServer) dispatchArtifactRequest(w http.ResponseWriter, r *http.Reque
 		idLabel := fmt.Sprintf("id:%d", idVal)
 		isExport := len(parts) == 4 && strings.ToLower(parts[3]) == "export"
 
-		if artifactType == "pipeline" {
+		if artifactType == TargetPipeline {
 			if ok := s.authorizeExistingPipelineItem(w, r, user, true, idVal, "", isExport, start); !ok {
 				return
 			}
@@ -495,35 +563,19 @@ func (s *APIServer) dispatchArtifactRequest(w http.ResponseWriter, r *http.Reque
 			w, r, authUsername, artifactType, idLabel, start,
 			getByID,
 			func(desc, content string, enc bool, secKey string, groups []string) (*ArtifactRecord, error) {
-				if artifactType == "pipeline" && len(groups) > 0 {
-					existing, err := s.GetArtifactByID(r.Context(), "pipeline", idVal, false, "")
-					if err != nil {
-						return nil, err
-					}
-					allowed, reason, aclErr := s.EvaluatePipelineAccess(r.Context(), user, existing.Name, groups, ActionUpdate)
-					if aclErr != nil {
-						return nil, aclErr
-					}
-					if !allowed {
-						return nil, fmt.Errorf("%w: %s", ErrPipelineForbidden, reason)
-					}
-					if err := s.validatePipelineGroupsExist(r.Context(), groups); err != nil {
-						return nil, err
-					}
-				}
-				rec, err := s.UpdateArtifactByID(r.Context(), artifactType, idVal, desc, content, enc, secKey)
-				if err != nil {
-					return nil, err
-				}
-				if artifactType == "pipeline" && len(groups) > 0 {
-					if err := s.assignPipelineToGroups(r.Context(), rec.Name, groups); err != nil {
-						return nil, err
-					}
-					if snap, snapErr := s.loadACLSnapshot(r.Context()); snapErr == nil {
-						rec.Groups = snap.groupsForPipeline(rec.Name, nil)
-					}
-				}
-				return rec, nil
+				return s.updateArtifactItemWithGroups(
+					r.Context(), user, artifactType, groups,
+					func() (string, error) {
+						existing, err := s.GetArtifactByID(r.Context(), TargetPipeline, idVal, false, "")
+						if err != nil {
+							return "", err
+						}
+						return existing.Name, nil
+					},
+					func() (*ArtifactRecord, error) {
+						return s.UpdateArtifactByID(r.Context(), artifactType, idVal, desc, content, enc, secKey)
+					},
+				)
 			},
 			func() error {
 				return s.DeleteArtifactByID(r.Context(), artifactType, idVal)
@@ -535,7 +587,7 @@ func (s *APIServer) dispatchArtifactRequest(w http.ResponseWriter, r *http.Reque
 
 	name := parts[1]
 	isExport := len(parts) == 3 && strings.ToLower(parts[2]) == "export"
-	if artifactType == "pipeline" {
+	if artifactType == TargetPipeline {
 		if ok := s.authorizeExistingPipelineItem(w, r, user, false, 0, name, isExport, start); !ok {
 			return
 		}
@@ -556,31 +608,13 @@ func (s *APIServer) dispatchArtifactRequest(w http.ResponseWriter, r *http.Reque
 		w, r, authUsername, artifactType, name, start,
 		getByName,
 		func(desc, content string, enc bool, secKey string, groups []string) (*ArtifactRecord, error) {
-			if artifactType == "pipeline" && len(groups) > 0 {
-				allowed, reason, aclErr := s.EvaluatePipelineAccess(r.Context(), user, name, groups, ActionUpdate)
-				if aclErr != nil {
-					return nil, aclErr
-				}
-				if !allowed {
-					return nil, fmt.Errorf("%w: %s", ErrPipelineForbidden, reason)
-				}
-				if err := s.validatePipelineGroupsExist(r.Context(), groups); err != nil {
-					return nil, err
-				}
-			}
-			rec, err := s.UpdateArtifact(r.Context(), artifactType, name, desc, content, enc, secKey)
-			if err != nil {
-				return nil, err
-			}
-			if artifactType == "pipeline" && len(groups) > 0 {
-				if err := s.assignPipelineToGroups(r.Context(), rec.Name, groups); err != nil {
-					return nil, err
-				}
-				if snap, snapErr := s.loadACLSnapshot(r.Context()); snapErr == nil {
-					rec.Groups = snap.groupsForPipeline(rec.Name, nil)
-				}
-			}
-			return rec, nil
+			return s.updateArtifactItemWithGroups(
+				r.Context(), user, artifactType, groups,
+				func() (string, error) { return name, nil },
+				func() (*ArtifactRecord, error) {
+					return s.UpdateArtifact(r.Context(), artifactType, name, desc, content, enc, secKey)
+				},
+			)
 		},
 		func() error {
 			return s.DeleteArtifact(r.Context(), artifactType, name)
@@ -590,7 +624,6 @@ func (s *APIServer) dispatchArtifactRequest(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *APIServer) handleArtifactUpload(w http.ResponseWriter, r *http.Request, artifactType, authUsername string, start time.Time) {
-	user := UserFromContext(r.Context())
 	contentType := r.Header.Get("Content-Type")
 	var name, desc, secureKey, singleGroup string
 	var formGroups []string
@@ -651,22 +684,14 @@ func (s *APIServer) handleArtifactUpload(w http.ResponseWriter, r *http.Request,
 
 	requestedGroups := parseGroupListValues(singleGroup, formGroups, r.URL.Query().Get("group"), strings.Join(r.URL.Query()["groups"], ","))
 
-	if artifactType == "pipeline" {
-		existing, getErr := s.GetArtifact(r.Context(), "pipeline", name, false, "")
-		reqAction := ActionCreate
-		if getErr == nil && existing != nil {
-			reqAction = ActionUpdate
-		}
-		if !s.authorizePipelineOrWrite403(w, r, user, name, requestedGroups, reqAction, start) {
-			return
-		}
-		if len(requestedGroups) > 0 {
-			if err := s.validatePipelineGroupsExist(r.Context(), requestedGroups); err != nil {
-				s.recordArtifactAudit(r, authUsername, "artifact.upload", artifactType, name, http.StatusBadRequest, "ERROR", start, err.Error())
-				writeJSONError(w, http.StatusBadRequest, err.Error())
-				return
-			}
-		}
+	if artifactType == TargetPipeline && !s.authorizePipelineWrite(w, r, pipelineWriteAuth{
+		auditEvent:  "artifact.upload",
+		name:        name,
+		allowUpdate: true,
+		groups:      requestedGroups,
+		startedAt:   start,
+	}) {
+		return
 	}
 
 	if desc == "" {
@@ -681,13 +706,10 @@ func (s *APIServer) handleArtifactUpload(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	if artifactType == "pipeline" && len(requestedGroups) > 0 {
-		if err := s.assignPipelineToGroups(r.Context(), rec.Name, requestedGroups); err != nil {
+	if artifactType == TargetPipeline {
+		if err := s.assignAndPopulatePipelineGroups(r.Context(), rec, requestedGroups); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
-		}
-		if snap, snapErr := s.loadACLSnapshot(r.Context()); snapErr == nil {
-			rec.Groups = snap.groupsForPipeline(rec.Name, nil)
 		}
 	}
 
