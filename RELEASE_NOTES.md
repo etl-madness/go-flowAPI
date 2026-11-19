@@ -16,10 +16,14 @@ Version `1.3.2` hardens external `sql://` and `db://` artifact URI resolution ag
    - Binds all lookup filter values exclusively as dialect-aware query parameters (`@p1` for SQL Server/Azure SQL, `$1` for PostgreSQL, `:1` for Oracle, `?` for MySQL/SQLite), matching `go-flow v1.2.2`.
    - Rejects raw `#SELECT ...` fragments, duplicate/unknown parameters, and invalid identifiers prior to opening any database connection.
 
-2. **Container Image Scripting Support (`Dockerfile` / `docker/`)**:
+2. **Local Filesystem Path-Traversal Hardening (`config.go`, `executor.go` — CodeQL `go/path-injection` Remediation)**:
+   - Added centralized path sanitization and directory confinement helpers (`resolveSafeLocalPath`, `readSafeLocalFile`, `writeSafeLocalFile`) for all local file operations (`resolveKey`, `loadInlineOrFileBytes`, `resolveArtifactBytes`, `transformXMLWithXSLT`, and `ValidateXSD`).
+   - Rejects path-traversal segments (`..`), null/control characters, and non-local relative paths (`filepath.IsLocal`), confining local file fallback reads and XSLT output writes strictly to permitted working and temporary directories.
+
+3. **Container Image Scripting Support (`Dockerfile` / `docker/`)**:
    - Added PowerShell (`pwsh`) and `.NET` `dotnet-script` runtime support inside the `go-flowAPI` container image so pipelines utilizing PowerShell or C# `<script>` nodes execute out-of-the-box in containerized deployments.
 
-3. **Code Quality, Duplication Reduction & Test Coverage (`acl.go`, `handlers_acl.go`, `handlers.go`, `swagger.go`, `api_test.go`)**:
+4. **Code Quality, Duplication Reduction & Test Coverage (`acl.go`, `handlers_acl.go`, `handlers.go`, `swagger.go`, `api_test.go`)**:
    - Extracted shared group-membership SQL queries, HTTP parameter/CRUD helpers, and OpenAPI 3.0.3 schema/response builders to eliminate duplicated code blocks.
    - Added comprehensive unit and integration tests covering structured SQL URI lookups across dialects, ACL enforcement, group CRUD, telemetry filters, Kerberos SPN/config helpers, and server bootstrap validation (`84%+` overall statement coverage).
 

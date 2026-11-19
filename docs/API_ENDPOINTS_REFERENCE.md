@@ -332,11 +332,11 @@ flowchart TD
 | `pipeline_id` | `pipeline_id` | `int64` | Explicit `dbo.flow_pipeline_content.ID` to execute. |
 | `options_id` | `options_id` | `int64` | Explicit `dbo.flow_options_content.ID` to load CLI options from. |
 | `config_id` | `config_id` | `int64` | Explicit `dbo.flow_config_content.ID` to merge environment overrides from. |
-| `file` | `file` | `string` | Pipeline reference (`<name>`, `db:<name>`, `id:<id>`, `sql://<driver>@<dsn>#table=<schema.table>[&column=<col>&key_col=<col>&key=<val>]`, or file path). |
+| `file` | `file` | `string` | Pipeline reference (`<name>`, `db:<name>`, `id:<id>`, `sql://<driver>@<dsn>#table=<schema.table>[&column=<col>&key_col=<col>&key=<val>]`, or confined local file path). |
 | `file_xml` | — | `string` | Inline pipeline XML string (requires wildcard `*` `execute` or global `execution-only`/`all`). |
-| `options` | `options` | `string` | Options artifact reference (`db:<name>`, `id:<id>`, or path). |
+| `options` | `options` | `string` | Options artifact reference (`db:<name>`, `id:<id>`, `sql://...`, or confined local file path). |
 | `options_xml` | — | `string` | Inline `<cli_options>` XML string. |
-| `config` | `config` | `string` | Config override artifact reference (`db:<name>`, `id:<id>`, or path). |
+| `config` | `config` | `string` | Config override artifact reference (`db:<name>`, `id:<id>`, `sql://...`, or confined local file path). |
 | `config_xml` | — | `string` | Inline override `<pipeline>` config XML string. |
 | `vars` | — | `map[string]string` | Key-value map of runtime variable overrides (`{"ENV": "prod"}`). |
 | `vars_raw` | `vars` | `string` | Comma/semicolon-separated variable overrides (`"ENV=prod,BATCH=500"`). |
@@ -344,12 +344,17 @@ flowchart TD
 | `node_output` | `node_output` | `bool` | Captures per-node output into `dbo.pipeline_events.node_output` (64 KB UTF-8 safe truncation + secret redaction). |
 | `preflight` | `preflight` | `bool` | Executes only the `<preflight>` section and halts before `<flow>`. |
 | `validate` | `validate` | `bool` | Validates XSD & AST without executing pipeline steps. |
+| `xsd` | `xsd` | `string` | Optional confined local path to an XSD schema file for validation. |
 | `debug` | `debug` | `bool` | Enables verbose step-level debug logging. |
-| `xslt` | `xslt` | `string` | Applies an XSLT 3.0 transformation (`autodoc_html.xslt`, `autodoc_md.xslt`, or custom path) and returns the rendered document. |
+| `xslt` | `xslt` | `string` | Applies an XSLT 3.0 transformation (`autodoc_html.xslt`, `autodoc_md.xslt`, or confined local path) and returns the rendered document. |
+| `out` | `out` | `string` | Optional confined local file path to write rendered XSLT transformation output. |
 | `encrypted` | — | `bool` | Indicates the input artifact is encrypted. |
 | `secure_key` | `secure_key` | `string` | Decryption passphrase (or pass via `X-Flow-Secure-Key` header). |
+| `key_file` | — | `string` | Confined local file path containing the decryption passphrase. |
 | `verify_signature` | — | `bool` | Enforces digital signature verification before execution. |
-| `public_key` / `cert` / `ca_cert` / `keyring` / `signature` | — | `string` | Inline PEM/armored key material or file path for signature verification. |
+| `public_key` / `cert` / `ca_cert` / `keyring` / `signature` | — | `string` | Inline PEM/armored key material or confined local file path for signature verification. |
+
+> **Security Note — Local File Path Confinement (`v1.3.2+`):** Whenever a local filesystem path is supplied to `/api/v1/execute`, `/api/v1/execute/stream`, `/api/v1/validate`, or `/api/v1/crypto/*` (`file`, `options`, `config`, `xsd`, `xslt`, `out`, `key_file`, `public_key`, `cert`, `ca_cert`, `keyring`, `signature`), `go-flowAPI` sanitizes the path via `resolveSafeLocalPath`. Any path containing `..` traversal segments, null/control characters, or resolving outside the server's working directory (`os.Getwd()`) or system temporary directory (`os.TempDir()`) is rejected.
 
 **Example Synchronous Execution Request:**
 ```bash

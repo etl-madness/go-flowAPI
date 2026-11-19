@@ -432,7 +432,7 @@ func loadInlineOrFileBytes(val string) ([]byte, error) {
 		strings.Contains(trimmed, "\n") {
 		return []byte(trimmed), nil
 	}
-	if data, err := os.ReadFile(trimmed); err == nil {
+	if data, err := readSafeLocalFile(trimmed); err == nil {
 		return data, nil
 	} else {
 		return nil, err
@@ -492,13 +492,13 @@ func (s *APIServer) resolveArtifactBytes(ctx context.Context, artifactType strin
 				if recByID, idErr := s.GetArtifactByID(ctx, artifactType, numID, false, ""); idErr == nil && recByID != nil {
 					rawBytes = []byte(recByID.Content)
 					sourceLabel = fmt.Sprintf("db://%s/id/%d(%s)", artifactType, recByID.ID, recByID.Name)
-				} else if data, fileErr := os.ReadFile(ref); fileErr == nil {
+				} else if data, fileErr := readSafeLocalFile(ref); fileErr == nil {
 					rawBytes = data
 					sourceLabel = ref
 				} else {
 					return nil, "", fmt.Errorf("failed resolving %s %q from database by name (%v), ID %d (%v), or filesystem (%v)", artifactType, ref, dbErr, numID, idErr, fileErr)
 				}
-			} else if data, fileErr := os.ReadFile(ref); fileErr == nil {
+			} else if data, fileErr := readSafeLocalFile(ref); fileErr == nil {
 				rawBytes = data
 				sourceLabel = ref
 			} else {
@@ -1037,12 +1037,16 @@ func (s *APIServer) ExecutePipeline(ctx context.Context, req ExecutionRequest, o
 
 	// Optional XSD schema validation
 	if strings.TrimSpace(req.XSD) != "" {
+		safeXSD, err := resolveSafeLocalPath(req.XSD)
+		if err != nil {
+			return nil, fmt.Errorf("XSD validation failed: %w", err)
+		}
 		tmpXML, err := writeTempFile("validate-*.xml", pipelineBytes)
 		if err != nil {
 			return nil, err
 		}
 		defer os.Remove(tmpXML)
-		if err := flow.ValidateXSD(tmpXML, req.XSD); err != nil {
+		if err := flow.ValidateXSD(tmpXML, safeXSD); err != nil {
 			return nil, fmt.Errorf("XSD validation failed: %w", err)
 		}
 	}
@@ -1278,7 +1282,7 @@ func transformXMLWithXSLT(ctx context.Context, xmlInput, xsltInput []byte, outPa
 	}
 	outBytes := buf.Bytes()
 	if strings.TrimSpace(outPath) != "" {
-		if err := os.WriteFile(strings.TrimSpace(outPath), outBytes, 0644); err != nil {
+		if err := writeSafeLocalFile(outPath, outBytes, 0644); err != nil {
 			return nil, fmt.Errorf("failed writing XSLT output to %s: %w", outPath, err)
 		}
 	}
