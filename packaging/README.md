@@ -167,9 +167,9 @@ See [winget/README.md](winget/README.md) for local `winget install --manifest` t
 
 ```sh
 # Install (creates 'flowapi' system user, /etc/go-flow-api/go-flow-api.env, and systemd unit)
-sudo apt install ./packaging/dist/go-flow-api_1.3.1-1_amd64.deb
+sudo apt install ./packaging/dist/go-flow-api_1.3.2-1_amd64.deb
 # Or directly with dpkg:
-sudo dpkg -i ./packaging/dist/go-flow-api_1.3.1-1_amd64.deb
+sudo dpkg -i ./packaging/dist/go-flow-api_1.3.2-1_amd64.deb
 
 # Activate PATH & INFOPATH in the current shell
 . /etc/profile.d/go-flow-api.sh
@@ -188,9 +188,9 @@ sudo apt purge go-flow-api
 
 ```sh
 # Install or upgrade
-sudo dnf install ./packaging/dist/go-flow-api-1.3.1-1.x86_64.rpm
+sudo dnf install ./packaging/dist/go-flow-api-1.3.2-1.x86_64.rpm
 # Or directly with rpm:
-sudo rpm -Uvh ./packaging/dist/go-flow-api-1.3.1-1.x86_64.rpm
+sudo rpm -Uvh ./packaging/dist/go-flow-api-1.3.2-1.x86_64.rpm
 
 . /etc/profile.d/go-flow-api.sh
 go-flowAPI -h
@@ -203,7 +203,7 @@ sudo dnf remove go-flow-api
 ### 3. SUSE Linux Enterprise (SLES) & openSUSE (`.rpm`)
 
 ```sh
-sudo zypper --no-gpg-checks install ./packaging/dist/go-flow-api-1.3.1-1.x86_64.rpm
+sudo zypper --no-gpg-checks install ./packaging/dist/go-flow-api-1.3.2-1.x86_64.rpm
 
 . /etc/profile.d/go-flow-api.sh
 go-flowAPI -h
@@ -215,7 +215,7 @@ sudo zypper remove go-flow-api
 ### 4. Arch Linux / Manjaro (`.pkg.tar.zst`)
 
 ```sh
-sudo pacman -U ./packaging/dist/go-flow-api-1.3.1-1-x86_64.pkg.tar.zst
+sudo pacman -U ./packaging/dist/go-flow-api-1.3.2-1-x86_64.pkg.tar.zst
 
 . /etc/profile.d/go-flow-api.sh
 go-flowAPI -h
@@ -230,7 +230,7 @@ sudo pacman -Rns go-flow-api
 
 **Command-Line Install:**
 ```sh
-sudo installer -pkg ./packaging/dist/go-flow-api-1.3.1-darwin-universal.pkg -target /
+sudo installer -pkg ./packaging/dist/go-flow-api-1.3.2-darwin-universal.pkg -target /
 eval "$(/usr/libexec/path_helper -s)"
 go-flowAPI -h
 man go-flowAPI
@@ -247,7 +247,7 @@ sudo pkgutil --forget com.etlmadness.go-flow-api
 ### 6. FreeBSD (`.pkg`)
 
 ```sh
-sudo pkg add ./packaging/dist/go-flow-api-1.3.1-freebsd-amd64.pkg
+sudo pkg add ./packaging/dist/go-flow-api-1.3.2-freebsd-amd64.pkg
 
 . /usr/local/etc/profile.d/go-flow-api.sh
 go-flowAPI -h
@@ -260,16 +260,16 @@ sudo pkg delete go-flow-api
 ### 7. Windows — WinGet, Standalone `.msi`, or Portable `.zip`
 
 ```powershell
-# WinGet (once published, or via --manifest .\packaging\dist\winget\e\ETLMadness\GoFlowAPI\1.3.1\)
+# WinGet (once published, or via --manifest .\packaging\dist\winget\e\ETLMadness\GoFlowAPI\1.3.2\)
 winget install --id ETLMadness.GoFlowAPI
 winget install --id ETLMadness.GoFlowAPI --scope machine --installer-type wix
 
 # Standalone silent MSI install into C:\Program Files\ETL Madness\Flow API\
-msiexec /i .\packaging\dist\go-flow-api-1.3.1-windows-amd64.msi /qn /norestart
+msiexec /i .\packaging\dist\go-flow-api-1.3.2-windows-amd64.msi /qn /norestart
 
 # Uninstall MSI (remove Windows Service first if registered)
 & "C:\Program Files\ETL Madness\Flow API\share\services\windows\Uninstall-GoFlowAPIService.ps1"
-msiexec /x .\packaging\dist\go-flow-api-1.3.1-windows-amd64.msi /qn /norestart
+msiexec /x .\packaging\dist\go-flow-api-1.3.2-windows-amd64.msi /qn /norestart
 ```
 
 ---

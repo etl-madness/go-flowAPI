@@ -53,10 +53,10 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
         if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($rawTag)) {
             $Version = $rawTag -replace '^[vV]', ''
         } else {
-            $Version = "1.3.1"
+            $Version = "1.3.2"
         }
     } catch {
-        $Version = "1.3.1"
+        $Version = "1.3.2"
     }
 }
 

@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -142,16 +144,198 @@ func parseExplicitIDRef(ref string) (int64, bool) {
 	return 0, false
 }
 
-// loadSQLResourceURI executes a sql://<driver>@<dsn>#<SQL_QUERY> URI and returns the first column of the first row.
+const sqlResourceIdentChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+
+type sqlFilterCandidate struct {
+	param      string
+	defaultCol string
+}
+
+var sqlResourceFilterCandidates = []sqlFilterCandidate{
+	{"key", "Name"},
+	{"name", "Name"},
+	{"id", "ID"},
+}
+
+// sanitizeSQLResourceIdent validates a single SQL identifier against ^[A-Za-z_][A-Za-z0-9_]{0,127}$
+// and reconstructs it strictly from constant alphabet characters so no user-tainted bytes enter SQL text.
+func sanitizeSQLResourceIdent(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if len(trimmed) == 0 || len(trimmed) > 128 {
+		return "", fmt.Errorf("invalid SQL identifier %q", raw)
+	}
+	buf := make([]byte, len(trimmed))
+	for i := 0; i < len(trimmed); i++ {
+		ch := trimmed[i]
+		idx := strings.IndexByte(sqlResourceIdentChars, ch)
+		if idx < 0 || (i == 0 && ch >= '0' && ch <= '9') {
+			return "", fmt.Errorf("invalid SQL identifier %q", raw)
+		}
+		buf[i] = sqlResourceIdentChars[idx]
+	}
+	return string(buf), nil
+}
+
+// sanitizeSQLResourceTable validates a SQL table reference ("<table>" or "<schema>.<table>").
+func sanitizeSQLResourceTable(raw string) (string, string, error) {
+	parts := strings.Split(strings.TrimSpace(raw), ".")
+	if len(parts) == 1 {
+		tbl, err := sanitizeSQLResourceIdent(parts[0])
+		if err != nil {
+			return "", "", fmt.Errorf("invalid SQL table %q: %w", raw, err)
+		}
+		return tbl, tbl, nil
+	}
+	if len(parts) == 2 {
+		schema, err := sanitizeSQLResourceIdent(parts[0])
+		if err != nil {
+			return "", "", fmt.Errorf("invalid SQL schema in %q: %w", raw, err)
+		}
+		tbl, err := sanitizeSQLResourceIdent(parts[1])
+		if err != nil {
+			return "", "", fmt.Errorf("invalid SQL table in %q: %w", raw, err)
+		}
+		return schema + "." + tbl, tbl, nil
+	}
+	return "", "", fmt.Errorf("invalid SQL table %q (expected <table> or <schema>.<table>)", raw)
+}
+
+func defaultSQLResourceColumn(baseTable string) string {
+	switch strings.ToLower(baseTable) {
+	case "flow_pipeline_content":
+		return "PipelineXML"
+	case "flow_options_content":
+		return "OptionsXML"
+	case "flow_config_content":
+		return "ConfigXML"
+	default:
+		return ""
+	}
+}
+
+func resolveSQLResourceColumn(params url.Values, baseTable string) (string, error) {
+	_, hasColumn := params["column"]
+	_, hasCol := params["col"]
+	if hasColumn && hasCol {
+		return "", fmt.Errorf("specify either column or col, not both")
+	}
+	rawCol := params.Get("column")
+	if hasCol {
+		rawCol = params.Get("col")
+	}
+	if strings.TrimSpace(rawCol) == "" {
+		if def := defaultSQLResourceColumn(baseTable); def != "" {
+			return def, nil
+		}
+		return "", fmt.Errorf("missing column parameter for table %q", baseTable)
+	}
+	return sanitizeSQLResourceIdent(rawCol)
+}
+
+func resolveSQLResourceFilter(params url.Values) (string, string, bool, error) {
+	defaultKeyCol := ""
+	filterVal := ""
+	hasFilter := false
+	for _, c := range sqlResourceFilterCandidates {
+		if _, ok := params[c.param]; ok {
+			if hasFilter {
+				return "", "", false, fmt.Errorf("specify at most one of key, name, or id")
+			}
+			hasFilter = true
+			defaultKeyCol = c.defaultCol
+			filterVal = params.Get(c.param)
+		}
+	}
+	rawKeyCol := strings.TrimSpace(params.Get("key_col"))
+	if !hasFilter {
+		if rawKeyCol != "" {
+			return "", "", false, fmt.Errorf("key_col requires key, name, or id")
+		}
+		return "", "", false, nil
+	}
+	if rawKeyCol == "" {
+		return defaultKeyCol, filterVal, true, nil
+	}
+	safeKeyCol, err := sanitizeSQLResourceIdent(rawKeyCol)
+	return safeKeyCol, filterVal, err == nil, err
+}
+
+func validateSQLResourceParams(params url.Values) error {
+	for k, vals := range params {
+		switch k {
+		case "table", "column", "col", "key_col", "key", "name", "id":
+			if len(vals) != 1 {
+				return fmt.Errorf("duplicate SQL lookup parameter %q", k)
+			}
+		default:
+			return fmt.Errorf("unsupported SQL lookup parameter %q (expected #table=<schema.table>&column=<xml_col>[&key_col=<col>&key=<val>])", k)
+		}
+	}
+	return nil
+}
+
+func sqlResourceFirstPlaceholder(dialect string) string {
+	switch strings.ToLower(dialect) {
+	case "postgres", "postgresql":
+		return "$1"
+	case "sqlserver", "mssql", "azuresql":
+		return "@p1"
+	case "oracle":
+		return ":1"
+	default:
+		return "?"
+	}
+}
+
+// buildSQLResourceQuery parses a structured URL-query fragment (#table=<schema.table>&column=<xml_col>[&key_col=<col>&key=<val>])
+// into a parameterized SELECT statement using strictly validated SQL identifiers and bound filter parameters.
+func buildSQLResourceQuery(fragment, dialect string) (string, []any, error) {
+	trimmed := strings.TrimSpace(fragment)
+	if trimmed == "" {
+		return "", nil, fmt.Errorf("empty SQL lookup fragment; expected #table=<schema.table>&column=<xml_col>[&key_col=<col>&key=<val>]")
+	}
+	params, err := url.ParseQuery(trimmed)
+	if err != nil {
+		return "", nil, fmt.Errorf("invalid SQL lookup fragment: %w", err)
+	}
+	if err := validateSQLResourceParams(params); err != nil {
+		return "", nil, err
+	}
+	safeTable, baseTable, err := sanitizeSQLResourceTable(params.Get("table"))
+	if err != nil {
+		return "", nil, err
+	}
+	safeCol, err := resolveSQLResourceColumn(params, baseTable)
+	if err != nil {
+		return "", nil, err
+	}
+	keyCol, filterVal, hasFilter, err := resolveSQLResourceFilter(params)
+	if err != nil {
+		return "", nil, err
+	}
+	if !hasFilter {
+		return "SELECT " + safeCol + " FROM " + safeTable, nil, nil
+	}
+	return "SELECT " + safeCol + " FROM " + safeTable + " WHERE " + keyCol + " = " + sqlResourceFirstPlaceholder(dialect), []any{filterVal}, nil
+}
+
+// loadSQLResourceURI resolves a structured sql://<driver>@<dsn>#table=<schema.table>&column=<xml_col>[&key_col=<col>&key=<val>]
+// (or db://...) URI using validated identifiers and bound query parameters, returning the artifact bytes.
 func loadSQLResourceURI(ctx context.Context, uri string) ([]byte, error) {
 	hashIdx := strings.LastIndex(uri, "#")
 	if hashIdx < 0 {
-		return nil, fmt.Errorf("invalid SQL URI (missing #<SQL_QUERY> fragment)")
+		return nil, fmt.Errorf("invalid SQL URI (missing #table=... lookup fragment)")
 	}
 	dsnPart := strings.TrimSpace(uri[:hashIdx])
-	query := strings.TrimSpace(uri[hashIdx+1:])
-	if dsnPart == "" || query == "" {
-		return nil, fmt.Errorf("invalid SQL URI (empty DSN or query)")
+	fragment := strings.TrimSpace(uri[hashIdx+1:])
+	if dsnPart == "" || fragment == "" {
+		return nil, fmt.Errorf("invalid SQL URI (empty DSN or lookup fragment)")
+	}
+
+	_, dialect, _ := ParseDSN(dsnPart)
+	sqlQuery, args, err := buildSQLResourceQuery(fragment, dialect)
+	if err != nil {
+		return nil, err
 	}
 
 	db, _, err := OpenDatabase(dsnPart)
@@ -163,34 +347,15 @@ func loadSQLResourceURI(ctx context.Context, uri string) ([]byte, error) {
 	qCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	rows, err := db.QueryContext(qCtx, query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	if !rows.Next() {
-		if err := rows.Err(); err != nil {
-			return nil, err
+	var rawVal any
+	if err := db.QueryRowContext(qCtx, sqlQuery, args...).Scan(&rawVal); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("SQL resource query returned 0 rows")
 		}
-		return nil, fmt.Errorf("SQL resource query returned 0 rows")
-	}
-
-	cols, err := rows.Columns()
-	if err != nil || len(cols) == 0 {
-		return nil, fmt.Errorf("SQL resource query returned no columns")
-	}
-
-	vals := make([]any, len(cols))
-	ptrs := make([]any, len(cols))
-	for i := range vals {
-		ptrs[i] = &vals[i]
-	}
-	if err := rows.Scan(ptrs...); err != nil {
 		return nil, err
 	}
 
-	switch v := vals[0].(type) {
+	switch v := rawVal.(type) {
 	case []byte:
 		return v, nil
 	case string:

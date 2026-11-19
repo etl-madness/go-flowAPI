@@ -34,7 +34,7 @@ resolve_version() {
     elif command -v git >/dev/null 2>&1 && git -C "$REPO_ROOT" describe --tags --abbrev=0 >/dev/null 2>&1; then
         raw_ver=$(git -C "$REPO_ROOT" describe --tags --abbrev=0)
     else
-        raw_ver="1.3.1"
+        raw_ver="1.3.2"
     fi
     # Strip leading 'v' or 'V'
     printf '%s' "$raw_ver" | sed 's/^[vV]//'

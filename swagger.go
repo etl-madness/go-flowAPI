@@ -338,7 +338,7 @@ func (s *APIServer) BuildOpenAPISpec(r *http.Request) map[string]any {
 		"openapi": "3.0.3",
 		"info": map[string]any{
 			"title":   "go-flowAPI — CRUD, File Upload, Execution & Telemetry API",
-			"version": "1.3.1",
+			"version": "1.3.2",
 			"description": "Unified REST API for managing `go-flow` database artifacts (`pipeline`, `options`, `config`), " +
 				"uploading XML/JSON files to the database, executing and validating pipelines (with full CLI/Builder parity, " +
 				"live SSE streaming, and `node_output` logging), and querying execution & API audit telemetry.\n\n" +

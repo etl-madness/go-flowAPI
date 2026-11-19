@@ -3,9 +3,9 @@ title: go-flowAPI Documentation Hub & Complete Reference
 description: Complete reference for go-flowAPI including cross-platform compilation (Windows, Linux, FreeBSD, macOS), Docker deployment, and full REST API endpoint overview for the Flow Ecosystem.
 ---
 
-# go-flowAPI — Enterprise Orchestration & Execution Service (`v1.3.1`)
+# go-flowAPI — Enterprise Orchestration & Execution Service (`v1.3.2`)
 
-> **Version:** `1.3.1` | **Companion Studio UI:** `FlowUI v1.3.1`
+> **Version:** `1.3.2` | **Companion Studio UI:** `FlowUI v1.3.1`
 
 `go-flowAPI` is the centralized REST API, artifact repository, live Server-Sent Events (SSE) execution gateway, granular pipeline ACL engine, and multi-database telemetry hub for the **[Flow Ecosystem](https://etl-madness.github.io/flow-docs/)**. It wraps the `go-flow` ETL engine directly in-process via Go modules and provides a unified control plane for `FlowUI`, `FlowCanvas`, `py-flow-test`, CI/CD pipelines, and enterprise schedulers.
 
