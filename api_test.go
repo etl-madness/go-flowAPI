@@ -3034,4 +3034,32 @@ func TestBuildSQLResourceQueryAndLoader(t *testing.T) {
 	if _, err := loadSQLResourceURI(ctx, base+"z"); err == nil {
 		t.Fatalf("expected error scanning NULL value")
 	}
+
+	// Verify local filesystem path sanitization and confinement helpers
+	tmpOut := filepath.Join(t.TempDir(), "safe_out.xml")
+	if err := writeSafeLocalFile(tmpOut, []byte("<ok/>"), 0644); err != nil {
+		t.Fatalf("writeSafeLocalFile failed: %v", err)
+	}
+	if got, err := readSafeLocalFile(tmpOut); err != nil || string(got) != "<ok/>" {
+		t.Fatalf("readSafeLocalFile failed: %q, %v", string(got), err)
+	}
+	for _, unsafePath := range []string{
+		"",
+		"../secret.xml",
+		"sub/../../secret.xml",
+		"bad\x00name.xml",
+		filepath.Join(t.TempDir(), "bad\x01char.xml"),
+		`C:\Windows\System32\drivers\etc\hosts`,
+		"/etc/passwd",
+	} {
+		if _, err := readSafeLocalFile(unsafePath); err == nil {
+			t.Fatalf("expected readSafeLocalFile error for %q", unsafePath)
+		}
+		if err := writeSafeLocalFile(unsafePath, []byte("x"), 0644); err == nil {
+			t.Fatalf("expected writeSafeLocalFile error for %q", unsafePath)
+		}
+	}
+	if _, ok := sanitizeRelativeLocalPath("."); ok {
+		t.Fatalf("expected sanitizeRelativeLocalPath('.') to be rejected")
+	}
 }

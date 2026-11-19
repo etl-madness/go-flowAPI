@@ -10,6 +10,7 @@
 ## What's New in `v1.3.2`
 
 - **Parameterized SQL Resource URI Lookups (`sql://` & `db://` Security Hardening)**: Replaced raw SQL fragments after `#` with structured URL-query-style lookup parameters (`sql://<driver>@<dsn>#table=<schema.table>[&column=<xml_col>][&key_col=<col>&key=<val> | &name=<val> | &id=<val>]`), validating all SQL identifiers against `^[A-Za-z_][A-Za-z0-9_]{0,127}$`, defaulting standard `flow_*_content` XML columns (`PipelineXML`, `OptionsXML`, `ConfigXML`), and binding filter values via dialect-specific placeholders (`@p1`, `$1`, `:1`, `?`). Eliminates CodeQL `go/sql-injection` taint risks while maintaining full multi-database parity with `go-flow v1.2.2`.
+- **Local Filesystem Path-Traversal Hardening (`config.go`, `executor.go`)**: Sanitizes and confines all local filesystem fallback reads (`file`, `options`, `config`, `key_file`, `public_key`, `cert`, `ca_cert`, `keyring`, `signature`, `xsd`) and XSLT output writes (`out`) strictly to the server working directory and system temporary directory, rejecting `..` traversal segments and non-local relative paths (remediating CodeQL `go/path-injection` alerts).
 - **Container Scripting Runtime Support**: Added PowerShell (`pwsh`) and `dotnet-script` runtime support in the `go-flowAPI` Docker image for `<script>` pipeline nodes.
 - **Code Quality & Test Coverage Enhancements**: Consolidated shared ACL, HTTP handler, and OpenAPI schema helpers (`<2%` code duplication) and expanded automated unit & integration test coverage across `api_test.go`.
 

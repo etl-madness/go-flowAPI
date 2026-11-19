@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -207,7 +208,7 @@ func resolveKey(cliKey, keyFilePath string) string {
 		return strings.TrimSpace(cliKey)
 	}
 	if strings.TrimSpace(keyFilePath) != "" {
-		if data, err := os.ReadFile(strings.TrimSpace(keyFilePath)); err == nil {
+		if data, err := readSafeLocalFile(keyFilePath); err == nil {
 			return strings.TrimSpace(string(data))
 		}
 	}
@@ -218,4 +219,77 @@ func resolveKey(cliKey, keyFilePath string) string {
 		return envKey
 	}
 	return ""
+}
+
+const safeLocalPathAlphabet = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+
+func sanitizeRelativeLocalPath(rel string) (string, bool) {
+	if rel == "" || rel == "." || strings.Contains(rel, "..") || !filepath.IsLocal(rel) {
+		return "", false
+	}
+	var b strings.Builder
+	b.Grow(len(rel))
+	for i := 0; i < len(rel); i++ {
+		idx := strings.IndexByte(safeLocalPathAlphabet, rel[i])
+		if idx < 0 {
+			return "", false
+		}
+		b.WriteByte(safeLocalPathAlphabet[idx])
+	}
+	return b.String(), true
+}
+
+func allowedLocalBaseDirs() []string {
+	var dirs []string
+	if cwd, err := os.Getwd(); err == nil && cwd != "" {
+		if abs, err := filepath.Abs(cwd); err == nil {
+			dirs = append(dirs, filepath.Clean(abs))
+		}
+	}
+	if tmp := os.TempDir(); tmp != "" {
+		if abs, err := filepath.Abs(tmp); err == nil {
+			dirs = append(dirs, filepath.Clean(abs))
+		}
+	}
+	return dirs
+}
+
+func resolveSafeLocalPath(rawPath string) (string, error) {
+	trimmed := strings.TrimSpace(rawPath)
+	if trimmed == "" || strings.ContainsRune(trimmed, 0) || strings.Contains(trimmed, "..") {
+		return "", fmt.Errorf("invalid or unsafe file path")
+	}
+	absPath, err := filepath.Abs(filepath.Clean(trimmed))
+	if err != nil {
+		return "", err
+	}
+	for _, baseDir := range allowedLocalBaseDirs() {
+		rel, relErr := filepath.Rel(baseDir, absPath)
+		if relErr != nil {
+			continue
+		}
+		if cleanRel, ok := sanitizeRelativeLocalPath(rel); ok {
+			safePath := filepath.Join(baseDir, cleanRel)
+			if !strings.Contains(safePath, "..") && strings.HasPrefix(safePath, baseDir) {
+				return safePath, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("file path %q is outside permitted directories", rawPath)
+}
+
+func readSafeLocalFile(rawPath string) ([]byte, error) {
+	safePath, err := resolveSafeLocalPath(rawPath)
+	if err != nil {
+		return nil, err
+	}
+	return os.ReadFile(safePath)
+}
+
+func writeSafeLocalFile(rawPath string, data []byte, perm os.FileMode) error {
+	safePath, err := resolveSafeLocalPath(rawPath)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(safePath, data, perm)
 }
