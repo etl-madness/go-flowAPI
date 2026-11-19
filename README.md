@@ -1,13 +1,19 @@
-# `go-flowAPI` — CRUD, File Upload, Execution & Telemetry API for `Flow Ecosystem` (`v1.3.1`)
+# `go-flowAPI` — CRUD, File Upload, Execution & Telemetry API for `Flow Ecosystem` (`v1.3.2`)
 
-> **Version:** `1.3.1` | **OpenAPI 3.0.3 Spec:** `/api/v1/openapi.json` | **Swagger UI:** `/swagger/`  
-> **Companion Studio UI:** `FlowUI v1.3.1`
+> **Version:** `1.3.2` | **OpenAPI 3.0.3 Spec:** `/api/v1/openapi.json` | **Swagger UI:** `/swagger/`  
+> **Companion Studio UI:** `FlowUI v1.3.1` | **Release Notes:** [`RELEASE_NOTES.md`](./RELEASE_NOTES.md)
 
 `go-flowAPI` is a unified REST API for managing `go-flow` database artifacts (`pipelines`, `options`, `configs`), uploading XML/JSON files to the database, executing pipelines with full CLI/Builder parity (including SSE live streaming and `node_output` logging), enforcing granular per-pipeline & per-pipeline-group ACLs, and auditing all API and pipeline events.
 
 **Online Documentation:** [https://etl-madness.github.io/flow-docs/](https://etl-madness.github.io/flow-docs/)
 
-## What's New in `v1.3.1`
+## What's New in `v1.3.2`
+
+- **Parameterized SQL Resource URI Lookups (`sql://` & `db://` Security Hardening)**: Replaced raw SQL fragments after `#` with structured URL-query-style lookup parameters (`sql://<driver>@<dsn>#table=<schema.table>[&column=<xml_col>][&key_col=<col>&key=<val> | &name=<val> | &id=<val>]`), validating all SQL identifiers against `^[A-Za-z_][A-Za-z0-9_]{0,127}$`, defaulting standard `flow_*_content` XML columns (`PipelineXML`, `OptionsXML`, `ConfigXML`), and binding filter values via dialect-specific placeholders (`@p1`, `$1`, `:1`, `?`). Eliminates CodeQL `go/sql-injection` taint risks while maintaining full multi-database parity with `go-flow v1.2.2`.
+- **Container Scripting Runtime Support**: Added PowerShell (`pwsh`) and `dotnet-script` runtime support in the `go-flowAPI` Docker image for `<script>` pipeline nodes.
+- **Code Quality & Test Coverage Enhancements**: Consolidated shared ACL, HTTP handler, and OpenAPI schema helpers (`<2%` code duplication) and expanded automated unit & integration test coverage across `api_test.go`.
+
+### Highlights from `v1.3.1`
 
 - **Granular Pipeline & Pipeline-Group ACLs (`dbo.flow_pipeline_acl`)**: User- and group-level `allow` / `deny` rules for `create`, `read`, `update`, `delete`, `execute`, and `all` across individual pipelines, logical pipeline groups (explicit memberships + case-insensitive `name_pattern` globs such as `fin_*`), or wildcard `*`.
 - **Default Strict Pipeline Authorization (`-strict-acl=true` by default)**: All non-admin (`non-"all"`) accounts have **no access to pipelines by default** unless granted via explicit `allow` rules in `dbo.flow_pipeline_acl` (matching the user or one of their API/AD groups, with explicit `deny` overriding `allow`). Legacy global-role fallback for pipelines requires explicit opt-out (`-strict-acl=false` or `FLOW_API_STRICT_ACL=false`).

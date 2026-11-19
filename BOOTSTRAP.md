@@ -257,7 +257,7 @@ curl -u "admin:ChangeMe!StrongAdminPass2026" \
   }'
 ```
 
-### Summary of Permission Scopes (`v1.3.1`)
+### Summary of Permission Scopes (`v1.3.2`)
 
 | Permission | Allowed Endpoints |
 | :--- | :--- |

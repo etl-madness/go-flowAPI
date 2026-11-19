@@ -32,11 +32,11 @@ packaging/dist/winget/e/ETLMadness/GoFlowAPI/<version>/
 .\packaging\scripts\Build-Windows.ps1 -Format all -Arch amd64
 
 # 2. Validate WinGet manifest schema & rules
-winget validate --manifest .\packaging\dist\winget\e\ETLMadness\GoFlowAPI\1.3.1\
+winget validate --manifest .\packaging\dist\winget\e\ETLMadness\GoFlowAPI\1.3.2\
 
 # 3. Enable local manifest installs (one-time admin setting) & test install
 winget settings --enable LocalManifestFiles
-winget install --manifest .\packaging\dist\winget\e\ETLMadness\GoFlowAPI\1.3.1\
+winget install --manifest .\packaging\dist\winget\e\ETLMadness\GoFlowAPI\1.3.2\
 
 # 4. (Optional, Elevated PowerShell) Register & start the native Windows Service ('GoFlowAPI'):
 & "C:\Program Files\ETL Madness\Flow API\share\services\windows\Install-GoFlowAPIService.ps1" -Start

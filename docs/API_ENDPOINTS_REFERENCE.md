@@ -3,9 +3,9 @@ title: go-flowAPI Complete Endpoints & RBAC Reference
 description: Comprehensive overview of all go-flowAPI REST and Server-Sent Events (SSE) endpoints, RBAC & granular pipeline ACL permissions, request/response schemas, and telemetry behavior
 ---
 
-# `go-flowAPI` — Complete API Endpoints, RBAC & Granular ACL Reference (`v1.3.1`)
+# `go-flowAPI` — Complete API Endpoints, RBAC & Granular ACL Reference (`v1.3.2`)
 
-> **Version:** `1.3.1` | **Unified REST & Server-Sent Events (SSE) API Reference**  
+> **Version:** `1.3.2` | **Unified REST & Server-Sent Events (SSE) API Reference**  
 > **OpenAPI 3.0.3 Spec:** `/api/v1/openapi.json` | **Interactive Swagger UI:** `/swagger/` (or `/docs`)  
 > **Authentication & Authorization:** Database-Backed HTTP BasicAuth, Windows/AD Group Resolution (`dbo.flow_api_users`), API User Groups (`dbo.flow_api_groups`), Pipeline Groups (`dbo.flow_pipeline_groups`), and Default-Strict Granular Pipeline ACLs (`dbo.flow_pipeline_acl`, `-strict-acl=true` by default)
 
@@ -332,7 +332,7 @@ flowchart TD
 | `pipeline_id` | `pipeline_id` | `int64` | Explicit `dbo.flow_pipeline_content.ID` to execute. |
 | `options_id` | `options_id` | `int64` | Explicit `dbo.flow_options_content.ID` to load CLI options from. |
 | `config_id` | `config_id` | `int64` | Explicit `dbo.flow_config_content.ID` to merge environment overrides from. |
-| `file` | `file` | `string` | Pipeline reference (`<name>`, `db:<name>`, `id:<id>`, `sql://...`, or file path). |
+| `file` | `file` | `string` | Pipeline reference (`<name>`, `db:<name>`, `id:<id>`, `sql://<driver>@<dsn>#table=<schema.table>[&column=<col>&key_col=<col>&key=<val>]`, or file path). |
 | `file_xml` | — | `string` | Inline pipeline XML string (requires wildcard `*` `execute` or global `execution-only`/`all`). |
 | `options` | `options` | `string` | Options artifact reference (`db:<name>`, `id:<id>`, or path). |
 | `options_xml` | — | `string` | Inline `<cli_options>` XML string. |

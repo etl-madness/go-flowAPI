@@ -555,8 +555,8 @@ func TestSwaggerAndBootstrap(t *testing.T) {
 		if parsed["openapi"] != "3.0.3" {
 			t.Fatalf("expected openapi 3.0.3, got %v", parsed["openapi"])
 		}
-		if info, ok := parsed["info"].(map[string]any); !ok || info["version"] != "1.3.1" {
-			t.Fatalf("expected OpenAPI info.version 1.3.1, got %v", parsed["info"])
+		if info, ok := parsed["info"].(map[string]any); !ok || info["version"] != "1.3.2" {
+			t.Fatalf("expected OpenAPI info.version 1.3.2, got %v", parsed["info"])
 		}
 		paths, ok := parsed["paths"].(map[string]any)
 		if !ok || paths["/api/v1/execute"] == nil || paths["/api/v1/users"] == nil || paths["/api/v1/upload/{type}"] == nil {
@@ -1587,7 +1587,8 @@ func TestExecutorAdvancedFeatures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpsertArtifact failed: %v", err)
 	}
-	sqlURI := "sql://sqlite@" + strings.TrimPrefix(apiSrv.cfg.ConnectionString, "sqlite://") + "#SELECT PipelineXML FROM flow_pipeline_content WHERE Name = 'sql_uri_pipe'"
+	sqliteBase := "sql://sqlite@" + strings.TrimPrefix(apiSrv.cfg.ConnectionString, "sqlite://")
+	sqlURI := sqliteBase + "#table=flow_pipeline_content&name=sql_uri_pipe"
 	loadedBytes, err := loadSQLResourceURI(ctx, sqlURI)
 	if err != nil || !strings.Contains(string(loadedBytes), "HelloNode") {
 		t.Fatalf("loadSQLResourceURI failed: %v, %s", err, string(loadedBytes))
@@ -1595,7 +1596,10 @@ func TestExecutorAdvancedFeatures(t *testing.T) {
 	if _, err := loadSQLResourceURI(ctx, "invalid_uri_without_hash"); err == nil {
 		t.Fatalf("expected error for SQL URI without #")
 	}
-	if _, err := loadSQLResourceURI(ctx, apiSrv.cfg.ConnectionString+"#SELECT PipelineXML FROM flow_pipeline_content WHERE Name = 'nonexistent'"); err == nil {
+	if _, err := loadSQLResourceURI(ctx, sqliteBase+"#SELECT PipelineXML FROM flow_pipeline_content WHERE Name = 'sql_uri_pipe'"); err == nil {
+		t.Fatalf("expected error for raw SQL fragment in loadSQLResourceURI")
+	}
+	if _, err := loadSQLResourceURI(ctx, apiSrv.cfg.ConnectionString+"#table=flow_pipeline_content&column=PipelineXML&key_col=Name&key=nonexistent"); err == nil {
 		t.Fatalf("expected error for 0 rows in loadSQLResourceURI")
 	}
 
@@ -2458,7 +2462,7 @@ func TestGranularACLExecutionPrecedenceWindowsAndStrictMode(t *testing.T) {
 		{"options ID indirection to secret", fmt.Sprintf("/api/v1/execute/options/%d", optSecretRec.ID), ""},
 		{"inline options_xml indirection to secret", "/api/v1/execute", `{"options_xml":` + mustJSONString(optSecretXML) + `}`},
 		{"inline file_xml bypass attempt", "/api/v1/execute", `{"file_xml":` + mustJSONString(samplePipelineXML) + `}`},
-		{"sql:// URI bypass attempt", "/api/v1/execute", `{"file":"sql://sqlserver/dbo.flow_pipeline_content/PipelineXML?id=1"}`},
+		{"sql:// URI bypass attempt", "/api/v1/execute", `{"file":"sql://sqlserver@localhost:1433#table=dbo.flow_pipeline_content&id=1"}`},
 		{"local file path bypass attempt", "/api/v1/execute", `{"file":"./local_pipeline.xml"}`},
 		{"direct config execution by ID", fmt.Sprintf("/api/v1/execute/config/%d", cfgRec.ID), ""},
 	}
@@ -2950,5 +2954,84 @@ func TestGranularACLCompleteEndpointsKerberosAndHelpers(t *testing.T) {
 	}()
 	if err := <-bootErrCh; err != nil {
 		t.Fatalf("runAPIServer with bootstrap user failed: %v", err)
+	}
+}
+
+func TestBuildSQLResourceQueryAndLoader(t *testing.T) {
+	validCases := []struct {
+		fragment  string
+		dialect   string
+		wantQuery string
+		wantArg   string
+		hasArg    bool
+	}{
+		{"table=dbo.flow_pipeline_content&name=daily_etl", "sqlserver", "SELECT PipelineXML FROM dbo.flow_pipeline_content WHERE Name = @p1", "daily_etl", true},
+		{"table=flow_options_content&key=opt_global", "postgres", "SELECT OptionsXML FROM flow_options_content WHERE Name = $1", "opt_global", true},
+		{"table=dbo.flow_config_content&id=42", "oracle", "SELECT ConfigXML FROM dbo.flow_config_content WHERE ID = :1", "42", true},
+		{"table=custom_catalog&col=xml_body&key_col=slug&key=sales_job", "sqlite", "SELECT xml_body FROM custom_catalog WHERE slug = ?", "sales_job", true},
+		{"table=single_row_store&column=payload", "mysql", "SELECT payload FROM single_row_store", "", false},
+	}
+	for _, tc := range validCases {
+		q, args, err := buildSQLResourceQuery(tc.fragment, tc.dialect)
+		if err != nil {
+			t.Fatalf("fragment %q (%s) unexpected error: %v", tc.fragment, tc.dialect, err)
+		}
+		if q != tc.wantQuery {
+			t.Fatalf("fragment %q: got query %q, want %q", tc.fragment, q, tc.wantQuery)
+		}
+		if tc.hasArg && (len(args) != 1 || args[0] != tc.wantArg) {
+			t.Fatalf("fragment %q: got args %v, want [%q]", tc.fragment, args, tc.wantArg)
+		}
+		if !tc.hasArg && len(args) != 0 {
+			t.Fatalf("fragment %q: expected no args, got %v", tc.fragment, args)
+		}
+	}
+
+	invalidFragments := []string{
+		"",
+		"table=bad;drop&column=xml",
+		"SELECT PipelineXML FROM flow_pipeline_content WHERE Name='x'",
+		"table=flow_pipeline_content&table=dup&name=x",
+		"table=&column=xml",
+		"table=1leading_digit&column=xml",
+		"table=bad-schema.tbl&column=xml",
+		"table=dbo.bad-tbl&column=xml",
+		"table=a.b.c&column=xml",
+		"table=custom_tbl",
+		"table=custom_tbl&column=a&col=b",
+		"table=custom_tbl&column=bad-col",
+		"table=flow_pipeline_content&key=a&name=b",
+		"table=flow_pipeline_content&key_col=Name",
+		"table=flow_pipeline_content&key_col=bad-col&key=x",
+	}
+	for _, frag := range invalidFragments {
+		if _, _, err := buildSQLResourceQuery(frag, "sqlite"); err == nil {
+			t.Fatalf("expected error for invalid fragment %q", frag)
+		}
+	}
+
+	// Verify scan value branches ([]byte, NULL, numeric) and empty DSN/fragment handling in loadSQLResourceURI
+	ctx := context.Background()
+	if _, err := loadSQLResourceURI(ctx, "#table=flow_pipeline_content&name=x"); err == nil {
+		t.Fatalf("expected error for empty DSN before #")
+	}
+	dbPath := t.TempDir() + "/scan_types.db"
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open failed: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE raw_items (k TEXT, b BLOB, n INTEGER, z TEXT); INSERT INTO raw_items VALUES ('r1', X'3C612F3E', 99, NULL)`); err != nil {
+		t.Fatalf("setup raw_items failed: %v", err)
+	}
+	base := "sql://sqlite@" + dbPath + "#table=raw_items&key_col=k&key=r1&column="
+	if b, err := loadSQLResourceURI(ctx, base+"b"); err != nil || string(b) != "<a/>" {
+		t.Fatalf("expected <a/> from BLOB scan, got %q, %v", string(b), err)
+	}
+	if n, err := loadSQLResourceURI(ctx, base+"n"); err != nil || string(n) != "99" {
+		t.Fatalf("expected 99 from numeric scan, got %q, %v", string(n), err)
+	}
+	if _, err := loadSQLResourceURI(ctx, base+"z"); err == nil {
+		t.Fatalf("expected error scanning NULL value")
 	}
 }
