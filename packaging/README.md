@@ -1,6 +1,6 @@
 # Flow API Packaging & OS Service Guide (`/opt/flow-api` & Windows WinGet / SCM)
 
-This directory contains build scripts, package metadata, OS service definitions (`systemd`, OpenRC, SysVinit, FreeBSD `rc.d`, macOS `launchd`, and native Windows Service scripts), `man` pages, GNU `info` documentation, WiX `.msi` manifests, and WinGet YAML manifests for packaging **ETL Madness Flow API (`go-flowAPI`)** across Linux (`.deb`, `.rpm` for RHEL/Fedora/SUSE/openSUSE, and `.pkg.tar.zst` for Arch Linux), macOS (`.pkg`), FreeBSD (`.pkg`), and Windows (`.zip` & `.msi` for WinGet).
+This directory contains build scripts, package metadata, OS service definitions (`systemd`, OpenRC, SysVinit, FreeBSD `rc.d`, OpenBSD `rc.d`, macOS `launchd`, and native Windows Service scripts), `man` pages, GNU `info` documentation, WiX `.msi` manifests, and WinGet YAML manifests for packaging **ETL Madness Flow API (`go-flowAPI`)** across Linux (`.deb`, `.rpm` for RHEL/Fedora/SUSE/openSUSE, and `.pkg.tar.zst` for Arch Linux), macOS (`.pkg`), FreeBSD (`.pkg`), OpenBSD (`.tgz`), and Windows (`.zip` & `.msi` for WinGet).
 
 - **Isolated Prefixes (Zero File Conflicts with System or `go-flow`)**: Unix packages install under `/opt/flow-api`, Windows `.msi` installs under `C:\Program Files\ETL Madness\Flow API\`, and WinGet portable `.zip` installs inside `%LOCALAPPDATA%\Microsoft\WinGet\Packages\ETLMadness.GoFlowAPI_...`. It can be installed side-by-side with `go-flow` (`/opt/flow`) with zero file collisions.
 - **Non-Colliding Package Metadata**: OS packages use `go-flow-api` (`com.etlmadness.go-flow-api` on macOS, `ETLMadness.GoFlowAPI` on WinGet).
@@ -12,16 +12,16 @@ This directory contains build scripts, package metadata, OS service definitions 
 
 All packages compile `go-flowAPI` (`go-flowAPI.exe` on Windows) as a 100% pure-Go static executable (`CGO_ENABLED=0`) alongside SQL schema scripts, reference guides, `man`/`info` manuals, and OS service units:
 
-| Asset | Linux (`.deb` / `.rpm` / Arch `.pkg.tar.zst`) | macOS (`.pkg`) | FreeBSD (`.pkg`) | Windows (`.msi` / WinGet `.zip`) |
+| Asset | Linux (`.deb` / `.rpm` / Arch `.pkg.tar.zst`) | macOS (`.pkg`) | FreeBSD (`.pkg`) & OpenBSD (`.tgz`) | Windows (`.msi` / WinGet `.zip`) |
 | :--- | :--- | :--- | :--- | :--- |
 | **`go-flowAPI` binary** | `/opt/flow-api/bin/go-flowAPI` | `/opt/flow-api/bin/go-flowAPI` | `/opt/flow-api/bin/go-flowAPI` | `<Prefix>\bin\go-flowAPI.exe` |
-| **Daemon Env Config** | `/etc/go-flow-api/go-flow-api.env` *(0640, preserved)* | `/opt/flow-api/etc/go-flow-api.env` *(0600, preserved)* | `/usr/local/etc/go-flow-api/go-flow-api.env` *(0640, preserved)* | `C:\ProgramData\ETL Madness\Flow API\go-flow-api.env` |
-| **Primary OS Service** | `/usr/lib/systemd/system/go-flow-api.service` | `/opt/flow-api/share/services/launchd/com.etlmadness.go-flow-api.plist` | `/usr/local/etc/rc.d/go_flow_api` | Native SCM in `go-flowAPI.exe` + `<Prefix>\share\services\windows\*.ps1` |
-| **Alternate `rc` & Kerberos Helpers** | `/opt/flow-api/share/services/{systemd,openrc,sysvinit,kerberos}/*` | `/opt/flow-api/share/services/kerberos/go-flow-api-krb5-refresh.sh` | `/opt/flow-api/share/services/{freebsd,kerberos}/*` | — |
+| **Daemon Env Config** | `/etc/go-flow-api/go-flow-api.env` *(0640, preserved)* | `/opt/flow-api/etc/go-flow-api.env` *(0600, preserved)* | FreeBSD: `/usr/local/etc/go-flow-api/go-flow-api.env`<br>OpenBSD: `/etc/go-flow-api/go-flow-api.env` | `C:\ProgramData\ETL Madness\Flow API\go-flow-api.env` |
+| **Primary OS Service** | `/usr/lib/systemd/system/go-flow-api.service` | `/opt/flow-api/share/services/launchd/com.etlmadness.go-flow-api.plist` | FreeBSD: `/usr/local/etc/rc.d/go_flow_api`<br>OpenBSD: `/etc/rc.d/go_flow_api` | Native SCM in `go-flowAPI.exe` + `<Prefix>\share\services\windows\*.ps1` |
+| **Alternate `rc` & Kerberos Helpers** | `/opt/flow-api/share/services/{systemd,openrc,sysvinit,kerberos}/*` | `/opt/flow-api/share/services/kerberos/go-flow-api-krb5-refresh.sh` | `/opt/flow-api/share/services/{freebsd,openbsd,kerberos}/*` | — |
 | **SQL Init DDL Scripts** | `/opt/flow-api/share/sql/{sqlite,postgres,sqlserver}-init.sql` | `/opt/flow-api/share/sql/*.sql` | `/opt/flow-api/share/sql/*.sql` | `<Prefix>\share\sql\*.sql` |
 | **Reference Docs** | `/opt/flow-api/share/doc/*.md` & `/opt/flow-api/share/{man,info}/*` | `/opt/flow-api/share/doc/*.md` & `/opt/flow-api/share/{man,info}/*` | `/opt/flow-api/share/doc/*.md` & `/opt/flow-api/share/{man,info}/*` | `<Prefix>\docs\*.md` & `<Prefix>\share\man\man{1,5}\*` |
 | **State & Log Dirs** | `/var/lib/go-flow-api` & `/var/log/go-flow-api` | `/var/db/go-flow-api` & `/var/log/go-flow-api` | `/var/db/go-flow-api` & `/var/log/go-flow-api` | `C:\ProgramData\ETL Madness\Flow API\{data,logs}` |
-| **`PATH` / `MANPATH` / `INFOPATH`** | `/etc/profile.d/go-flow-api.sh` | `/private/etc/paths.d/go-flow-api` & `/private/etc/manpaths.d/go-flow-api` | `/usr/local/etc/profile.d/go-flow-api.sh` & `/usr/local/etc/man.d/go-flow-api.conf` | MSI `Part="last"` `PATH` append / WinGet `Links` |
+| **`PATH` / `MANPATH` / `INFOPATH`** | `/etc/profile.d/go-flow-api.sh` | `/private/etc/paths.d/go-flow-api` & `/private/etc/manpaths.d/go-flow-api` | FreeBSD: `/usr/local/etc/profile.d/go-flow-api.sh` & `/usr/local/etc/man.d/go-flow-api.conf`<br>OpenBSD: `/etc/profile.d/go-flow-api.sh` | MSI `Part="last"` `PATH` append / WinGet `Links` |
 
 *(On Windows, `<Prefix>` is `C:\Program Files\ETL Madness\Flow API` for `.msi` or `%LOCALAPPDATA%\Microsoft\WinGet\Packages\ETLMadness.GoFlowAPI_...` for portable `.zip`.)*
 
@@ -45,6 +45,8 @@ packaging/
 │   │   └── go-flow-api                      # LSB POSIX SysVinit /etc/init.d script
 │   ├── freebsd/
 │   │   └── go_flow_api                      # FreeBSD /etc/rc.subr service script
+│   ├── openbsd/
+│   │   └── go_flow_api                      # OpenBSD /etc/rc.d/rc.subr service script
 │   ├── launchd/
 │   │   └── com.etlmadness.go-flow-api.plist # macOS LaunchDaemon plist
 │   ├── kerberos/
@@ -67,6 +69,11 @@ packaging/
 │   ├── +MANIFEST.tmpl                       # FreeBSD pkg manifest template
 │   ├── +POST_INSTALL                        # Creates flowapi user/dirs & seeds env config
 │   └── +PRE_DEINSTALL                       # Stops go_flow_api rc.d service before removal
+├── openbsd/
+│   ├── +DESC                                # OpenBSD pkg_create description
+│   ├── +INSTALL                             # Creates flowapi user/dirs & seeds env config
+│   ├── +DEINSTALL                           # Stops go_flow_api rc.d service before removal
+│   └── PLIST.tmpl                           # OpenBSD pkg_create packing list template
 ├── windows/
 │   ├── go-flow-api.wxs                      # WiX Toolset v4/v5/v6 MSI manifest
 │   └── go-flow-api-wix3.wxs                 # WiX v3 / Linux msitools (wixl) MSI manifest
@@ -89,6 +96,7 @@ packaging/
     ├── build-arch.sh                        # Builds Arch Linux .pkg.tar.zst (makepkg or nfpm)
     ├── build-macos-pkg.sh                   # Builds macOS .pkg (pkgbuild + productbuild)
     ├── build-freebsd-pkg.sh                 # Builds FreeBSD .pkg (pkg create)
+    ├── build-openbsd-pkg.sh                 # Builds OpenBSD .tgz (pkg_create or cross-compiled tar)
     ├── build-windows.sh                     # Cross-builds Windows .zip/.msi & WinGet YAML from Unix
     ├── Build-Windows.ps1                    # Native Windows .zip/.msi & WinGet manifest builder
     └── Build-Packages.ps1                   # PowerShell cross-compile & staging helper
@@ -142,6 +150,17 @@ Run on FreeBSD (`pkg create`):
 ```sh
 sh ./packaging/scripts/build-freebsd-pkg.sh amd64
 FREEBSD_MAJOR=14 sh ./packaging/scripts/build-freebsd-pkg.sh arm64
+```
+
+### 6b. OpenBSD Package (`.tgz`)
+Run on OpenBSD (`/usr/sbin/pkg_create`; outputs `packaging/dist/openbsd-<arch>/go-flow-api-<version>.tgz` to satisfy OpenBSD `packages-specs(7)`), or cross-compile a root bundle off-host:
+```sh
+sh ./packaging/scripts/build-openbsd-pkg.sh amd64
+sh ./packaging/scripts/build-openbsd-pkg.sh arm64
+
+# Optional signify(1) signing on OpenBSD:
+OPENBSD_SIGNIFY_KEY="/etc/signify/my-pkg.sec" \
+  sh ./packaging/scripts/build-openbsd-pkg.sh amd64
 ```
 
 ### 7. Windows (`.zip` & `.msi`) + WinGet (`ETLMadness.GoFlowAPI`)
@@ -255,6 +274,30 @@ man go-flowAPI
 
 # Uninstall (automatically stops go_flow_api service before removal)
 sudo pkg delete go-flow-api
+```
+
+### 6b. OpenBSD (`.tgz`)
+
+```sh
+# Install native pkg_create package on OpenBSD (-D unsigned for unsigned local packages; omit if signed)
+doas pkg_add -D unsigned ./packaging/dist/openbsd-amd64/go-flow-api-1.3.2.tgz
+
+# (Or if installing a cross-compiled bundle built off-host:)
+doas tar -xzphf ./packaging/dist/go-flow-api-1.3.2-openbsd-amd64-bundle.tar.gz -C /
+doas sh /opt/flow-api/share/services/openbsd/+INSTALL go-flow-api-1.3.2 POST-INSTALL
+
+# Activate PATH, MANPATH, and INFOPATH in OpenBSD ksh
+. /etc/profile.d/go-flow-api.sh
+go-flowAPI -h
+man go-flowAPI
+
+# Enable & start via rcctl(8)
+doas rcctl enable go_flow_api
+doas rcctl start go_flow_api
+doas rcctl check go_flow_api
+
+# Uninstall
+doas pkg_delete go-flow-api
 ```
 
 ### 7. Windows — WinGet, Standalone `.msi`, or Portable `.zip`
@@ -593,6 +636,32 @@ sudo tail -f /var/log/go-flow-api/go-flow-api.log
 # 4. Restart or stop
 sudo service go_flow_api restart
 sudo service go_flow_api stop
+```
+
+---
+
+### 4b. OpenBSD — `rc.d` (`/etc/rc.d/go_flow_api` & `rcctl`)
+
+The OpenBSD `.tgz` installs `/etc/rc.d/go_flow_api`, creates the unprivileged `flowapi` user/group, and seeds `/etc/go-flow-api/go-flow-api.env` (`0640`).
+
+```sh
+# 1. Configure database DSN and settings (initialize SQLite first if using default SQLite path)
+doas -u flowapi sqlite3 /var/db/go-flow-api/flow_api.db < /opt/flow-api/share/sql/sqlite-init.sql
+doas vi /etc/go-flow-api/go-flow-api.env
+doas chown root:flowapi /etc/go-flow-api/go-flow-api.env
+doas chmod 0640 /etc/go-flow-api/go-flow-api.env
+
+# 2. Enable in /etc/rc.conf.local and start via rcctl(8)
+doas rcctl enable go_flow_api
+doas rcctl start go_flow_api
+
+# 3. Inspect status & tail logs
+doas rcctl check go_flow_api
+doas tail -f /var/log/go-flow-api/go-flow-api.log
+
+# 4. Restart or stop
+doas rcctl restart go_flow_api
+doas rcctl stop go_flow_api
 ```
 
 ---

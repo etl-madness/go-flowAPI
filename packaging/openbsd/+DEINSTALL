@@ -1,0 +1,13 @@
+#!/bin/sh
+# OpenBSD pre-deinstall script for go-flow-api.
+
+ACTION="${2:-DEINSTALL}"
+if [ "$ACTION" = "DEINSTALL" ]; then
+    if command -v rcctl >/dev/null 2>&1; then
+        rcctl stop go_flow_api >/dev/null 2>&1 || true
+    elif [ -x /etc/rc.d/go_flow_api ]; then
+        /etc/rc.d/go_flow_api stop >/dev/null 2>&1 || true
+    fi
+fi
+
+exit 0

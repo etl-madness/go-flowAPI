@@ -1,0 +1,39 @@
+@comment $OpenBSD$
+bin/
+@bin bin/go-flowAPI
+share/
+share/doc/
+share/doc/AD_KERBEROS_SIDECAR_GUIDE.md
+share/doc/API_ENDPOINTS_REFERENCE.md
+share/doc/BOOTSTRAP.md
+share/doc/SCHEMA.md
+share/examples/
+share/examples/go-flow-api/
+share/examples/go-flow-api/go-flow-api.env.sample
+@sample /etc/profile.d/
+share/examples/go-flow-api/go-flow-api.sh
+@sample /etc/profile.d/go-flow-api.sh
+share/info/
+share/info/dir
+share/info/go-flow-api.info.gz
+share/licenses/
+share/licenses/LICENSE
+@mandir share/man
+share/man/man1/
+@man share/man/man1/go-flowAPI.1
+share/man/man5/
+@man share/man/man5/go-flow-api.env.5
+share/services/
+share/services/kerberos/
+share/services/kerberos/go-flow-api-krb5-refresh.sh
+share/services/openbsd/
+@unexec-delete /bin/sh /opt/flow-api/share/services/openbsd/+DEINSTALL __FULLPKGNAME__ DEINSTALL
+share/services/openbsd/+DEINSTALL
+share/services/openbsd/+INSTALL
+share/services/openbsd/go_flow_api
+@exec /bin/sh /opt/flow-api/share/services/openbsd/+INSTALL __FULLPKGNAME__ POST-INSTALL
+share/sql/
+share/sql/postgres-init.sql
+share/sql/sqlite-init.sql
+share/sql/sqlserver-init.sql
+@rcscript /etc/rc.d/go_flow_api

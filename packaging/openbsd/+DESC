@@ -1,0 +1,14 @@
+ETL Madness go-flowAPI is the centralized REST API, database artifact
+repository, live Server-Sent Events (SSE) execution gateway, granular
+pipeline ACL engine, and multi-database telemetry service for the Flow
+Ecosystem.
+
+Installed isolated under /opt/flow-api with OpenBSD rc.d(8) service
+integration (/etc/rc.d/go_flow_api) and environment configuration at
+/etc/go-flow-api/go-flow-api.env.
+
+To enable and start the daemon via rcctl(8) after configuring
+FLOW_API_DSN in /etc/go-flow-api/go-flow-api.env:
+
+    doas rcctl enable go_flow_api
+    doas rcctl start go_flow_api

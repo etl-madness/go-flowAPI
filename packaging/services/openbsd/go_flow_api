@@ -1,0 +1,32 @@
+#!/bin/ksh
+#
+# OpenBSD rc.d(8) daemon script for ETL Madness go-flowAPI.
+# Installed at /etc/rc.d/go_flow_api
+#
+# Enable and start on OpenBSD using rcctl(8):
+#   doas rcctl enable go_flow_api
+#   doas rcctl start go_flow_api
+#   doas rcctl check go_flow_api
+#
+# Optional flags override via rcctl:
+#   doas rcctl set go_flow_api flags "-env-file /etc/go-flow-api/go-flow-api.env -log-file /var/log/go-flow-api/go-flow-api.log"
+
+daemon="/opt/flow-api/bin/go-flowAPI"
+daemon_user="flowapi"
+daemon_flags="-env-file /etc/go-flow-api/go-flow-api.env -log-file /var/log/go-flow-api/go-flow-api.log"
+
+. /etc/rc.d/rc.subr
+
+pexp="${daemon}.*"
+rc_bg=YES
+rc_reload=NO
+
+rc_pre() {
+    install -d -o "${daemon_user}" -g "${daemon_user}" -m 0750 /var/db/go-flow-api
+    install -d -o "${daemon_user}" -g "${daemon_user}" -m 0750 /var/log/go-flow-api
+    if [ ! -f /var/log/go-flow-api/go-flow-api.log ]; then
+        install -o "${daemon_user}" -g "${daemon_user}" -m 0640 /dev/null /var/log/go-flow-api/go-flow-api.log
+    fi
+}
+
+rc_cmd $1

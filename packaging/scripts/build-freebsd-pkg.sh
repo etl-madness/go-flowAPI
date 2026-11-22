@@ -16,9 +16,17 @@ if ! command -v pkg >/dev/null 2>&1; then
     exit 1
 fi
 
-FLOW_VERSION=$(resolve_version)
+RAW_VERSION=$(resolve_version)
+# FreeBSD pkg-version(8) treats '-' as revision separator; normalize pre-releases.
+FLOW_VERSION=$(printf '%s' "$RAW_VERSION" | tr '-' '.')
 GOARCH_TARGET=$(normalize_goarch "${GOARCH:-${1:-}}")
-FREEBSD_MAJOR="${FREEBSD_MAJOR:-15}"
+if [ -z "${FREEBSD_MAJOR:-}" ]; then
+    if [ "$(uname -s)" = "FreeBSD" ]; then
+        FREEBSD_MAJOR=$(uname -r | cut -d. -f1)
+    else
+        FREEBSD_MAJOR="14"
+    fi
+fi
 
 case "$GOARCH_TARGET" in
     amd64) FBSD_ARCH="amd64" ;;
@@ -130,8 +138,8 @@ cat > "$PLIST_FILE" <<'EOF'
 /opt/flow-api/share/licenses/LICENSE
 /usr/local/etc/rc.d/go_flow_api
 /usr/local/etc/go-flow-api/go-flow-api.env.sample
-/usr/local/etc/profile.d/go-flow-api.sh
-/usr/local/etc/man.d/go-flow-api.conf
+@config /usr/local/etc/profile.d/go-flow-api.sh
+@config /usr/local/etc/man.d/go-flow-api.conf
 EOF
 
 PKG_TMP_OUT="${WORK_DIR}/pkg-out"

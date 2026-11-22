@@ -1,32 +1,32 @@
 This is go-flow-api.info, produced from go-flow-api.texi.
 
+This manual is for ETL Madness Flow API ('go-flowAPI').
+
+Copyright (C) 2026 ETL Madness.  Licensed under the MIT License.
+
 INFO-DIR-SECTION Network Applications and Daemons
 START-INFO-DIR-ENTRY
 * go-flowAPI: (go-flow-api)Invoking go-flowAPI.       ETL Madness Flow REST API and execution daemon.
 * go-flow-api.env: (go-flow-api)Configuration File.   Environment configuration for go-flowAPI services.
 END-INFO-DIR-ENTRY
-
-This manual is for ETL Madness Flow API ('go-flowAPI').
-
-Copyright (C) 2026 ETL Madness.  Licensed under the MIT License.
 
-File: go-flow-api.info,  Node: Top,  Next: Overview and Architecture,  Up: (dir)
+File: go-flow-api.info,  Node: Top,  Next: Overview and Architecture,  Prev: (dir),  Up: (dir)
 
 ETL Madness Flow API
 ********************
 
-This manual documents *go-flowAPI*, the centralized HTTP REST API,
+This manual documents 'go-flowAPI', the centralized HTTP REST API,
 artifact repository, live Server-Sent Events (SSE) execution gateway,
-and multi-database telemetry daemon for the ETL Madness Flow ecosystem.
+granular pipeline ACL engine, and multi-database telemetry daemon for
+the ETL Madness Flow ecosystem.
 
 * Menu:
 
-* Overview and Architecture::   Supported databases, RBAC roles, and package layout.
+* Overview and Architecture::   Supported databases, RBAC/ACL model, and package layout.
 * Invoking go-flowAPI::         Command-line flags, precedence, and password hashing.
 * Configuration File::          Syntax and variables for 'go-flow-api.env'.
-* OS Services and Daemons::     systemd, OpenRC, SysVinit, FreeBSD rc.d, launchd, and Windows SCM.
-* REST API Overview::           Core endpoints for artifacts, execution, crypto, and telemetry.
-
+* OS Services and Daemons::     systemd, OpenRC, SysVinit, FreeBSD/OpenBSD rc.d, launchd, and Windows SCM.
+* REST API Overview::           Core endpoints for artifacts, execution, ACLs, crypto, and telemetry.
 
 File: go-flow-api.info,  Node: Overview and Architecture,  Next: Invoking go-flowAPI,  Prev: Top,  Up: Top
 
@@ -38,16 +38,20 @@ File: go-flow-api.info,  Node: Overview and Architecture,  Next: Invoking go-flo
 relational drivers for Microsoft SQL Server / Azure SQL, PostgreSQL,
 MySQL / MariaDB, SQLite, and Oracle.
 
-Packages install isolated under '/opt/flow-api' on Unix platforms and
+Packages install isolated under '/opt/flow-api' on Unix platforms
+(Linux, macOS, FreeBSD, and OpenBSD) and
 'C:\Program Files\ETL Madness\Flow API\' on Windows so binaries and
 manuals never conflict with system packages or with the 'go-flow' CLI
 package ('/opt/flow').
+
+By default ('-strict-acl=true'), non-admin ('non-all') accounts have
+zero access to 'pipeline' artifacts or execution unless granted via
+explicit 'allow' rules in 'dbo.flow_pipeline_acl'.
 
 'go-flowAPI' does not auto-create database tables at startup.  Before
 starting the service against a new database, apply the schema DDL in
 '/opt/flow-api/share/doc/SCHEMA.md' or the ready-to-run SQL scripts in
 '/opt/flow-api/share/sql/'.
-
 
 File: go-flow-api.info,  Node: Invoking go-flowAPI,  Next: Configuration File,  Prev: Overview and Architecture,  Up: Top
 
@@ -59,20 +63,22 @@ Synopsis:
      go-flowAPI [-env-file PATH] [-dsn URI] [-addr HOST:PORT] [options...]
      go-flowAPI -hash-password "PlaintextPassword"
 
-Command-Line Flags:
+2.1 Command-Line Flags
+======================
 
 '-dsn URI'
      Database connection string override ('FLOW_API_DSN').
 '-addr ADDR'
-     HTTP TCP listen address, default ':8080' ('FLOW_API_ADDR' / 'PORT').
+     HTTP TCP listen address, default ':8080' ('FLOW_API_ADDR' or
+     'PORT').
 '-env-file PATH'
      Load unset 'KEY=VALUE' environment variables from PATH
      ('FLOW_API_ENV_FILE').
 '-log-file PATH'
      Append server log output to PATH ('FLOW_API_LOG_FILE').
 '-service-name NAME'
-     Windows SCM service name when running as a Windows Service
-     (default 'GoFlowAPI').
+     Windows SCM service name when running as a Windows Service (default
+     'GoFlowAPI').
 '-secure-key KEY'
      Default AES-256-GCM passphrase ('FLOW_SECURE_KEY').
 '-key-file PATH'
@@ -84,13 +90,16 @@ Command-Line Flags:
      Password for '-bootstrap-user', automatically bcrypt-hashed
      ('FLOW_API_BOOTSTRAP_PASS').
 '-bootstrap-perm ROLE'
-     Permission role for '-bootstrap-user': 'all' (default),
+     Permission role for '-bootstrap-user': 'all' (default), 'scoped',
      'execution-only', 'read-only', 'write', or 'upload'.
+'-strict-acl'
+     Enforce strict ACL-only pipeline authorization so non-'all' users
+     require explicit 'dbo.flow_pipeline_acl' grants (default 'true';
+     'FLOW_API_STRICT_ACL').
 '-hash-password PASS'
      Print a bcrypt hash of PASS to stdout and exit.
 '-debug'
      Enable verbose debug logging ('FLOW_API_DEBUG').
-
 
 File: go-flow-api.info,  Node: Configuration File,  Next: OS Services and Daemons,  Prev: Invoking go-flowAPI,  Up: Top
 
@@ -99,16 +108,16 @@ File: go-flow-api.info,  Node: Configuration File,  Next: OS Services and Daemon
 
 Default file locations by platform:
 
-   * Linux: '/etc/go-flow-api/go-flow-api.env'
+   * Linux and OpenBSD: '/etc/go-flow-api/go-flow-api.env'
    * FreeBSD: '/usr/local/etc/go-flow-api/go-flow-api.env'
    * macOS: '/opt/flow-api/etc/go-flow-api.env'
    * Windows: 'C:\ProgramData\ETL Madness\Flow API\go-flow-api.env'
 
 Key environment variables include 'FLOW_API_DSN', 'FLOW_API_ADDR',
-'FLOW_SECURE_KEY', 'FLOW_API_LOG_FILE', 'FLOW_API_DEBUG', and Active
-Directory / Kerberos variables ('AD_REALM', 'KRB5_CONFIG',
-'KRB5_KTNAME', 'KRB5CCNAME').
-
+'FLOW_SECURE_KEY', 'FLOW_API_LOG_FILE', 'FLOW_API_STRICT_ACL',
+'FLOW_API_DEBUG', and Active Directory / Kerberos variables ('AD_REALM',
+'KRB5_CONFIG', 'KRB5_KTNAME', 'KRB5CCNAME', 'FLOW_WINDOWS_USER',
+'FLOW_WINDOWS_GROUPS', 'FLOW_WINDOWS_GROUPS_FILE').
 
 File: go-flow-api.info,  Node: OS Services and Daemons,  Next: REST API Overview,  Prev: Configuration File,  Up: Top
 
@@ -120,7 +129,8 @@ File: go-flow-api.info,  Node: OS Services and Daemons,  Next: REST API Overview
 
 Linux '.deb', '.rpm', and Arch '.pkg.tar.zst' packages create the
 unprivileged 'flowapi' user, install '/etc/go-flow-api/go-flow-api.env'
-(mode '0640'), and register '/usr/lib/systemd/system/go-flow-api.service':
+(mode '0640'), and register
+'/usr/lib/systemd/system/go-flow-api.service':
 
      sudo vi /etc/go-flow-api/go-flow-api.env
      sudo systemctl enable --now go-flow-api.service
@@ -131,11 +141,12 @@ unprivileged 'flowapi' user, install '/etc/go-flow-api/go-flow-api.env'
 ===============================
 
 For Alpine, Gentoo, Devuan, or SysVinit hosts, ready-to-install init
-scripts are bundled under '/opt/flow-api/share/services/openrc/go-flow-api'
-and '/opt/flow-api/share/services/sysvinit/go-flow-api'.  Copy the
-script to '/etc/init.d/go-flow-api' ('chmod 0755') and enable via
-'rc-update add go-flow-api default' (OpenRC) or 'update-rc.d go-flow-api
-defaults' / 'chkconfig --add go-flow-api' (SysVinit).
+scripts are bundled under
+'/opt/flow-api/share/services/openrc/go-flow-api' and
+'/opt/flow-api/share/services/sysvinit/go-flow-api'.  Copy the
+appropriate script to '/etc/init.d/go-flow-api' ('chmod 0755') and
+enable via 'rc-update add go-flow-api default' (OpenRC) or 'update-rc.d
+go-flow-api defaults' / 'chkconfig --add go-flow-api' (SysVinit).
 
 4.3 FreeBSD ('rc.d')
 ====================
@@ -148,7 +159,18 @@ The FreeBSD '.pkg' installs '/usr/local/etc/rc.d/go_flow_api' and seeds
      sudo service go_flow_api start
      sudo service go_flow_api status
 
-4.4 macOS ('launchd')
+4.4 OpenBSD ('rc.d' / 'rcctl')
+==============================
+
+The OpenBSD '.tgz' installs '/etc/rc.d/go_flow_api', creates the
+'flowapi' daemon user, and seeds '/etc/go-flow-api/go-flow-api.env':
+
+     doas vi /etc/go-flow-api/go-flow-api.env
+     doas rcctl enable go_flow_api
+     doas rcctl start go_flow_api
+     doas rcctl check go_flow_api
+
+4.5 macOS ('launchd')
 =====================
 
 Configure '/opt/flow-api/etc/go-flow-api.env' ('chmod 0600'), copy
@@ -158,7 +180,7 @@ into '/Library/LaunchDaemons/', and run:
      sudo launchctl bootstrap system /Library/LaunchDaemons/com.etlmadness.go-flow-api.plist
      sudo launchctl kickstart -k system/com.etlmadness.go-flow-api
 
-4.5 Windows (Native SCM Windows Service)
+4.6 Windows (Native SCM Windows Service)
 ========================================
 
 'go-flowAPI.exe' natively supports the Windows Service Control Manager.
@@ -166,32 +188,44 @@ Run the bundled PowerShell installer in an elevated Administrator shell:
 
      & "C:\Program Files\ETL Madness\Flow API\share\services\windows\Install-GoFlowAPIService.ps1" -Start
 
+Pass '-Credential (Get-Credential "DOMAIN\svc_flowapi")' or
+'-GroupManagedServiceAccount "DOMAIN\gmsa_flowapi$"' when connecting to
+Microsoft SQL Server with Windows Integrated Authentication.
 
 File: go-flow-api.info,  Node: REST API Overview,  Prev: OS Services and Daemons,  Up: Top
 
 5 REST API Overview
 *******************
 
-   * 'GET /api/v1/health': Public health, database driver, and schema check.
-   * 'GET /swagger/' & 'GET /api/v1/openapi.json': Swagger UI & OpenAPI 3.0.3.
-   * '/api/v1/artifacts/{type}' & '/api/v1/upload/{type}': CRUD, ID lookup,
-     XML export, and file upload for 'pipelines', 'options', and 'configs'.
-   * 'POST /api/v1/execute', 'POST /api/v1/execute/stream',
-     'POST /api/v1/validate': Synchronous execution, live SSE node
-     streaming, and XSD/AST validation.
+   * 'GET /api/v1/health': Public health, database driver, caller
+     groups, and schema check.
+   * 'GET /swagger/' and 'GET /api/v1/openapi.json': Interactive Swagger
+     UI and OpenAPI 3.0.3 spec.
+   * '/api/v1/artifacts/{type}' and '/api/v1/upload/{type}': CRUD, ID
+     lookup, XML export, and file upload for 'pipelines', 'options', and
+     'configs'.
+   * 'POST /api/v1/execute', 'POST /api/v1/execute/stream', 'POST
+     /api/v1/validate': Synchronous execution, live SSE node streaming,
+     and XSD/AST validation (including ID-based variants).
+   * '/api/v1/crypto/*': Keypair generation, AES-256-GCM
+     encryption/decryption, and OpenSSL/PKCS#7/OpenPGP signing and
+     verification.
    * 'GET /api/v1/runs', 'GET /api/v1/events', 'GET /api/v1/audit':
      Execution history, 'node_output' telemetry, and API audit trail.
-   * '/api/v1/users' & 'POST /api/v1/db/test': Administrative BasicAuth
-     user management and DSN connectivity verification.
-
+   * '/api/v1/users', '/api/v1/groups', '/api/v1/pipeline-groups',
+     '/api/v1/acls', 'GET /api/v1/permissions/effective': Administrative
+     user, group, pipeline-group, granular ACL management, and effective
+     permissions simulator.
+   * 'POST /api/v1/db/test': Administrative DSN connectivity
+     verification.
 
 Tag Table:
 Node: Top481
-Node: Overview and Architecture1270
-Node: Invoking go-flowAPI2152
-Node: Configuration File3604
-Node: OS Services and Daemons4310
-Node: REST API Overview6498
+Node: Overview and Architecture1331
+Node: Invoking go-flowAPI2438
+Node: Configuration File4115
+Node: OS Services and Daemons4927
+Node: REST API Overview7668
 
 End Tag Table
 

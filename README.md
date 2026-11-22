@@ -116,7 +116,7 @@ docker compose -f docker-compose.sqlite.yml up -d --build
 
 ## OS Packaging, Installation & Background Services (Unix `/opt/flow-api` & Windows WinGet)
 
-Build scripts, package manifests, OS service units (`systemd`, OpenRC, SysVinit, FreeBSD `rc.d`, macOS `launchd`, and native Windows Service helpers), `man` pages, GNU `info` documentation, WiX `.msi` definitions, and WinGet manifests are located in [`packaging/`](packaging/README.md).
+Build scripts, package manifests, OS service units (`systemd`, OpenRC, SysVinit, FreeBSD `rc.d`, OpenBSD `rc.d`, macOS `launchd`, and native Windows Service helpers), `man` pages, GNU `info` documentation, WiX `.msi` definitions, and WinGet manifests are located in [`packaging/`](packaging/README.md).
 
 All packages compile `go-flowAPI` (`go-flowAPI.exe` on Windows) as a static pure-Go binary (`CGO_ENABLED=0`), use non-colliding package identifiers (**`go-flow-api`** on Unix, **`ETLMadness.GoFlowAPI`** on WinGet), and install isolated under **`/opt/flow-api`** (or `C:\Program Files\ETL Madness\Flow API\`) so they never conflict with system binaries or with `go-flow` (`/opt/flow`):
 
@@ -127,6 +127,7 @@ All packages compile `go-flowAPI` (`go-flowAPI.exe` on Windows) as a static pure
 | **Arch Linux** | `.pkg.tar.zst` | `sh ./packaging/scripts/build-arch.sh [amd64\|arm64]` | `sudo pacman -U ./packaging/dist/go-flow-api-*.pkg.tar.zst` | `systemd` (`go-flow-api.service`) |
 | **macOS** | `.pkg` | `sh ./packaging/scripts/build-macos-pkg.sh [arm64\|amd64\|universal]` | `sudo installer -pkg ./packaging/dist/go-flow-api-*.pkg -target /` | `launchd` (`com.etlmadness.go-flow-api.plist`) |
 | **FreeBSD** | `.pkg` | `sh ./packaging/scripts/build-freebsd-pkg.sh [amd64\|arm64]` | `sudo pkg add ./packaging/dist/go-flow-api-*.pkg` | `rc.d` (`/usr/local/etc/rc.d/go_flow_api` + `sysrc`) |
+| **OpenBSD** | `.tgz` | `sh ./packaging/scripts/build-openbsd-pkg.sh [amd64\|arm64]` | `doas pkg_add -D unsigned ./packaging/dist/openbsd-amd64/go-flow-api-*.tgz` | `rc.d` (`/etc/rc.d/go_flow_api` + `rcctl`) |
 | **Windows (WinGet Portable)** | `.zip` + WinGet YAML | `.\packaging\scripts\Build-Windows.ps1 -Format zip` | `winget install --manifest packaging\dist\winget\e\ETLMadness\GoFlowAPI\<ver>\` | Native SCM in `go-flowAPI.exe` + `Install-GoFlowAPIService.ps1` |
 | **Windows (Enterprise MSI)** | `.msi` + WinGet YAML | `.\packaging\scripts\Build-Windows.ps1 -Format all` | `msiexec /i packaging\dist\go-flow-api-*-windows-amd64.msi` | Native SCM in `go-flowAPI.exe` + `Install-GoFlowAPIService.ps1` |
 
