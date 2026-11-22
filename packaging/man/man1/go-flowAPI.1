@@ -23,9 +23,11 @@ execute and validate pipelines synchronously or over live Server-Sent Events (SS
 On Windows,
 .B go-flowAPI.exe
 natively implements the Windows Service Control Manager (SCM) dispatcher and runs directly as a Windows Service without third-party service wrappers.
-On Linux, FreeBSD, and macOS, packages provide ready-to-enable
+On Linux, FreeBSD, OpenBSD, and macOS, packages provide ready-to-enable
 .BR systemd (1),
 OpenRC, SysVinit, FreeBSD
+.BR rc.d (8),
+OpenBSD
 .BR rc.d (8),
 and macOS
 .BR launchd (8)
@@ -224,6 +226,17 @@ sudo service go_flow_api start
 .fi
 .RE
 .TP
+.B OpenBSD (rc.d / rcctl)
+Edit
+.I /etc/go-flow-api/go-flow-api.env
+and run:
+.RS
+.nf
+doas rcctl enable go_flow_api
+doas rcctl start go_flow_api
+.fi
+.RE
+.TP
 .B macOS (launchd)
 Edit
 .IR /opt/flow-api/etc/go-flow-api.env ,
@@ -248,16 +261,21 @@ From an elevated PowerShell prompt:
 .SH FILES
 .TP
 .I /opt/flow-api/bin/go-flowAPI
-Installed server binary on Linux, macOS, and FreeBSD.
+Installed server binary on Linux, macOS, FreeBSD, and OpenBSD.
 .TP
 .I /etc/go-flow-api/go-flow-api.env
-Default daemon environment configuration on Linux.
+Default daemon environment configuration on Linux and OpenBSD.
 .TP
 .I /usr/local/etc/go-flow-api/go-flow-api.env
 Default daemon environment configuration on FreeBSD.
 .TP
 .I /usr/local/etc/rc.d/go_flow_api
 FreeBSD
+.BR rc.d (8)
+service control script.
+.TP
+.I /etc/rc.d/go_flow_api
+OpenBSD
 .BR rc.d (8)
 service control script.
 .TP

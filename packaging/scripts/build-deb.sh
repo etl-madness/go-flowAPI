@@ -159,6 +159,7 @@ if command -v dpkg-deb >/dev/null 2>&1; then
 elif command -v nfpm >/dev/null 2>&1; then
     log_info "dpkg-deb not found; falling back to nfpm..."
     REPO_ROOT="$REPO_ROOT" \
+    PKG_NAME="$PKG_NAME" \
     STAGE_BIN_DIR="${STAGE_DIR}/opt/flow-api/bin" \
     STAGE_DOC_DIR="$DOC_TMP" \
     NFPM_ARCH="$DEB_ARCH" \

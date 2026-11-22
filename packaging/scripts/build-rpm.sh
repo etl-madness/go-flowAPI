@@ -97,6 +97,7 @@ elif command -v nfpm >/dev/null 2>&1; then
     log_info "rpmbuild not found; falling back to nfpm..."
     OUT_RPM="${DIST_DIR}/${PKG_NAME}-${RPM_VERSION}-${FLOW_RELEASE}.${RPM_ARCH}.rpm"
     REPO_ROOT="$REPO_ROOT" \
+    PKG_NAME="$PKG_NAME" \
     STAGE_BIN_DIR="${STAGE_SRC}/bin" \
     STAGE_DOC_DIR="${STAGE_SRC}/doc" \
     NFPM_ARCH="$GOARCH_TARGET" \

@@ -68,6 +68,7 @@ cp "${PACKAGING_DIR}/etc/go-flow-api/go-flow-api.env" "${STAGE_SRC}/etc-env/go-f
 
 build_with_nfpm() {
     REPO_ROOT="$REPO_ROOT" \
+    PKG_NAME="$PKG_NAME" \
     STAGE_BIN_DIR="${STAGE_SRC}/bin" \
     STAGE_DOC_DIR="${STAGE_SRC}/doc" \
     NFPM_ARCH="$GOARCH_TARGET" \

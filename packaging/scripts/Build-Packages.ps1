@@ -14,7 +14,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet("stage-all", "linux", "darwin", "freebsd", "windows", "winget", "msi", "zip", "deb", "rpm", "arch", "archlinux")]
+    [ValidateSet("stage-all", "linux", "darwin", "freebsd", "openbsd", "windows", "winget", "msi", "zip", "deb", "rpm", "arch", "archlinux")]
     [string]$Target = "stage-all",
 
     [ValidateSet("amd64", "arm64")]
@@ -104,6 +104,7 @@ switch ($Target) {
         Build-GoBinary -GoOS "linux" -GoArch $Arch -OutDir (Join-Path $BuildRoot "stage\linux-$Arch\bin")
         Build-GoBinary -GoOS "darwin" -GoArch $Arch -OutDir (Join-Path $BuildRoot "stage\darwin-$Arch\bin")
         Build-GoBinary -GoOS "freebsd" -GoArch $Arch -OutDir (Join-Path $BuildRoot "stage\freebsd-$Arch\bin")
+        Build-GoBinary -GoOS "openbsd" -GoArch $Arch -OutDir (Join-Path $BuildRoot "stage\openbsd-$Arch\bin")
         Write-Host "[INFO] Staged binaries and compressed man/info docs in $BuildRoot"
     }
     "linux" {
@@ -114,6 +115,9 @@ switch ($Target) {
     }
     "freebsd" {
         Build-GoBinary -GoOS "freebsd" -GoArch $Arch -OutDir (Join-Path $BuildRoot "stage\freebsd-$Arch\bin")
+    }
+    "openbsd" {
+        Build-GoBinary -GoOS "openbsd" -GoArch $Arch -OutDir (Join-Path $BuildRoot "stage\openbsd-$Arch\bin")
     }
     { $_ -in @("windows", "winget", "msi", "zip") } {
         $winFmt = if ($_ -in @("msi", "zip")) { $_ } else { "all" }
@@ -129,6 +133,7 @@ switch ($Target) {
         Build-GoBinary -GoOS "linux" -GoArch $Arch -OutDir $binDir
 
         $env:REPO_ROOT = $RepoRoot
+        $env:PKG_NAME = "go-flow-api"
         $env:STAGE_BIN_DIR = $binDir
         $env:STAGE_DOC_DIR = $DocStage
         $env:NFPM_ARCH = $Arch

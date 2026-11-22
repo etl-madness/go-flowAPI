@@ -2,7 +2,7 @@
 # Orchestrates building ETL Madness go-flowAPI OS packages.
 #
 # Usage:
-#   ./packaging/scripts/build-all.sh [host|all|deb|rpm|arch|macos|freebsd|windows] [amd64|arm64|universal]
+#   ./packaging/scripts/build-all.sh [host|all|deb|rpm|arch|macos|freebsd|openbsd|windows] [amd64|arm64|universal]
 #
 # Examples:
 #   ./packaging/scripts/build-all.sh host          # Build native package(s) for current OS
@@ -11,6 +11,7 @@
 #   ./packaging/scripts/build-all.sh arch amd64    # Build Arch Linux .pkg.tar.zst for x86_64
 #   ./packaging/scripts/build-all.sh macos universal
 #   ./packaging/scripts/build-all.sh freebsd amd64
+#   ./packaging/scripts/build-all.sh openbsd amd64
 #   ./packaging/scripts/build-all.sh windows amd64 # Cross-build Windows .zip/.msi + WinGet manifests
 
 set -eu
@@ -47,6 +48,9 @@ case "$TARGET" in
     freebsd|pkg-freebsd)
         run_target "freebsd-pkg"
         ;;
+    openbsd|pkg-openbsd)
+        run_target "openbsd-pkg"
+        ;;
     windows|winget|win)
         run_target "windows"
         ;;
@@ -77,6 +81,9 @@ case "$TARGET" in
                 ;;
             FreeBSD)
                 run_target "freebsd-pkg"
+                ;;
+            OpenBSD)
+                run_target "openbsd-pkg"
                 ;;
             *)
                 log_err "Unsupported host OS for automatic detection: $HOST_OS"
@@ -110,10 +117,11 @@ case "$TARGET" in
         else
             log_warn "Skipping FreeBSD .pkg (requires FreeBSD pkg)"
         fi
+        run_target "openbsd-pkg"
         run_target "windows"
         ;;
     *)
-        log_err "Unknown target: $TARGET (expected: host, all, deb, rpm, arch, macos, freebsd, windows)"
+        log_err "Unknown target: $TARGET (expected: host, all, deb, rpm, arch, macos, freebsd, openbsd, windows)"
         exit 1
         ;;
 esac

@@ -2,7 +2,6 @@
 @c %**start of header
 @setfilename go-flow-api.info
 @settitle ETL Madness Flow API Manual
-@documentencoding UTF-8
 @c %**end of header
 
 @dircategory Network Applications and Daemons
@@ -32,15 +31,16 @@ Copyright @copyright{} 2026 ETL Madness. Licensed under the MIT License.
 @top ETL Madness Flow API
 
 This manual documents @strong{go-flowAPI}, the centralized HTTP REST API,
-artifact repository, live Server-Sent Events (SSE) execution gateway, and
-multi-database telemetry daemon for the ETL Madness Flow ecosystem.
+artifact repository, live Server-Sent Events (SSE) execution gateway, granular
+pipeline ACL engine, and multi-database telemetry daemon for the ETL Madness
+Flow ecosystem.
 
 @menu
-* Overview and Architecture::   Supported databases, RBAC roles, and package layout.
+* Overview and Architecture::   Supported databases, RBAC/ACL model, and package layout.
 * Invoking go-flowAPI::         Command-line flags, precedence, and password hashing.
 * Configuration File::          Syntax and variables for @file{go-flow-api.env}.
-* OS Services and Daemons::     systemd, OpenRC, SysVinit, FreeBSD rc.d, launchd, and Windows SCM.
-* REST API Overview::           Core endpoints for artifacts, execution, crypto, and telemetry.
+* OS Services and Daemons::     systemd, OpenRC, SysVinit, FreeBSD/OpenBSD rc.d, launchd, and Windows SCM.
+* REST API Overview::           Core endpoints for artifacts, execution, ACLs, crypto, and telemetry.
 @end menu
 @end ifnottex
 
@@ -52,10 +52,15 @@ multi-database telemetry daemon for the ETL Madness Flow ecosystem.
 and relational drivers for Microsoft SQL Server / Azure SQL, PostgreSQL,
 MySQL / MariaDB, SQLite, and Oracle.
 
-Packages install isolated under @file{/opt/flow-api} on Unix platforms and
+Packages install isolated under @file{/opt/flow-api} on Unix platforms
+(Linux, macOS, FreeBSD, and OpenBSD) and
 @file{C:\Program Files\ETL Madness\Flow API\} on Windows so binaries and manuals
 never conflict with system packages or with the @code{go-flow} CLI package
 (@file{/opt/flow}).
+
+By default (@code{-strict-acl=true}), non-admin (@code{non-all}) accounts have
+zero access to @code{pipeline} artifacts or execution unless granted via
+explicit @code{allow} rules in @code{dbo.flow_pipeline_acl}.
 
 @command{go-flowAPI} does not auto-create database tables at startup. Before
 starting the service against a new database, apply the schema DDL in
@@ -94,7 +99,9 @@ Seed or update an initial BasicAuth user at startup (@env{FLOW_API_BOOTSTRAP_USE
 @item -bootstrap-pass @var{PASS}
 Password for @code{-bootstrap-user}, automatically bcrypt-hashed (@env{FLOW_API_BOOTSTRAP_PASS}).
 @item -bootstrap-perm @var{ROLE}
-Permission role for @code{-bootstrap-user}: @code{all} (default), @code{execution-only}, @code{read-only}, @code{write}, or @code{upload}.
+Permission role for @code{-bootstrap-user}: @code{all} (default), @code{scoped}, @code{execution-only}, @code{read-only}, @code{write}, or @code{upload}.
+@item -strict-acl
+Enforce strict ACL-only pipeline authorization so non-@code{all} users require explicit @code{dbo.flow_pipeline_acl} grants (default @code{true}; @env{FLOW_API_STRICT_ACL}).
 @item -hash-password @var{PASS}
 Print a bcrypt hash of @var{PASS} to stdout and exit.
 @item -debug
@@ -107,16 +114,17 @@ Enable verbose debug logging (@env{FLOW_API_DEBUG}).
 Default file locations by platform:
 
 @itemize @bullet
-@item Linux: @file{/etc/go-flow-api/go-flow-api.env}
+@item Linux and OpenBSD: @file{/etc/go-flow-api/go-flow-api.env}
 @item FreeBSD: @file{/usr/local/etc/go-flow-api/go-flow-api.env}
 @item macOS: @file{/opt/flow-api/etc/go-flow-api.env}
 @item Windows: @file{C:\ProgramData\ETL Madness\Flow API\go-flow-api.env}
 @end itemize
 
 Key environment variables include @env{FLOW_API_DSN}, @env{FLOW_API_ADDR},
-@env{FLOW_SECURE_KEY}, @env{FLOW_API_LOG_FILE}, @env{FLOW_API_DEBUG}, and
-Active Directory / Kerberos variables (@env{AD_REALM}, @env{KRB5_CONFIG},
-@env{KRB5_KTNAME}, @env{KRB5CCNAME}).
+@env{FLOW_SECURE_KEY}, @env{FLOW_API_LOG_FILE}, @env{FLOW_API_STRICT_ACL},
+@env{FLOW_API_DEBUG}, and Active Directory / Kerberos variables
+(@env{AD_REALM}, @env{KRB5_CONFIG}, @env{KRB5_KTNAME}, @env{KRB5CCNAME},
+@env{FLOW_WINDOWS_USER}, @env{FLOW_WINDOWS_GROUPS}, @env{FLOW_WINDOWS_GROUPS_FILE}).
 
 @node OS Services and Daemons
 @chapter Configuring OS Services and @code{rc} Scripts
@@ -152,6 +160,17 @@ sudo service go_flow_api start
 sudo service go_flow_api status
 @end example
 
+@section OpenBSD (@code{rc.d} / @command{rcctl})
+The OpenBSD @code{.tgz} installs @file{/etc/rc.d/go_flow_api}, creates the
+@code{flowapi} daemon user, and seeds @file{/etc/go-flow-api/go-flow-api.env}:
+
+@example
+doas vi /etc/go-flow-api/go-flow-api.env
+doas rcctl enable go_flow_api
+doas rcctl start go_flow_api
+doas rcctl check go_flow_api
+@end example
+
 @section macOS (@code{launchd})
 Configure @file{/opt/flow-api/etc/go-flow-api.env} (@code{chmod 0600}), copy
 @file{/opt/flow-api/share/services/launchd/com.etlmadness.go-flow-api.plist}
@@ -178,12 +197,14 @@ Microsoft SQL Server with Windows Integrated Authentication.
 @chapter REST API Overview
 
 @itemize @bullet
-@item @code{GET /api/v1/health}: Public health, database driver, and schema check.
+@item @code{GET /api/v1/health}: Public health, database driver, caller groups, and schema check.
 @item @code{GET /swagger/} and @code{GET /api/v1/openapi.json}: Interactive Swagger UI and OpenAPI 3.0.3 spec.
 @item @code{/api/v1/artifacts/@{type@}} and @code{/api/v1/upload/@{type@}}: CRUD, ID lookup, XML export, and file upload for @code{pipelines}, @code{options}, and @code{configs}.
-@item @code{POST /api/v1/execute}, @code{POST /api/v1/execute/stream}, @code{POST /api/v1/validate}: Synchronous execution, live SSE node streaming, and XSD/AST validation.
+@item @code{POST /api/v1/execute}, @code{POST /api/v1/execute/stream}, @code{POST /api/v1/validate}: Synchronous execution, live SSE node streaming, and XSD/AST validation (including ID-based variants).
+@item @code{/api/v1/crypto/*}: Keypair generation, AES-256-GCM encryption/decryption, and OpenSSL/PKCS#7/OpenPGP signing and verification.
 @item @code{GET /api/v1/runs}, @code{GET /api/v1/events}, @code{GET /api/v1/audit}: Execution history, @code{node_output} telemetry, and API audit trail.
-@item @code{/api/v1/users} and @code{POST /api/v1/db/test}: Administrative BasicAuth user management and DSN connectivity verification.
+@item @code{/api/v1/users}, @code{/api/v1/groups}, @code{/api/v1/pipeline-groups}, @code{/api/v1/acls}, @code{GET /api/v1/permissions/effective}: Administrative user, group, pipeline-group, granular ACL management, and effective permissions simulator.
+@item @code{POST /api/v1/db/test}: Administrative DSN connectivity verification.
 @end itemize
 
 @bye
