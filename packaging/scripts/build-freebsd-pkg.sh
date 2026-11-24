@@ -78,6 +78,7 @@ cp "${REPO_ROOT}/SCHEMA.md" "${STAGE_DIR}/opt/flow-api/share/doc/SCHEMA.md"
 cp "${REPO_ROOT}/BOOTSTRAP.md" "${STAGE_DIR}/opt/flow-api/share/doc/BOOTSTRAP.md"
 cp "${REPO_ROOT}/docs/API_ENDPOINTS_REFERENCE.md" "${STAGE_DIR}/opt/flow-api/share/doc/API_ENDPOINTS_REFERENCE.md"
 cp "${REPO_ROOT}/docs/AD_KERBEROS_SIDECAR_GUIDE.md" "${STAGE_DIR}/opt/flow-api/share/doc/AD_KERBEROS_SIDECAR_GUIDE.md"
+cp "${REPO_ROOT}/docs/FREEBSD_API_AD_INTEGRATION_GUIDE.md" "${STAGE_DIR}/opt/flow-api/share/doc/FREEBSD_API_AD_INTEGRATION_GUIDE.md"
 
 cp "${PACKAGING_DIR}/services/freebsd/go_flow_api" "${STAGE_DIR}/opt/flow-api/share/services/freebsd/go_flow_api"
 cp "${PACKAGING_DIR}/services/kerberos/go-flow-api-krb5-refresh.sh" "${STAGE_DIR}/opt/flow-api/share/services/kerberos/go-flow-api-krb5-refresh.sh"
@@ -133,6 +134,7 @@ cat > "$PLIST_FILE" <<'EOF'
 /opt/flow-api/share/doc/BOOTSTRAP.md
 /opt/flow-api/share/doc/API_ENDPOINTS_REFERENCE.md
 /opt/flow-api/share/doc/AD_KERBEROS_SIDECAR_GUIDE.md
+/opt/flow-api/share/doc/FREEBSD_API_AD_INTEGRATION_GUIDE.md
 /opt/flow-api/share/services/freebsd/go_flow_api
 /opt/flow-api/share/services/kerberos/go-flow-api-krb5-refresh.sh
 /opt/flow-api/share/licenses/LICENSE
