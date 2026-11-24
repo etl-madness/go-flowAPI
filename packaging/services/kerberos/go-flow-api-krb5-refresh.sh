@@ -1,14 +1,16 @@
 #!/bin/sh
 # Host-side Active Directory Kerberos TGT & Nested AD Group refresh helper
-# for running go-flowAPI outside Docker on Linux, FreeBSD, and macOS.
+# for running go-flowAPI outside Docker on Linux, FreeBSD, OpenBSD, and macOS.
 #
 # Performs on bare-metal/VM hosts what docker/krb5-sidecar-entrypoint.sh does in Docker:
-#   1. Acquires or renews a MIT FILE: Kerberos TGT (from a keytab, AD_PASSWORD, or existing ccache).
-#   2. Verifies the ticket with 'klist -f'.
-#   3. Queries Active Directory LDAP over GSSAPI (LDAP_MATCHING_RULE_IN_CHAIN) to write
+#   1. Acquires or renews a FILE: Kerberos TGT (from a keytab, AD_PASSWORD, or existing ccache)
+#      using either MIT Kerberos or Heimdal (OpenBSD /usr/local/heimdal/bin, macOS).
+#   2. Enforces mode 0600 on the credential cache (required by OpenBSD/macOS Heimdal).
+#   3. Verifies the ticket with 'klist -f'.
+#   4. Queries Active Directory LDAP over GSSAPI (LDAP_MATCHING_RULE_IN_CHAIN) to write
 #      nested DOMAIN\<Group> memberships into FLOW_WINDOWS_GROUPS_FILE (ad-groups.txt).
 #
-# Usage:
+# Usage (run as the 'flowapi' service user so the 0600 ccache is owned by flowapi):
 #   # One-shot TGT + AD group sync (ideal for cron, systemd timer, or ExecStartPre):
 #   /opt/flow-api/share/services/kerberos/go-flow-api-krb5-refresh.sh --once
 #
@@ -17,7 +19,27 @@
 
 set -eu
 
-ENV_FILE="${GO_FLOW_API_ENV_FILE:-/etc/go-flow-api/go-flow-api.env}"
+# Ensure OpenBSD Heimdal (/usr/local/heimdal/bin) and ports/local (/usr/local/bin) are in PATH
+for _dir in /usr/local/heimdal/bin /usr/local/bin; do
+    if [ -d "$_dir" ]; then
+        case ":${PATH:-}:" in
+            *":${_dir}:"*) ;;
+            *) PATH="${_dir}${PATH:+:$PATH}" ;;
+        esac
+    fi
+done
+export PATH
+
+if [ -n "${GO_FLOW_API_ENV_FILE:-}" ]; then
+    ENV_FILE="$GO_FLOW_API_ENV_FILE"
+elif [ -f /etc/go-flow-api/go-flow-api.env ]; then
+    ENV_FILE="/etc/go-flow-api/go-flow-api.env"
+elif [ -f /usr/local/etc/go-flow-api/go-flow-api.env ]; then
+    ENV_FILE="/usr/local/etc/go-flow-api/go-flow-api.env"
+else
+    ENV_FILE="/opt/flow-api/etc/go-flow-api.env"
+fi
+
 if [ -f "$ENV_FILE" ]; then
     set -a
     # shellcheck disable=SC1090
@@ -35,7 +57,13 @@ AD_USER="${AD_USER:-RUN_AS_USER}"
 AD_DC_HOST="${AD_DC_HOST:-}"
 AD_LDAP_BASE_DN="${AD_LDAP_BASE_DN:-}"
 
-RAW_CCACHE="${KRB5CCNAME:-/var/lib/go-flow-api/krb5cc}"
+if [ -d /var/db/go-flow-api ] && [ ! -d /var/lib/go-flow-api ]; then
+    DEFAULT_STATE_DIR="/var/db/go-flow-api"
+else
+    DEFAULT_STATE_DIR="/var/lib/go-flow-api"
+fi
+
+RAW_CCACHE="${KRB5CCNAME:-${DEFAULT_STATE_DIR}/krb5cc}"
 CCACHE_PATH=$(printf '%s' "$RAW_CCACHE" | sed 's/^[Ff][Ii][Ll][Ee]://')
 export KRB5CCNAME="FILE:${CCACHE_PATH}"
 
@@ -47,22 +75,35 @@ MODE="${1:---once}"
 mkdir -p "$(dirname "$CCACHE_PATH")" "$(dirname "$GROUPS_FILE")"
 
 refresh_tgt_and_groups() {
+    # Ensure newly written ccache files are created 0600 (strictly required by Heimdal on OpenBSD)
+    OLD_UMASK=$(umask)
+    umask 077
+    if [ -f "$CCACHE_PATH" ]; then
+        chmod 0600 "$CCACHE_PATH" 2>/dev/null || true
+    fi
+
     if klist -s 2>/dev/null && kinit -R 2>/dev/null; then
         printf '[krb5-refresh] Renewed existing Kerberos TGT in %s for %s\n' "$KRB5CCNAME" "$PRINCIPAL"
     elif [ -f "$KEYTAB_PATH" ]; then
         printf '[krb5-refresh] Acquiring TGT for %s using keytab %s...\n' "$PRINCIPAL" "$KEYTAB_PATH"
-        kinit -kt "$KEYTAB_PATH" "$PRINCIPAL"
+        kinit -k -t "$KEYTAB_PATH" "$PRINCIPAL"
     elif [ -n "${AD_PASSWORD:-}" ]; then
         printf '[krb5-refresh] Acquiring TGT for %s using AD_PASSWORD...\n' "$PRINCIPAL"
-        printf '%s\n' "$AD_PASSWORD" | kinit "$PRINCIPAL"
+        if kinit --help 2>&1 | grep -q -- '--password-file'; then
+            printf '%s\n' "$AD_PASSWORD" | kinit --password-file=STDIN "$PRINCIPAL"
+        else
+            printf '%s\n' "$AD_PASSWORD" | kinit "$PRINCIPAL"
+        fi
     elif [ -f "$CCACHE_PATH" ] && klist -s 2>/dev/null; then
         printf '[krb5-refresh] Using existing valid Kerberos ticket cache %s\n' "$KRB5CCNAME"
     else
+        umask "$OLD_UMASK"
         printf '[krb5-refresh] ERROR: No valid TGT in %s and neither keytab (%s) nor AD_PASSWORD available.\n' "$KRB5CCNAME" "$KEYTAB_PATH" >&2
         exit 1
     fi
+    umask "$OLD_UMASK"
 
-    chmod 0640 "$CCACHE_PATH" 2>/dev/null || true
+    chmod 0600 "$CCACHE_PATH" 2>/dev/null || true
     klist -f || true
 
     if [ -n "${AD_GROUPS:-}" ]; then

@@ -22,6 +22,39 @@ import (
 	"github.com/traefik/yaegi/interp"
 )
 
+const jobWorkspaceContextKey contextKey = "job_workspace"
+
+func jobWorkspaceFromContext(ctx context.Context) *JobWorkspace {
+	if ctx == nil {
+		return nil
+	}
+	if ws, ok := ctx.Value(jobWorkspaceContextKey).(*JobWorkspace); ok {
+		return ws
+	}
+	return nil
+}
+
+func readJobOrSafeLocalFile(ctx context.Context, rawPath string) ([]byte, error) {
+	if ws := jobWorkspaceFromContext(ctx); ws != nil {
+		return ws.ReadFile(rawPath)
+	}
+	return readSafeLocalFile(rawPath)
+}
+
+func resolveJobOrSafeLocalPath(ctx context.Context, rawPath string) (string, error) {
+	if ws := jobWorkspaceFromContext(ctx); ws != nil {
+		return ws.ResolvePath(rawPath)
+	}
+	return resolveSafeLocalPath(rawPath)
+}
+
+func writeJobOrSafeLocalFile(ctx context.Context, rawPath string, data []byte, perm os.FileMode) error {
+	if ws := jobWorkspaceFromContext(ctx); ws != nil {
+		return ws.WriteFile(rawPath, data, perm)
+	}
+	return writeSafeLocalFile(rawPath, data, perm)
+}
+
 // CliOptionsXML mirrors go-flow's <cli_options> and <flow_cli_options> XML structures (xsd/options.xsd).
 type CliOptionsXML struct {
 	File            *string             `xml:"file"`
@@ -492,13 +525,13 @@ func (s *APIServer) resolveArtifactBytes(ctx context.Context, artifactType strin
 				if recByID, idErr := s.GetArtifactByID(ctx, artifactType, numID, false, ""); idErr == nil && recByID != nil {
 					rawBytes = []byte(recByID.Content)
 					sourceLabel = fmt.Sprintf("db://%s/id/%d(%s)", artifactType, recByID.ID, recByID.Name)
-				} else if data, fileErr := readSafeLocalFile(ref); fileErr == nil {
+				} else if data, fileErr := readJobOrSafeLocalFile(ctx, ref); fileErr == nil {
 					rawBytes = data
 					sourceLabel = ref
 				} else {
 					return nil, "", fmt.Errorf("failed resolving %s %q from database by name (%v), ID %d (%v), or filesystem (%v)", artifactType, ref, dbErr, numID, idErr, fileErr)
 				}
-			} else if data, fileErr := readSafeLocalFile(ref); fileErr == nil {
+			} else if data, fileErr := readJobOrSafeLocalFile(ctx, ref); fileErr == nil {
 				rawBytes = data
 				sourceLabel = ref
 			} else {
@@ -964,6 +997,23 @@ func (s *APIServer) ExecutePipeline(ctx context.Context, req ExecutionRequest, o
 		}
 	}
 
+	osUser, hostname := runtimeIdentity()
+	if authUser := UserFromContext(ctx); authUser != nil && authUser.Username != "" {
+		osUser = authUser.Username
+	}
+	jobRunID := generateID("run")
+
+	var jobWS *JobWorkspace
+	if s.cfg != nil && strings.TrimSpace(s.cfg.DataDir) != "" {
+		var wsErr error
+		jobWS, wsErr = NewJobWorkspace(s.cfg.DataDir, osUser, jobRunID)
+		if wsErr != nil {
+			return nil, fmt.Errorf("failed initializing job workspace: %w", wsErr)
+		}
+		defer jobWS.Cleanup()
+		ctx = context.WithValue(ctx, jobWorkspaceContextKey, jobWS)
+	}
+
 	// Normalize ArtifactType + ID into the corresponding typed ID field (PipelineID, OptionsID, or ConfigID)
 	canonicalType := "pipeline"
 	if strings.TrimSpace(req.ArtifactType) != "" {
@@ -1037,11 +1087,15 @@ func (s *APIServer) ExecutePipeline(ctx context.Context, req ExecutionRequest, o
 
 	// Optional XSD schema validation
 	if strings.TrimSpace(req.XSD) != "" {
-		safeXSD, err := resolveSafeLocalPath(req.XSD)
+		safeXSD, err := resolveJobOrSafeLocalPath(ctx, req.XSD)
 		if err != nil {
 			return nil, fmt.Errorf("XSD validation failed: %w", err)
 		}
-		tmpXML, err := writeTempFile("validate-*.xml", pipelineBytes)
+		tmpDir := ""
+		if jobWS != nil {
+			tmpDir = jobWS.Dir
+		}
+		tmpXML, err := writeTempFileInDir(tmpDir, "validate-*.xml", pipelineBytes)
 		if err != nil {
 			return nil, err
 		}
@@ -1109,6 +1163,9 @@ func (s *APIServer) ExecutePipeline(ctx context.Context, req ExecutionRequest, o
 	}
 
 	registry := flow.NewRegistry()
+	if jobWS != nil {
+		registry.SetWorkDir(jobWS.Dir)
+	}
 	if err := registry.InitVariables(varConfigs); err != nil {
 		return nil, err
 	}
@@ -1130,6 +1187,9 @@ func (s *APIServer) ExecutePipeline(ctx context.Context, req ExecutionRequest, o
 	defer registry.CloseDatabases()
 
 	executor := flow.NewExecutor(registry)
+	if jobWS != nil {
+		executor.SetWorkDir(jobWS.Dir)
+	}
 	if optionsLabel != "" {
 		executor.SetOptionsPath(optionsLabel)
 	}
@@ -1206,7 +1266,7 @@ func (s *APIServer) ExecutePipeline(ctx context.Context, req ExecutionRequest, o
 
 	runID, statusStr, errClassStr, errMsgStr := dbSink.RunDetails()
 	if runID == "" {
-		runID = generateID("run")
+		runID = jobRunID
 	}
 	if statusStr == "" {
 		if execErr != nil {
@@ -1217,11 +1277,6 @@ func (s *APIServer) ExecutePipeline(ctx context.Context, req ExecutionRequest, o
 		} else {
 			statusStr = string(flow.RunStatusSucceeded)
 		}
-	}
-
-	osUser, hostname := runtimeIdentity()
-	if authUser := UserFromContext(ctx); authUser != nil && authUser.Username != "" {
-		osUser = authUser.Username
 	}
 
 	dbSPID, dbUser, appName := dbSink.SessionIdentity()
@@ -1282,7 +1337,7 @@ func transformXMLWithXSLT(ctx context.Context, xmlInput, xsltInput []byte, outPa
 	}
 	outBytes := buf.Bytes()
 	if strings.TrimSpace(outPath) != "" {
-		if err := writeSafeLocalFile(outPath, outBytes, 0644); err != nil {
+		if err := writeJobOrSafeLocalFile(ctx, outPath, outBytes, 0644); err != nil {
 			return nil, fmt.Errorf("failed writing XSLT output to %s: %w", outPath, err)
 		}
 	}
@@ -1290,7 +1345,11 @@ func transformXMLWithXSLT(ctx context.Context, xmlInput, xsltInput []byte, outPa
 }
 
 func writeTempFile(pattern string, data []byte) (string, error) {
-	f, err := os.CreateTemp("", pattern)
+	return writeTempFileInDir("", pattern, data)
+}
+
+func writeTempFileInDir(dir, pattern string, data []byte) (string, error) {
+	f, err := os.CreateTemp(dir, pattern)
 	if err != nil {
 		return "", err
 	}

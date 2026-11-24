@@ -323,9 +323,9 @@ In Docker deployments (`docker-compose.ad-sidecar.yml`), a companion `krb5-sidec
 
 When running an installed OS package **directly on a host or VM outside Docker**, `go-flowAPI` uses the host's Kerberos credential cache (`KRB5CCNAME`), a Kerberos keytab (`KRB5_KTNAME`), or native Windows SSPI directly—both for the startup `FLOW_API_DSN` database and for in-process pipeline `<Database>` connections—while Unix packages bundle `/opt/flow-api/share/services/kerberos/go-flow-api-krb5-refresh.sh` to automate host TGT renewal and nested AD group lookups.
 
-#### A. Linux, FreeBSD & macOS — Interactive Execution with `kinit` / `klist`
+#### A. Linux, FreeBSD, OpenBSD & macOS — Interactive Execution with `kinit` / `klist`
 
-1. **Install MIT Kerberos (and optional OpenLDAP GSSAPI tools for dynamic AD group lookup):**
+1. **Install Kerberos client tools (and optional OpenLDAP GSSAPI tools for dynamic AD group lookup):**
    ```sh
    # Debian / Ubuntu
    sudo apt install krb5-user ldap-utils libsasl2-modules-gssapi-mit
@@ -341,6 +341,9 @@ When running an installed OS package **directly on a host or VM outside Docker**
 
    # FreeBSD (macOS ships kinit/klist out of the box)
    sudo pkg install krb5 openldap26-client cyrus-sasl-gssapi
+
+   # OpenBSD (uses Heimdal in /usr/local/heimdal/bin + GSSAPI-flavored OpenLDAP & Cyrus SASL)
+   doas pkg_add heimdal openldap-client--gssapi cyrus-sasl--gssapi
    ```
 
 2. **Configure `/etc/krb5.conf` for your Active Directory realm and KDC (TCP/UDP port `88` must be reachable):**
@@ -405,9 +408,9 @@ When running an installed OS package **directly on a host or VM outside Docker**
    /opt/flow-api/bin/go-flowAPI -addr :8080
    ```
 
-#### B. Linux, FreeBSD & macOS — Unattended Daemon Mode (Keytab or Host Renewal Timer)
+#### B. Linux, FreeBSD, OpenBSD & macOS — Unattended Daemon Mode (Keytab or Host Renewal Timer)
 
-For background OS services (`systemd`, OpenRC, SysVinit, FreeBSD `rc.d`, macOS `launchd`) running as `flowapi` without interactive password prompts:
+For background OS services (`systemd`, OpenRC, SysVinit, FreeBSD `rc.d`, OpenBSD `rc.d`, macOS `launchd`) running as `flowapi` without interactive password prompts:
 
 1. **Generate a keytab on a domain-joined Windows admin workstation (or via `ktutil`) and secure it on the Unix host:**
    ```powershell
@@ -415,7 +418,7 @@ For background OS services (`systemd`, OpenRC, SysVinit, FreeBSD `rc.d`, macOS `
    ktpass /out flowapi.keytab /princ svc_goflow@EXAMPLE.COM /pass "YourADPassword" /crypto AES256-SHA1 /ptype KRB5_NT_PRINCIPAL
    ```
    ```sh
-   # On Linux / FreeBSD / macOS host:
+   # On Linux / FreeBSD / macOS host (use 'doas' on OpenBSD):
    sudo install -o root -g flowapi -m 0640 ./flowapi.keytab /etc/go-flow-api/flowapi.keytab
    ```
 
@@ -436,9 +439,9 @@ For background OS services (`systemd`, OpenRC, SysVinit, FreeBSD `rc.d`, macOS `
      ```
 
    - **Mode 2 — Managed `klist` Ticket Cache + Dynamic LDAP Nested Group Refresh (Bare-Metal Sidecar Equivalent):**
-     Use the bundled `go-flow-api-krb5-refresh.sh` script to maintain `/var/lib/go-flow-api/krb5cc` (inspectable anytime via `sudo -u flowapi KRB5CCNAME=/var/lib/go-flow-api/krb5cc klist -f`) and refresh nested AD groups in `/var/lib/go-flow-api/ad-groups.txt`:
+     Use the bundled `go-flow-api-krb5-refresh.sh` script to maintain `/var/lib/go-flow-api/krb5cc` (`/var/db/go-flow-api/krb5cc` on OpenBSD/FreeBSD, enforced at mode `0600` as required by Heimdal and owned by `flowapi`) and refresh nested AD groups in `ad-groups.txt`:
      ```dotenv
-     # /etc/go-flow-api/go-flow-api.env
+     # /etc/go-flow-api/go-flow-api.env (use /var/db/go-flow-api/... on OpenBSD & FreeBSD)
      FLOW_API_ADDR=":8080"
      FLOW_API_DSN="sqlserver://db.example.com:1433?database=EXAMPLE_DB&integrated+security=true&authenticator=krb5&trustServerCertificate=true"
      AD_DOMAIN="EXAMPLE"
@@ -452,15 +455,23 @@ For background OS services (`systemd`, OpenRC, SysVinit, FreeBSD `rc.d`, macOS `
      FLOW_WINDOWS_USER="EXAMPLE\svc_goflow"
      FLOW_WINDOWS_GROUPS_FILE="/var/lib/go-flow-api/ad-groups.txt"
      ```
-     Seed the initial cache/groups and schedule periodic 4-hour renewal (via `cron` or `systemd`):
+     Seed the initial cache/groups **as `flowapi`** (so the `0600` ccache is owned by `flowapi`) and schedule periodic 4-hour renewal:
      ```sh
-     # Initial ticket + nested AD group sync as 'flowapi'
+     # Linux / FreeBSD: initial ticket + nested AD group sync as 'flowapi'
      sudo -u flowapi GO_FLOW_API_ENV_FILE=/etc/go-flow-api/go-flow-api.env \
        /opt/flow-api/share/services/kerberos/go-flow-api-krb5-refresh.sh --once
 
-     # Refresh every 4 hours via /etc/cron.d/go-flow-api-krb5
+     # OpenBSD: initial ticket + nested AD group sync as 'flowapi' (0600 on /var/db/go-flow-api/krb5cc)
+     doas -u flowapi GO_FLOW_API_ENV_FILE=/etc/go-flow-api/go-flow-api.env \
+       /opt/flow-api/share/services/kerberos/go-flow-api-krb5-refresh.sh --once
+
+     # Linux cron (/etc/cron.d/go-flow-api-krb5):
      echo '0 */4 * * * flowapi GO_FLOW_API_ENV_FILE=/etc/go-flow-api/go-flow-api.env /opt/flow-api/share/services/kerberos/go-flow-api-krb5-refresh.sh --once >/var/log/go-flow-api/krb5-refresh.log 2>&1' \
        | sudo tee /etc/cron.d/go-flow-api-krb5 >/dev/null
+
+     # OpenBSD flowapi crontab (OpenBSD cron does not use /etc/cron.d):
+     echo '0 */4 * * * GO_FLOW_API_ENV_FILE=/etc/go-flow-api/go-flow-api.env /opt/flow-api/share/services/kerberos/go-flow-api-krb5-refresh.sh --once >/var/log/go-flow-api/krb5-refresh.log 2>&1' \
+       | doas crontab -u flowapi -
      ```
 
 #### C. Windows (Native Outside Docker — Windows SSPI `klist` & Token Group Resolution)
