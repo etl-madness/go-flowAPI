@@ -82,6 +82,14 @@ Recommended when running under the Windows Service Control Manager or SysVinit.
 Environment variable:
 .BR FLOW_API_LOG_FILE .
 .TP
+.BI \-data\-dir " path"
+Optional root directory for per-job sandboxed workspaces.
+When configured, each executed pipeline creates an isolated
+.I <data-dir>/<user_login>/<pid>-<run_id>
+directory for the duration of the job, confines all script subprocess working directories and relative file inputs/outputs to that directory and its subdirectories, rejects path escapes, and removes the job directory upon completion.
+Environment variable:
+.BR FLOW_API_DATA_DIR .
+.TP
 .BI \-service\-name " name"
 Service name registered with the Windows Service Control Manager when running as a native Windows Service (default
 .BR GoFlowAPI ).

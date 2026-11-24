@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/etl-madness/flow"
 )
 
 // StartupConnectionString defines the primary database connection string loaded at startup.
@@ -27,6 +29,7 @@ type ServerConfig struct {
 	KeyFilePath      string
 	EnvFilePath      string
 	LogFilePath      string
+	DataDir          string
 	ServiceName      string
 	Debug            bool
 	StrictACL        bool
@@ -49,6 +52,7 @@ func LoadStartupConfig(args []string) (*ServerConfig, error) {
 	keyFileFlag := fs.String("key-file", "", "Path to file containing default encryption/decryption key")
 	envFileFlag := fs.String("env-file", "", "Optional path to KEY=VALUE environment configuration file (or FLOW_API_ENV_FILE)")
 	logFileFlag := fs.String("log-file", "", "Optional file path to append server logs (or FLOW_API_LOG_FILE)")
+	dataDirFlag := fs.String("data-dir", "", "Optional root directory for per-job <user_login>/<pid>-<run_id> sandboxed workspaces (or FLOW_API_DATA_DIR)")
 	serviceNameFlag := fs.String("service-name", "GoFlowAPI", "Service name when running under the Windows Service Control Manager")
 	debugFlag := fs.Bool("debug", false, "Enable verbose debug logging")
 	strictACLFlag := fs.Bool("strict-acl", true, "Enforce strict ACL-only pipeline authorization for all non-admin users so accounts without ACLs have no pipeline access (default: true; set -strict-acl=false or FLOW_API_STRICT_ACL=false for legacy global pipeline roles)")
@@ -97,6 +101,21 @@ func LoadStartupConfig(args []string) (*ServerConfig, error) {
 	logFilePath := strings.TrimSpace(*logFileFlag)
 	if logFilePath == "" {
 		logFilePath = strings.TrimSpace(os.Getenv("FLOW_API_LOG_FILE"))
+	}
+
+	dataDir := strings.TrimSpace(*dataDirFlag)
+	if dataDir == "" {
+		dataDir = strings.TrimSpace(os.Getenv("FLOW_API_DATA_DIR"))
+	}
+	if dataDir != "" {
+		absDataDir, absErr := filepath.Abs(dataDir)
+		if absErr != nil {
+			return nil, fmt.Errorf("invalid -data-dir %q: %w", dataDir, absErr)
+		}
+		if mkErr := os.MkdirAll(absDataDir, 0750); mkErr != nil {
+			return nil, fmt.Errorf("failed creating -data-dir %q: %w", absDataDir, mkErr)
+		}
+		dataDir = filepath.Clean(absDataDir)
 	}
 
 	serviceName := strings.TrimSpace(*serviceNameFlag)
@@ -154,6 +173,7 @@ func LoadStartupConfig(args []string) (*ServerConfig, error) {
 		KeyFilePath:      strings.TrimSpace(*keyFileFlag),
 		EnvFilePath:      envFilePath,
 		LogFilePath:      logFilePath,
+		DataDir:          dataDir,
 		ServiceName:      serviceName,
 		Debug:            debug,
 		StrictACL:        strictACL,
@@ -292,4 +312,113 @@ func writeSafeLocalFile(rawPath string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	return os.WriteFile(safePath, data, perm)
+}
+
+// JobWorkspace represents an isolated per-job directory under -data-dir:
+// <data-dir>/<sanitized_user_login>/<pid>-<run_id>.
+type JobWorkspace struct {
+	RootDir string
+	UserDir string
+	Dir     string
+	RunID   string
+}
+
+// sanitizeUserDirName converts a user login (e.g. "RSYSLAB\\SVC_FLOW_API",
+// "U00001@RSYSLAB.COM", "admin") into a safe single path segment.
+func sanitizeUserDirName(userLogin string) string {
+	trimmed := strings.TrimSpace(strings.ToLower(userLogin))
+	if trimmed == "" {
+		return "anonymous"
+	}
+	var b strings.Builder
+	b.Grow(len(trimmed))
+	lastUnderscore := false
+	for i := 0; i < len(trimmed); i++ {
+		ch := trimmed[i]
+		if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' {
+			b.WriteByte(ch)
+			lastUnderscore = false
+		} else if !lastUnderscore {
+			b.WriteByte('_')
+			lastUnderscore = true
+		}
+	}
+	cleaned := strings.Trim(b.String(), "_-")
+	if cleaned == "" || cleaned == "." || cleaned == ".." {
+		return "anonymous"
+	}
+	if len(cleaned) > 64 {
+		cleaned = cleaned[:64]
+	}
+	return cleaned
+}
+
+// NewJobWorkspace creates <data-dir>/<user_login>/<pid>-<run_id> for the duration of a job.
+func NewJobWorkspace(dataDir, userLogin, runID string) (*JobWorkspace, error) {
+	trimmedRoot := strings.TrimSpace(dataDir)
+	if trimmedRoot == "" {
+		return nil, nil
+	}
+	absRoot, err := filepath.Abs(trimmedRoot)
+	if err != nil {
+		return nil, fmt.Errorf("failed resolving data-dir %q: %w", dataDir, err)
+	}
+	absRoot = filepath.Clean(absRoot)
+
+	safeUser := sanitizeUserDirName(userLogin)
+	safeRunID := sanitizeUserDirName(runID)
+	if safeRunID == "" || safeRunID == "anonymous" {
+		safeRunID = generateID("run")
+	}
+	userDir := filepath.Join(absRoot, safeUser)
+	jobDir := filepath.Join(userDir, fmt.Sprintf("%d-%s", os.Getpid(), safeRunID))
+
+	if err := os.MkdirAll(jobDir, 0750); err != nil {
+		return nil, fmt.Errorf("failed creating job workspace %q: %w", jobDir, err)
+	}
+	return &JobWorkspace{
+		RootDir: absRoot,
+		UserDir: userDir,
+		Dir:     jobDir,
+		RunID:   runID,
+	}, nil
+}
+
+// ResolvePath resolves rawPath strictly inside the job workspace directory.
+func (w *JobWorkspace) ResolvePath(rawPath string) (string, error) {
+	if w == nil || w.Dir == "" {
+		return resolveSafeLocalPath(rawPath)
+	}
+	return flow.ResolveConfinedPath(w.Dir, rawPath)
+}
+
+// ReadFile reads a file strictly inside the job workspace directory.
+func (w *JobWorkspace) ReadFile(rawPath string) ([]byte, error) {
+	p, err := w.ResolvePath(rawPath)
+	if err != nil {
+		return nil, err
+	}
+	return os.ReadFile(p)
+}
+
+// WriteFile writes a file (creating subdirectories as needed) strictly inside the job workspace directory.
+func (w *JobWorkspace) WriteFile(rawPath string, data []byte, perm os.FileMode) error {
+	p, err := w.ResolvePath(rawPath)
+	if err != nil {
+		return err
+	}
+	if dir := filepath.Dir(p); dir != "" && dir != "." {
+		if mkErr := os.MkdirAll(dir, 0750); mkErr != nil {
+			return mkErr
+		}
+	}
+	return os.WriteFile(p, data, perm)
+}
+
+// Cleanup removes the per-job workspace directory when the job finishes.
+func (w *JobWorkspace) Cleanup() {
+	if w == nil || w.Dir == "" {
+		return
+	}
+	_ = os.RemoveAll(w.Dir)
 }
