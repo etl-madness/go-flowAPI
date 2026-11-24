@@ -83,6 +83,7 @@ New-Item -ItemType Directory -Path $ProgramDataDir, $dataDir, $logsDir -Force | 
 
 if (-not (Test-Path $envFile)) {
     $defaultSqlite = ($dataDir -replace '\\', '/') + "/flow_api.db"
+    $defaultJobsDir = Join-Path $dataDir "jobs"
     $initialDsn = if ([string]::IsNullOrWhiteSpace($Dsn)) { "sqlite://$defaultSqlite" } else { $Dsn }
     $seedEnv = @"
 # ETL Madness go-flowAPI — Windows Service Environment Configuration
@@ -90,6 +91,8 @@ if (-not (Test-Path $envFile)) {
 FLOW_API_ADDR="$ListenAddr"
 FLOW_API_DSN="$initialDsn"
 FLOW_API_DEBUG="false"
+# Optional: per-job <user_login>\<pid>-<run_id> sandboxed workspace root (-data-dir)
+# FLOW_API_DATA_DIR="$defaultJobsDir"
 # FLOW_SECURE_KEY=""
 "@
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)

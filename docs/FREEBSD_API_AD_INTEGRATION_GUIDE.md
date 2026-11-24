@@ -107,7 +107,8 @@ Create or update `/etc/krb5.conf` (matching `docker/private-krb5.conf`). Ensure 
    export HOST_USERNAME="SVC_FLOW_API"
    export FLOW_API_DSN="sqlserver://DB.EXAMPLE.COM:1433?database=EXAMPLEDB&integrated+security=true&authenticator=krb5&trustServerCertificate=true&app+name=goflow-api-connector"
 
-   /opt/flow-api/bin/go-flowAPI -addr :5180
+   # Optional: confine per-job script working directories and relative file inputs/outputs under -data-dir
+   /opt/flow-api/bin/go-flowAPI -addr :5180 -data-dir "/tmp/go-flow-api-jobs"
    ```
 
 ---
@@ -121,6 +122,8 @@ When installed via the FreeBSD package (`sudo pkg add ./packaging/dist/go-flow-a
 ```dotenv
 FLOW_API_ADDR=":5180"
 FLOW_API_DSN="sqlserver://DB.EXAMPLE.COM:1433?database=EXAMPLEDB&integrated+security=true&authenticator=krb5&trustServerCertificate=true&app+name=goflow-api-connector"
+# Optional: per-job <user_login>/<pid>-<run_id> sandboxed workspace root (equivalent to -data-dir)
+FLOW_API_DATA_DIR="/var/db/go-flow-api/jobs"
 
 AD_DOMAIN="EXAMPLE"
 AD_REALM="EXAMPLE.COM"
