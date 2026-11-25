@@ -1,44 +1,65 @@
 package main
 
-import "strings"
-
-const (
-	// DefaultSchema defines the database schema prefix for SQL Server / PostgreSQL / Oracle.
-	// If tables reside in a custom schema, adjust this constant (e.g. "custom_schema.").
-	// Set to "" for unqualified table names.
-	DefaultSchema = "dbo."
-
-	// Artifact CRUD Tables (matching go-flow / db_importer conventions)
-	TablePipelineContent = DefaultSchema + "flow_pipeline_content"
-	TableOptionsContent  = DefaultSchema + "flow_options_content"
-	TableConfigContent   = DefaultSchema + "flow_config_content"
-
-	// Execution Telemetry Tables (matching go-flow & builder conventions)
-	TablePipelineRuns   = DefaultSchema + "pipeline_runs"
-	TablePipelineEvents = DefaultSchema + "pipeline_events"
-
-	// API Event Audit Table (records all API CRUD, upload, auth, and execution events)
-	TableAPIAuditEvents = DefaultSchema + "flow_api_events"
-
-	// BasicAuth Users & Role Permissions Table
-	TableAPIUsers = DefaultSchema + "flow_api_users"
-
-	// Granular User/Group & Pipeline/Pipeline-Group RBAC/ACL Tables
-	TableAPIGroups            = DefaultSchema + "flow_api_groups"
-	TableAPIUserGroups        = DefaultSchema + "flow_api_user_groups"
-	TablePipelineGroups       = DefaultSchema + "flow_pipeline_groups"
-	TablePipelineGroupMembers = DefaultSchema + "flow_pipeline_group_members"
-	TablePipelineACL          = DefaultSchema + "flow_pipeline_acl"
+import (
+	"github.com/etl-madness/flow"
 )
 
-// resolveTableName adjusts the table path for dialects where "dbo." is not a valid default schema
-// (such as SQLite or MySQL), while preserving custom schemas when configured.
-func resolveTableName(driverType, tableConst string) string {
-	switch strings.ToLower(strings.TrimSpace(driverType)) {
-	case "sqlite", "sqlite3", "mysql":
-		if strings.HasPrefix(tableConst, "dbo.") {
-			return strings.TrimPrefix(tableConst, "dbo.")
-		}
+// Package-level schema and table name variables initialized from flow.DefaultTableConfig().
+// They can be overridden at build time via Go linker flags on github.com/etl-madness/flow
+// (e.g. -ldflags="-X github.com/etl-madness/flow.DefaultSchema=etl_flow") or at runtime
+// via -tables-config <path> / FLOW_TABLES_CONFIG (JSON or YAML mapping file).
+var (
+	ActiveTableConfig = flow.DefaultTableConfig()
+
+	DefaultSchema = ActiveTableConfig.SchemaPrefix()
+
+	// Artifact CRUD Tables (matching go-flow / db_importer conventions)
+	TablePipelineContent = ActiveTableConfig.Qualify(ActiveTableConfig.PipelineContent)
+	TableOptionsContent  = ActiveTableConfig.Qualify(ActiveTableConfig.OptionsContent)
+	TableConfigContent   = ActiveTableConfig.Qualify(ActiveTableConfig.ConfigContent)
+
+	// Execution Telemetry Tables (matching go-flow & builder conventions)
+	TablePipelineRuns   = ActiveTableConfig.Qualify(ActiveTableConfig.PipelineRuns)
+	TablePipelineEvents = ActiveTableConfig.Qualify(ActiveTableConfig.PipelineEvents)
+
+	// API Event Audit Table (records all API CRUD, upload, auth, and execution events)
+	TableAPIAuditEvents = ActiveTableConfig.Qualify(ActiveTableConfig.APIAuditEvents)
+
+	// BasicAuth Users & Role Permissions Table
+	TableAPIUsers = ActiveTableConfig.Qualify(ActiveTableConfig.APIUsers)
+
+	// Granular User/Group & Pipeline/Pipeline-Group RBAC/ACL Tables
+	TableAPIGroups            = ActiveTableConfig.Qualify(ActiveTableConfig.APIGroups)
+	TableAPIUserGroups        = ActiveTableConfig.Qualify(ActiveTableConfig.APIUserGroups)
+	TablePipelineGroups       = ActiveTableConfig.Qualify(ActiveTableConfig.PipelineGroups)
+	TablePipelineGroupMembers = ActiveTableConfig.Qualify(ActiveTableConfig.PipelineGroupMembers)
+	TablePipelineACL          = ActiveTableConfig.Qualify(ActiveTableConfig.PipelineACL)
+)
+
+// ApplyTableConfig updates ActiveTableConfig and all package-level Table* variables.
+func ApplyTableConfig(cfg flow.TableConfig) error {
+	if err := cfg.Validate(); err != nil {
+		return err
 	}
-	return tableConst
+	ActiveTableConfig = cfg
+	DefaultSchema = cfg.SchemaPrefix()
+	TablePipelineContent = cfg.Qualify(cfg.PipelineContent)
+	TableOptionsContent = cfg.Qualify(cfg.OptionsContent)
+	TableConfigContent = cfg.Qualify(cfg.ConfigContent)
+	TablePipelineRuns = cfg.Qualify(cfg.PipelineRuns)
+	TablePipelineEvents = cfg.Qualify(cfg.PipelineEvents)
+	TableAPIAuditEvents = cfg.Qualify(cfg.APIAuditEvents)
+	TableAPIUsers = cfg.Qualify(cfg.APIUsers)
+	TableAPIGroups = cfg.Qualify(cfg.APIGroups)
+	TableAPIUserGroups = cfg.Qualify(cfg.APIUserGroups)
+	TablePipelineGroups = cfg.Qualify(cfg.PipelineGroups)
+	TablePipelineGroupMembers = cfg.Qualify(cfg.PipelineGroupMembers)
+	TablePipelineACL = cfg.Qualify(cfg.PipelineACL)
+	return nil
+}
+
+// resolveTableName adjusts the table path for dialects where "dbo." or custom schemas
+// are not supported (such as SQLite or MySQL), using ActiveTableConfig.
+func resolveTableName(driverType, tableRef string) string {
+	return ActiveTableConfig.Resolve(driverType, tableRef)
 }

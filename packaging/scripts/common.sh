@@ -67,7 +67,7 @@ compile_flow_api_binary() {
     (
         cd "$REPO_ROOT"
         CGO_ENABLED=0 GOOS="$target_os" GOARCH="$target_arch" \
-            go build -trimpath -ldflags="-s -w" -o "${out_bin_dir}/go-flowAPI" .
+            go build -trimpath -ldflags="-s -w ${FLOW_EXTRA_LDFLAGS:-}" -o "${out_bin_dir}/go-flowAPI" .
     )
 
     chmod 0755 "${out_bin_dir}/go-flowAPI"

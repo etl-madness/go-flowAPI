@@ -134,7 +134,11 @@ function Stage-WindowsPayload {
         $env:GOOS = "windows"
         $env:GOARCH = $GoArch
 
-        go build -trimpath -ldflags="-s -w" -o (Join-Path $binDir "go-flowAPI.exe") .
+        $ldflags = "-s -w"
+        if (-not [string]::IsNullOrWhiteSpace($env:FLOW_EXTRA_LDFLAGS)) {
+            $ldflags = "$ldflags $($env:FLOW_EXTRA_LDFLAGS)"
+        }
+        go build -trimpath -ldflags="$ldflags" -o (Join-Path $binDir "go-flowAPI.exe") .
         if ($LASTEXITCODE -ne 0) { throw "go build failed for go-flowAPI.exe (windows/$GoArch)" }
     } finally {
         Remove-Item Env:\CGO_ENABLED -ErrorAction SilentlyContinue

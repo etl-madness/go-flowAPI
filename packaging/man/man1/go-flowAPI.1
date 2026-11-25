@@ -90,6 +90,24 @@ directory for the duration of the job, confines all script subprocess working di
 Environment variable:
 .BR FLOW_API_DATA_DIR .
 .TP
+.BI \-tables\-config " path"
+Optional path to a JSON or YAML file overriding the database schema and/or any of the 12 table names.
+Environment variable:
+.BR FLOW_TABLES_CONFIG .
+.TP
+.BI \-print\-ddl " dialect"
+Prints complete
+.B CREATE SCHEMA / CREATE TABLE / CREATE INDEX
+DDL SQL for
+.I dialect
+.RB ( sqlserver ,
+.BR postgres ,
+.BR mysql ,
+.BR sqlite ,
+or
+.BR oracle )
+using the active schema and table configuration, then exits.
+.TP
 .BI \-service\-name " name"
 Service name registered with the Windows Service Control Manager when running as a native Windows Service (default
 .BR GoFlowAPI ).

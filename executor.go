@@ -234,12 +234,13 @@ func sanitizeSQLResourceTable(raw string) (string, string, error) {
 }
 
 func defaultSQLResourceColumn(baseTable string) string {
-	switch strings.ToLower(baseTable) {
-	case "flow_pipeline_content":
+	lower := strings.ToLower(strings.TrimSpace(baseTable))
+	switch {
+	case lower == "flow_pipeline_content" || lower == strings.ToLower(flow.BaseTableName(TablePipelineContent)):
 		return "PipelineXML"
-	case "flow_options_content":
+	case lower == "flow_options_content" || lower == strings.ToLower(flow.BaseTableName(TableOptionsContent)):
 		return "OptionsXML"
-	case "flow_config_content":
+	case lower == "flow_config_content" || lower == strings.ToLower(flow.BaseTableName(TableConfigContent)):
 		return "ConfigXML"
 	default:
 		return ""

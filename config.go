@@ -30,6 +30,8 @@ type ServerConfig struct {
 	EnvFilePath      string
 	LogFilePath      string
 	DataDir          string
+	TablesConfigPath string
+	PrintDDLDialect  string
 	ServiceName      string
 	Debug            bool
 	StrictACL        bool
@@ -53,6 +55,8 @@ func LoadStartupConfig(args []string) (*ServerConfig, error) {
 	envFileFlag := fs.String("env-file", "", "Optional path to KEY=VALUE environment configuration file (or FLOW_API_ENV_FILE)")
 	logFileFlag := fs.String("log-file", "", "Optional file path to append server logs (or FLOW_API_LOG_FILE)")
 	dataDirFlag := fs.String("data-dir", "", "Optional root directory for per-job <user_login>/<pid>-<run_id> sandboxed workspaces (or FLOW_API_DATA_DIR)")
+	tablesConfigFlag := fs.String("tables-config", "", "Optional path to JSON/YAML database schema & table name mapping file (or FLOW_TABLES_CONFIG)")
+	printDDLFlag := fs.String("print-ddl", "", "Print CREATE TABLE DDL for the given dialect (sqlserver, postgres, mysql, sqlite, oracle) using the active table configuration, then exit")
 	serviceNameFlag := fs.String("service-name", "GoFlowAPI", "Service name when running under the Windows Service Control Manager")
 	debugFlag := fs.Bool("debug", false, "Enable verbose debug logging")
 	strictACLFlag := fs.Bool("strict-acl", true, "Enforce strict ACL-only pipeline authorization for all non-admin users so accounts without ACLs have no pipeline access (default: true; set -strict-acl=false or FLOW_API_STRICT_ACL=false for legacy global pipeline roles)")
@@ -118,6 +122,20 @@ func LoadStartupConfig(args []string) (*ServerConfig, error) {
 		dataDir = filepath.Clean(absDataDir)
 	}
 
+	tablesConfigPath := strings.TrimSpace(*tablesConfigFlag)
+	if tablesConfigPath == "" {
+		tablesConfigPath = strings.TrimSpace(os.Getenv("FLOW_TABLES_CONFIG"))
+	}
+	if tablesConfigPath != "" {
+		tblCfg, tblErr := flow.LoadTableConfigFile(tablesConfigPath)
+		if tblErr != nil {
+			return nil, fmt.Errorf("failed loading -tables-config %q: %w", tablesConfigPath, tblErr)
+		}
+		if err := ApplyTableConfig(tblCfg); err != nil {
+			return nil, fmt.Errorf("invalid table config in %q: %w", tablesConfigPath, err)
+		}
+	}
+
 	serviceName := strings.TrimSpace(*serviceNameFlag)
 	if serviceName == "" {
 		serviceName = "GoFlowAPI"
@@ -174,6 +192,8 @@ func LoadStartupConfig(args []string) (*ServerConfig, error) {
 		EnvFilePath:      envFilePath,
 		LogFilePath:      logFilePath,
 		DataDir:          dataDir,
+		TablesConfigPath: tablesConfigPath,
+		PrintDDLDialect:  strings.TrimSpace(*printDDLFlag),
 		ServiceName:      serviceName,
 		Debug:            debug,
 		StrictACL:        strictACL,

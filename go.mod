@@ -3,7 +3,7 @@ module github.com/etl-madness/go-flowAPI
 go 1.26.5
 
 require (
-	github.com/etl-madness/flow v1.4.3
+	github.com/etl-madness/flow v1.4.4
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/lestrrat-go/helium v0.7.0
 	github.com/lib/pq v1.12.3

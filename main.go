@@ -29,6 +29,15 @@ func main() {
 		return
 	}
 
+	if cfg.PrintDDLDialect != "" {
+		ddl, err := ActiveTableConfig.RenderDDL(cfg.PrintDDLDialect)
+		if err != nil {
+			log.Fatalf("[go-flowAPI] failed generating DDL for %q: %v", cfg.PrintDDLDialect, err)
+		}
+		fmt.Print(ddl)
+		return
+	}
+
 	logFile, err := configureLogOutput(cfg.LogFilePath)
 	if err != nil {
 		log.Fatalf("[go-flowAPI] failed opening log file %q: %v", cfg.LogFilePath, err)

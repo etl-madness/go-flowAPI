@@ -108,6 +108,13 @@ packaging/
 
 Output artifacts are written to `packaging/dist/`. All shell scripts are portable POSIX `/bin/sh` scripts.
 
+> **Custom Build-Time Schema & Table Names (`FLOW_EXTRA_LDFLAGS`):**
+> To bake a custom default database schema or table names into any OS package without editing source files, set `FLOW_EXTRA_LDFLAGS` before running any build script (or use `-tables-config` / `FLOW_TABLES_CONFIG` at runtime and `-print-ddl <dialect>` to generate matching SQL):
+> ```sh
+> FLOW_EXTRA_LDFLAGS="-X github.com/etl-madness/flow.DefaultSchema=etl_flow" \
+>   sh ./packaging/scripts/build-all.sh host
+> ```
+
 ### 1. Build for Current Host OS
 ```sh
 sh ./packaging/scripts/build-all.sh host
@@ -637,7 +644,8 @@ sudo sysrc go_flow_api_enable="YES"
 # sudo sysrc go_flow_api_group="flowapi"
 # sudo sysrc go_flow_api_env_file="/usr/local/etc/go-flow-api/go-flow-api.env"
 # sudo sysrc go_flow_api_logfile="/var/log/go-flow-api/go-flow-api.log"
-# sudo sysrc go_flow_api_flags=""
+# sudo sysrc go_flow_api_flags="-data-dir /var/db/go-flow-api/jobs"
+# sudo sysrc go_flow_api_env="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # 3. Start, inspect status, and tail logs
 sudo service go_flow_api start

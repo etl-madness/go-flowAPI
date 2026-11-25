@@ -85,7 +85,11 @@ function Build-GoBinary {
         $env:GOOS = $GoOS
         $env:GOARCH = $GoArch
 
-        go build -trimpath -ldflags="-s -w" -o (Join-Path $OutDir "go-flowAPI") .
+        $ldflags = "-s -w"
+        if (-not [string]::IsNullOrWhiteSpace($env:FLOW_EXTRA_LDFLAGS)) {
+            $ldflags = "$ldflags $($env:FLOW_EXTRA_LDFLAGS)"
+        }
+        go build -trimpath -ldflags="$ldflags" -o (Join-Path $OutDir "go-flowAPI") .
         if ($LASTEXITCODE -ne 0) { throw "go build failed for go-flowAPI ($GoOS/$GoArch)" }
     } finally {
         Remove-Item Env:\CGO_ENABLED -ErrorAction SilentlyContinue

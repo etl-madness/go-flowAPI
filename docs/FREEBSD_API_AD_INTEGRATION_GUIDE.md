@@ -125,6 +125,9 @@ FLOW_API_DSN="sqlserver://DB.EXAMPLE.COM:1433?database=EXAMPLEDB&integrated+secu
 # Optional: per-job <user_login>/<pid>-<run_id> sandboxed workspace root (equivalent to -data-dir)
 FLOW_API_DATA_DIR="/var/db/go-flow-api/jobs"
 
+# Optional: add /usr/local/bin to PATH for all commands. <scripts> can only run commands available in this PATH.
+PATH="/usr/local/bin:$PATH"
+
 AD_DOMAIN="EXAMPLE"
 AD_REALM="EXAMPLE.COM"
 AD_USER="SVC_FLOW_API"
@@ -231,9 +234,21 @@ sudo chmod 0644 /etc/cron.d/go-flow-api-krb5
 
 ```sh
 sudo sysrc go_flow_api_enable="YES"
+
+# Ensure /usr/local/bin tools (pwsh, bash, kinit, dotnet, etc.) are on PATH for pipeline <script> nodes:
+sudo sysrc go_flow_api_env="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Optional: override -data-dir via rc.conf flags instead of FLOW_API_DATA_DIR in go-flow-api.env:
+# sudo sysrc go_flow_api_flags="-data-dir /var/db/go-flow-api/jobs"
+
 sudo service go_flow_api start
 sudo service go_flow_api status
 ```
+
+> **Using `-data-dir` / `FLOW_API_DATA_DIR` with `pwsh` and Shell Scripts:**
+> - `-data-dir` does **not** restrict executable lookup (`pwsh` is still resolved from `PATH`, so setting `go_flow_api_env` above ensures `/usr/local/bin/pwsh` is found).
+> - Each executed job creates `<data-dir>/<user_login>/<pid>-<run_id>`, sets `cmd.Dir` (`$PWD`), `TMPDIR`, `TEMP`, `TMP`, and `FLOW_JOB_DIR` to that job directory, confines all Flow file nodes (`<file_read>`, `<file_save>`, `<excel_*>`, `<template>`, `<xml_xpath>`, `<json_path>`, `<yaml_path>`, and local `sqlite`/`bbolt`/`badger` stores) strictly inside it, and removes the job directory automatically when the job completes.
+> - Inside `pwsh` or shell subprocesses, relative paths read/write inside the job directory, while explicit absolute paths are governed by the FreeBSD filesystem permissions of the `flowapi` user (whose home `/var/db/go-flow-api` is writable for `pwsh`'s `.config`/`.cache` directories).
 
 ### Step 5: Verify Health & Kerberos SQL Server Identity
 
