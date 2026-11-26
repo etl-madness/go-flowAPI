@@ -1,5 +1,23 @@
 # Release Notes — `go-flowAPI`
 
+## Release Notes (`v1.3.9`) — Docker Build-Time Schema/Table Overrides (`FLOW_EXTRA_LDFLAGS`), Dynamic SQLite Entrypoint DDL & Unix SQL Server Auth Fix
+
+### Overview
+
+Version `1.3.9` extends build-time database schema and table name overrides to all Docker builds, ensures containerized SQLite initialization always honors build-time and runtime table overrides, and incorporates the Unix SQL Server authentication selection fix from `github.com/etl-madness/flow`:
+
+1. **Docker Build-Time Schema & Table Overrides (`Dockerfile`, `docker-compose*.yml`)**:
+   - Added `ARG FLOW_EXTRA_LDFLAGS=""` to `Dockerfile` and appended `${FLOW_EXTRA_LDFLAGS}` to `go build -ldflags="-s -w ${FLOW_EXTRA_LDFLAGS}"`.
+   - Forwarded `FLOW_EXTRA_LDFLAGS` under `build.args` in `docker-compose.yml`, `docker-compose.ad-sidecar.yml`, `docker-compose.sqlserver.yml`, `docker-compose.postgres.yml`, and `docker-compose.sqlite.yml` so custom default schemas (e.g., `-X github.com/etl-madness/flow.DefaultSchema=etl`) can be baked into container images via `docker build --build-arg` or `docker compose up -d --build`.
+
+2. **Dynamic SQLite Schema Initialization (`docker/docker-entrypoint.sh`)**:
+   - Updated `docker/docker-entrypoint.sh` to always initialize SQLite databases via `/app/go-flowAPI -print-ddl sqlite` (passing `-tables-config "$FLOW_TABLES_CONFIG"` when set), ensuring build-time `DefaultTable*` overrides are honored automatically without requiring a separate runtime config file.
+
+3. **Unix SQL Server Authentication Selection Fix (`github.com/etl-madness/flow`)**:
+   - Inherits the `smart_unix` authenticator fix in `flow/krb5_auth.go`: bare `user:password` SQL logins (such as `sa`) without an explicit `authenticator=krb5` parameter now fall back cleanly to standard SQL Server Authentication instead of attempting a Kerberos AS-REQ when `/etc/krb5.conf` or `KRB5CCNAME` is present on Linux, FreeBSD, OpenBSD, or macOS hosts.
+
+---
+
 ## Release Notes (`v1.3.7`) — Per-Job Sandboxed Workspaces (`-data-dir`), Configurable Schema/Tables (`-tables-config`, `-print-ddl`), OpenBSD Packaging & Shared Kerberos Auth
 
 ### Overview

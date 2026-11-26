@@ -8,6 +8,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        FLOW_EXTRA_LDFLAGS: "${FLOW_EXTRA_LDFLAGS:-}"
     image: go-flow-api:latest
     container_name: go-flow-api
     restart: unless-stopped

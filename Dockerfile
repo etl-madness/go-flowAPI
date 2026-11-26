@@ -12,7 +12,8 @@ RUN go mod download
 
 # Copy go-flowAPI source and compile static binary
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/go-flowAPI .
+ARG FLOW_EXTRA_LDFLAGS=""
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w ${FLOW_EXTRA_LDFLAGS}" -o /out/go-flowAPI .
 
 # Stage 2: Runtime image with .NET SDK and PowerShell
 FROM mcr.microsoft.com/dotnet/sdk:10.0-alpine3.24

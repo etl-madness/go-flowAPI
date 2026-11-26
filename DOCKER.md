@@ -183,6 +183,9 @@ FLOW_API_DEBUG=false
 # Default strict pipeline ACL enforcement (true by default in v1.3.1; non-admin accounts require explicit ACLs)
 FLOW_API_STRICT_ACL=true
 
+# Optional build-time Go linker flags to override default database schema or table names
+FLOW_EXTRA_LDFLAGS="-X github.com/etl-madness/flow.DefaultSchema=etl"
+
 # Database-specific overrides (for sqlserver / postgres compose files)
 MSSQL_SA_PASSWORD=YourStrong!Passw0rd
 MSSQL_HOST_PORT=1433
@@ -190,6 +193,55 @@ POSTGRES_USER=flow
 POSTGRES_PASSWORD=flowpass
 POSTGRES_DB=flowdb
 POSTGRES_HOST_PORT=5432
+```
+
+---
+
+## Customizing Database Schema & Table Names (`FLOW_EXTRA_LDFLAGS` / `FLOW_TABLES_CONFIG`)
+
+You can override the default database schema (`dbo`) and/or any of the 12 table names either at **Docker build time** or at **container runtime**:
+
+### 1. Build-Time Override (`FLOW_EXTRA_LDFLAGS`)
+
+`Dockerfile` accepts `ARG FLOW_EXTRA_LDFLAGS=""`, and all `docker-compose*.yml` files forward `FLOW_EXTRA_LDFLAGS` under `build.args`.
+
+**Docker Compose (Bash / Linux / macOS):**
+```bash
+FLOW_EXTRA_LDFLAGS="-X github.com/etl-madness/flow.DefaultSchema=etl" \
+  docker compose up -d --build
+```
+
+**Docker Compose (PowerShell):**
+```powershell
+$env:FLOW_EXTRA_LDFLAGS = "-X github.com/etl-madness/flow.DefaultSchema=etl"
+docker compose up -d --build
+```
+
+**Standalone `docker build`:**
+```bash
+docker build \
+  --build-arg FLOW_EXTRA_LDFLAGS="-X github.com/etl-madness/flow.DefaultSchema=etl" \
+  -t go-flow-api:latest .
+```
+
+Generate matching SQL DDL directly from the built image for your target database:
+```bash
+docker run --rm --entrypoint /app/go-flowAPI go-flow-api:latest -print-ddl sqlserver > init-etl.sql
+```
+
+> **Note:** For SQLite (`docker-compose.sqlite.yml`), `docker/docker-entrypoint.sh` automatically initializes the database via `/app/go-flowAPI -print-ddl sqlite`, so build-time table overrides are applied on first boot. For local dev stacks using static SQL init scripts (`docker/init/sqlserver-init.sql`, `docker/init/postgres-init.sql`), generate updated DDL with `-print-ddl` above.
+
+### 2. Runtime Override (`FLOW_TABLES_CONFIG`)
+
+To override schema or table names without rebuilding the image, mount a JSON or YAML mapping file into the container and set `FLOW_TABLES_CONFIG`:
+```bash
+docker run -d \
+  --name go-flow-api \
+  -p 5180:5180 \
+  -v ./tables.json:/app/tables.json:ro \
+  -e FLOW_TABLES_CONFIG="/app/tables.json" \
+  -e FLOW_API_DSN="sqlserver://flow_api:YourStrong!Passw0rd@host.docker.internal:1433?database=EXAMPLE_DB&trustServerCertificate=true" \
+  go-flow-api:latest
 ```
 
 ---

@@ -25,8 +25,12 @@ if [ -n "$FLOW_API_DSN" ] && [ -f "/app/docker/init/sqlite-init.sql" ]; then
     if [ -n "$DB_PATH" ] && [ "$DB_PATH" != ":memory:" ]; then
         mkdir -p "$(dirname "$DB_PATH")"
         echo "[entrypoint] Ensuring SQLite schema is initialized in $DB_PATH..."
-        if [ -n "${FLOW_TABLES_CONFIG:-}" ] && [ -x /app/go-flowAPI ]; then
-            /app/go-flowAPI -tables-config "$FLOW_TABLES_CONFIG" -print-ddl sqlite | sqlite3 "$DB_PATH"
+        if [ -x /app/go-flowAPI ]; then
+            if [ -n "${FLOW_TABLES_CONFIG:-}" ]; then
+                /app/go-flowAPI -tables-config "$FLOW_TABLES_CONFIG" -print-ddl sqlite | sqlite3 "$DB_PATH"
+            else
+                /app/go-flowAPI -print-ddl sqlite | sqlite3 "$DB_PATH"
+            fi
         else
             sqlite3 "$DB_PATH" < /app/docker/init/sqlite-init.sql
         fi
