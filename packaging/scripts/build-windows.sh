@@ -81,7 +81,7 @@ log_info "Cross-compiling go-flowAPI.exe for windows/${GOARCH_TARGET}..."
 (
     cd "$REPO_ROOT"
     CGO_ENABLED=0 GOOS="windows" GOARCH="$GOARCH_TARGET" \
-        go build -trimpath -ldflags="-s -w" -o "${STAGE_DIR}/bin/go-flowAPI.exe" .
+        go build -trimpath -ldflags="-s -w ${FLOW_EXTRA_LDFLAGS:-}" -o "${STAGE_DIR}/bin/go-flowAPI.exe" .
 )
 
 cp "${REPO_ROOT}/SCHEMA.md" "${STAGE_DIR}/docs/SCHEMA.md"
