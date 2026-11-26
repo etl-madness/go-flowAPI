@@ -80,6 +80,7 @@ func setupTestServer(t *testing.T) (*APIServer, *httptest.Server, *sql.DB) {
 			user_name        TEXT,
 			os_user_name     TEXT,
 			db_user_name     TEXT,
+			db_server        TEXT,
 			spid             INTEGER,
 			application_name TEXT,
 			hostname         TEXT,
@@ -100,6 +101,7 @@ func setupTestServer(t *testing.T) (*APIServer, *httptest.Server, *sql.DB) {
 			user_name        TEXT,
 			os_user_name     TEXT,
 			db_user_name     TEXT,
+			db_server        TEXT,
 			spid             TEXT,
 			application_name TEXT,
 			hostname         TEXT,
@@ -729,9 +731,9 @@ func TestDatabaseSink_PerNodeSessionIdentityAndCrossDB(t *testing.T) {
 	ctx := context.Background()
 
 	sink := NewDatabaseSink(db, "sqlite", false, false)
-	sink.SetSessionIdentity(1000, "log_user", "log_app")
-	sink.SetDBSessionIdentity("source_db", 2000, "src_user", "src_app")
-	sink.SetDBSessionIdentity("target_db", 3000, "tgt_user", "tgt_app")
+	sink.SetSessionIdentity(1000, "log_user", "log_app", "LOGSRV/AUDIT")
+	sink.SetDBSessionIdentity("source_db", 2000, "src_user", "src_app", "SRCSRV/SRCDB")
+	sink.SetDBSessionIdentity("target_db", 3000, "tgt_user", "tgt_app", "TGTSRV/TGTDB")
 
 	nodes := []flow.PipelineNode{
 		{
@@ -856,13 +858,14 @@ func TestDatabaseSink_PerNodeSessionIdentityAndCrossDB(t *testing.T) {
 	}
 
 	type evtRow struct {
-		seq     int
-		nodeID  string
-		dbUser  string
-		spid    string
-		appName string
+		seq      int
+		nodeID   string
+		dbUser   string
+		dbServer string
+		spid     string
+		appName  string
 	}
-	rows, err := db.QueryContext(ctx, "SELECT sequence_num, node_id, db_user_name, spid, application_name FROM pipeline_events WHERE run_id = 'run-ident-1' ORDER BY sequence_num ASC")
+	rows, err := db.QueryContext(ctx, "SELECT sequence_num, node_id, db_user_name, db_server, spid, application_name FROM pipeline_events WHERE run_id = 'run-ident-1' ORDER BY sequence_num ASC")
 	if err != nil {
 		t.Fatalf("failed querying pipeline_events: %v", err)
 	}
@@ -871,7 +874,7 @@ func TestDatabaseSink_PerNodeSessionIdentityAndCrossDB(t *testing.T) {
 	var recorded []evtRow
 	for rows.Next() {
 		var r evtRow
-		if err := rows.Scan(&r.seq, &r.nodeID, &r.dbUser, &r.spid, &r.appName); err != nil {
+		if err := rows.Scan(&r.seq, &r.nodeID, &r.dbUser, &r.dbServer, &r.spid, &r.appName); err != nil {
 			t.Fatalf("failed scanning row: %v", err)
 		}
 		recorded = append(recorded, r)
@@ -881,8 +884,14 @@ func TestDatabaseSink_PerNodeSessionIdentityAndCrossDB(t *testing.T) {
 		t.Fatalf("expected 7 events, got %d", len(recorded))
 	}
 
-	if recorded[0].spid != "1000" || recorded[0].appName != "log_app" || recorded[0].dbUser != "log_user" {
+	if recorded[0].spid != "1000" || recorded[0].appName != "log_app" || recorded[0].dbUser != "log_user" || recorded[0].dbServer != "LOGSRV/AUDIT" {
 		t.Errorf("event 1 (run.started) expected log_db identity, got %+v", recorded[0])
+	}
+	if recorded[1].dbServer != "SRCSRV/SRCDB" {
+		t.Errorf("event 2 (fetch_step) expected db_server=SRCSRV/SRCDB, got %q", recorded[1].dbServer)
+	}
+	if recorded[3].spid != "2000->3000" || recorded[3].dbServer != "SRCSRV/SRCDB->TGTSRV/TGTDB" {
+		t.Errorf("event 4 (cross_db_bulk) expected source->target SPID and db_server, got %+v", recorded[3])
 	}
 	if recorded[1].spid != "2000" || recorded[1].appName != "src_app" || recorded[1].dbUser != "src_user" {
 		t.Errorf("event 2 (fetch_step) expected source_db identity, got %+v", recorded[1])

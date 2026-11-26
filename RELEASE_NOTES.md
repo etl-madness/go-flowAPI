@@ -1,5 +1,23 @@
 # Release Notes — `go-flowAPI`
 
+## Release Notes (`v1.3.10`) — Database Server Telemetry (`db_server`) & Cross-DB `sql_bulk` Source/Target Tracking
+
+### Overview
+
+Version `1.3.10` upgrades `go-flowAPI` to **`github.com/etl-madness/flow v1.4.7`** and adds database server/catalog tracking (`db_server`) across pipeline run summaries, step execution events, health checks, and database connection tests:
+
+1. **Database Server Identity Capture (`db.go`, `telemetry.go`, `executor.go`, `handlers.go`)**:
+   - Added `FetchDatabaseSessionIdentityWithServer` across SQL Server/Azure SQL, PostgreSQL, MySQL/MariaDB, Oracle, and SQLite (capturing `<server>/<database>` or `sqlite:<filename>`).
+   - Persists `db_server` in `pipeline_runs` and `pipeline_events` when the column exists (remaining 100% backwards-compatible with existing schemas).
+   - For cross-database `<sql_bulk>` nodes, records both `source->target` database servers (`db_server`) and `source->target` SPIDs (`spid`).
+   - In `QueryPipelineRuns`, automatically falls back to the active logging database server for legacy rows or existing tables without `db_server`, so `FlowUI` immediately displays the logging database server.
+   - Included `db_server` in `/api/v1/health` and `/api/v1/db/test` responses.
+
+2. **Container Init SQL (`docker/init/{sqlite,postgres,sqlserver}-init.sql`)**:
+   - Added the `db_server` column to `pipeline_runs` and `pipeline_events` in all bundled Docker initialization scripts.
+
+---
+
 ## Release Notes (`v1.3.9`) — Docker Build-Time Schema/Table Overrides (`FLOW_EXTRA_LDFLAGS`), Dynamic SQLite Entrypoint DDL & Unix SQL Server Auth Fix
 
 ### Overview

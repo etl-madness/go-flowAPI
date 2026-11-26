@@ -1293,6 +1293,7 @@ func (s *APIServer) ExecutePipeline(ctx context.Context, req ExecutionRequest, o
 		UserName:        osUser,
 		OSUserName:      osUser,
 		DBUserName:      dbUser,
+		DBServer:        dbSink.DBServer(),
 		SPID:            dbSPID,
 		ApplicationName: appName,
 		Hostname:        hostname,

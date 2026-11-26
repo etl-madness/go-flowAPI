@@ -235,11 +235,12 @@ type NodeDBTarget struct {
 	TargetDB string
 }
 
-// DatabaseSessionIdentity captures the session ID, db user, and application name for a connection.
+// DatabaseSessionIdentity captures the session ID, db user, application name, and server for a connection.
 type DatabaseSessionIdentity struct {
 	SPID            int64
 	DBUser          string
 	ApplicationName string
+	DBServer        string
 }
 
 type finishedNodeEvent struct {
@@ -264,6 +265,7 @@ type DatabaseSink struct {
 	spid             int64
 	dbUser           string
 	appName          string
+	dbServer         string
 	mu               sync.RWMutex
 	runID            string
 	status           string
@@ -295,6 +297,8 @@ var knownEventCols = map[string]bool{
 	"os_user_name":       true,
 	"db_user_name":       true,
 	"database_user_name": true,
+	"db_server":          true,
+	"database_server":    true,
 	"spid":               true,
 	"sspid":              true,
 	"application_name":   true,
@@ -322,10 +326,11 @@ func NewDatabaseSink(db *sql.DB, dialect string, logNodeOutput bool, debug bool)
 	defer cancel()
 
 	if db != nil {
-		if spid, dbUser, appName, err := FetchDatabaseSessionIdentity(ctx, db, dialect); err == nil {
+		if spid, dbUser, appName, dbServer, err := FetchDatabaseSessionIdentityWithServer(ctx, db, dialect); err == nil {
 			sink.spid = spid
 			sink.dbUser = dbUser
 			sink.appName = appName
+			sink.dbServer = dbServer
 		}
 		sink.detectColumns(ctx)
 	} else {
@@ -430,6 +435,13 @@ func (s *DatabaseSink) SessionIdentity() (int64, string, string) {
 	return s.spid, s.dbUser, s.appName
 }
 
+// DBServer returns the database server/catalog label captured for the logging connection.
+func (s *DatabaseSink) DBServer() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.dbServer
+}
+
 // SetSessionIdentity explicitly overrides the session identity for testing or connection pooling.
 func (s *DatabaseSink) SetSessionIdentity(spid int64, dbUser string, appName ...string) {
 	s.mu.Lock()
@@ -441,6 +453,9 @@ func (s *DatabaseSink) SetSessionIdentity(spid int64, dbUser string, appName ...
 	} else if s.appName == "" {
 		s.appName = defaultApplicationName()
 	}
+	if len(appName) > 1 && appName[1] != "" {
+		s.dbServer = appName[1]
+	}
 }
 
 // SetRegistry sets the flow.Registry used to look up active database connection pools.
@@ -451,16 +466,21 @@ func (s *DatabaseSink) SetRegistry(reg *flow.Registry) {
 }
 
 // SetDBSessionIdentity sets a known session identity for a specific database name.
-func (s *DatabaseSink) SetDBSessionIdentity(dbName string, spid int64, dbUser string, appName string) {
+func (s *DatabaseSink) SetDBSessionIdentity(dbName string, spid int64, dbUser string, appName string, dbServer ...string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.cachedIdentities == nil {
 		s.cachedIdentities = make(map[string]DatabaseSessionIdentity)
 	}
+	srv := ""
+	if len(dbServer) > 0 {
+		srv = dbServer[0]
+	}
 	s.cachedIdentities[dbName] = DatabaseSessionIdentity{
 		SPID:            spid,
 		DBUser:          dbUser,
 		ApplicationName: appName,
+		DBServer:        srv,
 	}
 }
 
@@ -662,6 +682,7 @@ func (s *DatabaseSink) getOrFetchSessionIdentity(ctx context.Context, dbName str
 	defaultSPID := s.spid
 	defaultDBUser := s.dbUser
 	defaultAppName := s.appName
+	defaultDBServer := s.dbServer
 	reg := s.registry
 	s.mu.RUnlock()
 
@@ -670,6 +691,7 @@ func (s *DatabaseSink) getOrFetchSessionIdentity(ctx context.Context, dbName str
 			SPID:            defaultSPID,
 			DBUser:          defaultDBUser,
 			ApplicationName: defaultAppName,
+			DBServer:        defaultDBServer,
 		}, nil
 	}
 
@@ -685,7 +707,7 @@ func (s *DatabaseSink) getOrFetchSessionIdentity(ctx context.Context, dbName str
 	fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 	defer cancel()
 
-	spid, dbUser, appName, err := FetchDatabaseSessionIdentity(fetchCtx, handle.Conn, handle.Driver)
+	spid, dbUser, appName, dbServer, err := FetchDatabaseSessionIdentityWithServer(fetchCtx, handle.Conn, handle.Driver)
 	if err != nil {
 		return DatabaseSessionIdentity{}, err
 	}
@@ -694,6 +716,7 @@ func (s *DatabaseSink) getOrFetchSessionIdentity(ctx context.Context, dbName str
 		SPID:            spid,
 		DBUser:          dbUser,
 		ApplicationName: appName,
+		DBServer:        dbServer,
 	}
 
 	s.mu.Lock()
@@ -706,11 +729,25 @@ func (s *DatabaseSink) getOrFetchSessionIdentity(ctx context.Context, dbName str
 	return ident, nil
 }
 
-func (s *DatabaseSink) resolveEventIdentity(ctx context.Context, event flow.ExecutionEvent) (spid any, srcSPIDInt int64, appName string, dbUser string) {
+func formatBulkServerPair(src, tgt string) string {
+	src = strings.TrimSpace(src)
+	tgt = strings.TrimSpace(tgt)
+	switch {
+	case src != "" && tgt != "":
+		return fmt.Sprintf("%s->%s", src, tgt)
+	case tgt != "":
+		return tgt
+	default:
+		return src
+	}
+}
+
+func (s *DatabaseSink) resolveEventIdentity(ctx context.Context, event flow.ExecutionEvent) (spid any, srcSPIDInt int64, appName string, dbUser string, dbServer string) {
 	s.mu.RLock()
 	defaultSPID := s.spid
 	defaultDBUser := s.dbUser
 	defaultAppName := s.appName
+	defaultDBServer := s.dbServer
 	var target NodeDBTarget
 	var found bool
 	if s.nodeTargets != nil {
@@ -724,7 +761,7 @@ func (s *DatabaseSink) resolveEventIdentity(ctx context.Context, event flow.Exec
 	s.mu.RUnlock()
 
 	if !found || (event.NodeKind != "" && event.NodeKind != "sql" && event.NodeKind != "sql_bulk") {
-		return defaultSPID, defaultSPID, defaultAppName, defaultDBUser
+		return defaultSPID, defaultSPID, defaultAppName, defaultDBUser, defaultDBServer
 	}
 
 	if target.NodeKind == "sql_bulk" {
@@ -741,18 +778,19 @@ func (s *DatabaseSink) resolveEventIdentity(ctx context.Context, event flow.Exec
 				return fmt.Sprintf("%d->%d", srcIdent.SPID, tgtIdent.SPID),
 					srcIdent.SPID,
 					tgtIdent.ApplicationName,
-					fmt.Sprintf("%s->%s", srcIdent.DBUser, tgtIdent.DBUser)
+					fmt.Sprintf("%s->%s", srcIdent.DBUser, tgtIdent.DBUser),
+					formatBulkServerPair(srcIdent.DBServer, tgtIdent.DBServer)
 			}
 			if tgtErr == nil {
-				return tgtIdent.SPID, tgtIdent.SPID, tgtIdent.ApplicationName, tgtIdent.DBUser
+				return tgtIdent.SPID, tgtIdent.SPID, tgtIdent.ApplicationName, tgtIdent.DBUser, tgtIdent.DBServer
 			}
 		} else if srcDB != "" {
 			ident, err := s.getOrFetchSessionIdentity(ctx, srcDB)
 			if err == nil {
-				return ident.SPID, ident.SPID, ident.ApplicationName, ident.DBUser
+				return ident.SPID, ident.SPID, ident.ApplicationName, ident.DBUser, ident.DBServer
 			}
 		}
-		return defaultSPID, defaultSPID, defaultAppName, defaultDBUser
+		return defaultSPID, defaultSPID, defaultAppName, defaultDBUser, defaultDBServer
 	}
 
 	if target.NodeKind == "sql" {
@@ -760,12 +798,12 @@ func (s *DatabaseSink) resolveEventIdentity(ctx context.Context, event flow.Exec
 		if dbName != "" {
 			ident, err := s.getOrFetchSessionIdentity(ctx, dbName)
 			if err == nil {
-				return ident.SPID, ident.SPID, ident.ApplicationName, ident.DBUser
+				return ident.SPID, ident.SPID, ident.ApplicationName, ident.DBUser, ident.DBServer
 			}
 		}
 	}
 
-	return defaultSPID, defaultSPID, defaultAppName, defaultDBUser
+	return defaultSPID, defaultSPID, defaultAppName, defaultDBUser, defaultDBServer
 }
 
 func (s *DatabaseSink) Emit(ctx context.Context, event flow.ExecutionEvent) error {
@@ -801,7 +839,7 @@ func (s *DatabaseSink) Emit(ctx context.Context, event flow.ExecutionEvent) erro
 		return nil
 	}
 
-	spid, srcSPIDInt, appName, dbUser := s.resolveEventIdentity(ctx, event)
+	spid, srcSPIDInt, appName, dbUser, dbServer := s.resolveEventIdentity(ctx, event)
 
 	if query == "" || len(cols) == 0 {
 		cols = defaultEventCols
@@ -836,6 +874,8 @@ func (s *DatabaseSink) Emit(ctx context.Context, event flow.ExecutionEvent) erro
 			args = append(args, osUser)
 		case "db_user_name", "database_user_name":
 			args = append(args, dbUser)
+		case "db_server", "database_server":
+			args = append(args, dbServer)
 		case "spid", "sspid":
 			if isNumericSPID && s.Driver != "sqlite" && s.Driver != "sqlite3" {
 				args = append(args, srcSPIDInt)
@@ -962,6 +1002,7 @@ type RunSummaryRecord struct {
 	UserName        string    `json:"user_name,omitempty"`
 	OSUserName      string    `json:"os_user_name,omitempty"`
 	DBUserName      string    `json:"db_user_name,omitempty"`
+	DBServer        string    `json:"db_server,omitempty"`
 	SPID            int64     `json:"spid,omitempty"`
 	ApplicationName string    `json:"application_name,omitempty"`
 	Hostname        string    `json:"hostname,omitempty"`
@@ -989,6 +1030,8 @@ var knownRunCols = map[string]bool{
 	"os_user_name":       true,
 	"db_user_name":       true,
 	"database_user_name": true,
+	"db_server":          true,
+	"database_server":    true,
 	"spid":               true,
 	"sspid":              true,
 	"application_name":   true,
@@ -1052,6 +1095,8 @@ func LogRunSummaryToDB(ctx context.Context, db *sql.DB, dialect string, rec RunS
 			args = append(args, rec.OSUserName)
 		case "db_user_name", "database_user_name":
 			args = append(args, rec.DBUserName)
+		case "db_server", "database_server":
+			args = append(args, rec.DBServer)
 		case "spid", "sspid":
 			args = append(args, rec.SPID)
 		case "application_name", "app_name":
@@ -1086,6 +1131,7 @@ type PipelineEventRecord struct {
 	UserName        string    `json:"user_name,omitempty"`
 	OSUserName      string    `json:"os_user_name,omitempty"`
 	DBUserName      string    `json:"db_user_name,omitempty"`
+	DBServer        string    `json:"db_server,omitempty"`
 	SPID            string    `json:"spid,omitempty"`
 	ApplicationName string    `json:"application_name,omitempty"`
 	Hostname        string    `json:"hostname,omitempty"`
@@ -1121,6 +1167,8 @@ func (s *APIServer) QueryPipelineRuns(ctx context.Context, statusFilter string, 
 	if err != nil {
 		return nil, err
 	}
+
+	_, _, _, fallbackDBServer, _ := FetchDatabaseSessionIdentityWithServer(ctx, s.db, s.dialect)
 
 	var runs []RunSummaryRecord
 	for rows.Next() && len(runs) < limit {
@@ -1162,6 +1210,8 @@ func (s *APIServer) QueryPipelineRuns(ctx context.Context, statusFilter string, 
 				r.OSUserName = toString(val)
 			case "db_user_name", "database_user_name":
 				r.DBUserName = toString(val)
+			case "db_server", "database_server":
+				r.DBServer = toString(val)
 			case "spid", "sspid":
 				r.SPID = toInt64(val)
 			case "application_name", "app_name":
@@ -1175,6 +1225,9 @@ func (s *APIServer) QueryPipelineRuns(ctx context.Context, statusFilter string, 
 			case "error_message":
 				r.ErrorMessage = toString(val)
 			}
+		}
+		if r.DBServer == "" {
+			r.DBServer = fallbackDBServer
 		}
 		runs = append(runs, r)
 	}
@@ -1248,6 +1301,8 @@ func (s *APIServer) QueryPipelineEvents(ctx context.Context, runID string, limit
 				ev.OSUserName = toString(val)
 			case "db_user_name", "database_user_name":
 				ev.DBUserName = toString(val)
+			case "db_server", "database_server":
+				ev.DBServer = toString(val)
 			case "spid", "sspid":
 				ev.SPID = toString(val)
 			case "application_name", "app_name":

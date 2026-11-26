@@ -113,7 +113,7 @@ func (s *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		userGroups = user.Groups
 	}
 
-	spid, dbUser, appName, _ := FetchDatabaseSessionIdentity(r.Context(), s.db, s.dialect)
+	spid, dbUser, appName, dbServer, _ := FetchDatabaseSessionIdentityWithServer(r.Context(), s.db, s.dialect)
 	s.logAPIEvent(r.Context(), APIAuditEvent{
 		OccurredAt: start,
 		EventType:  "system.health",
@@ -133,6 +133,7 @@ func (s *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"permission":       perm,
 		"db_spid":          spid,
 		"db_user":          dbUser,
+		"db_server":        dbServer,
 		"application_name": appName,
 		"tables": map[string]string{
 			"pipeline_content":       TablePipelineContent,
@@ -1268,13 +1269,14 @@ func (s *APIServer) handleTestDatabase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	spid, dbUser, appName, _ := FetchDatabaseSessionIdentity(ctx, db, dialect)
+	spid, dbUser, appName, dbServer, _ := FetchDatabaseSessionIdentityWithServer(ctx, db, dialect)
 	s.recordArtifactAudit(r, authUser, "db.test", "", dialect, http.StatusOK, "SUCCESS", start, "")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"connected":        true,
 		"dialect":          dialect,
 		"spid":             spid,
 		"db_user":          dbUser,
+		"db_server":        dbServer,
 		"application_name": appName,
 	})
 }

@@ -242,13 +242,49 @@ func defaultApplicationName() string {
 func FetchDatabaseSessionIdentity(ctx context.Context, querier interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }, dialect string) (spid int64, dbUser string, appName string, err error) {
+	spid, dbUser, appName, _, err = FetchDatabaseSessionIdentityWithServer(ctx, querier, dialect)
+	return spid, dbUser, appName, err
+}
+
+func formatDBServerLabel(server, dbName string) string {
+	server = strings.TrimSpace(server)
+	dbName = strings.TrimSpace(dbName)
+	switch {
+	case server != "" && dbName != "":
+		return server + "/" + dbName
+	case server != "":
+		return server
+	default:
+		return dbName
+	}
+}
+
+// FetchDatabaseSessionIdentityWithServer queries the active database connection for its SPID/PID,
+// authenticated database user, session application name, and database server/catalog label
+// (e.g. "T15P/PROTO" or "sqlite:flow_api.db") across all 5 supported engines.
+func FetchDatabaseSessionIdentityWithServer(ctx context.Context, querier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}, dialect string) (spid int64, dbUser string, appName string, dbServer string, err error) {
 	defaultApp := defaultApplicationName()
 	if querier == nil {
-		return int64(os.Getpid()), "", defaultApp, nil
+		return int64(os.Getpid()), "", defaultApp, "", nil
 	}
 
 	normDriver := strings.ToLower(strings.TrimSpace(dialect))
-	querySession := func(query string) error {
+	querySession5 := func(query string) error {
+		var pid sql.NullInt64
+		var u, a, srv, dbn sql.NullString
+		e := querier.QueryRowContext(ctx, query).Scan(&pid, &u, &a, &srv, &dbn)
+		if e != nil {
+			return e
+		}
+		spid = pid.Int64
+		dbUser = strings.TrimSpace(u.String)
+		appName = strings.TrimSpace(a.String)
+		dbServer = formatDBServerLabel(srv.String, dbn.String)
+		return nil
+	}
+	querySession3 := func(query string) error {
 		var pid sql.NullInt64
 		var u, a sql.NullString
 		e := querier.QueryRowContext(ctx, query).Scan(&pid, &u, &a)
@@ -260,25 +296,49 @@ func FetchDatabaseSessionIdentity(ctx context.Context, querier interface {
 
 	switch {
 	case strings.Contains(normDriver, "sqlserver") || strings.Contains(normDriver, "mssql") || strings.Contains(normDriver, "azuresql") || strings.Contains(normDriver, "azuread"):
-		err = querySession("SELECT CAST(@@SPID AS BIGINT), CAST(SYSTEM_USER AS NVARCHAR(256)), CAST(ISNULL(APP_NAME(), '') AS NVARCHAR(256))")
-	case strings.Contains(normDriver, "postgres") || strings.Contains(normDriver, "pq") || strings.Contains(normDriver, "pgx"):
-		err = querySession("SELECT CAST(pg_backend_pid() AS BIGINT), CAST(CURRENT_USER AS TEXT), COALESCE(current_setting('application_name', true), '')")
-	case strings.Contains(normDriver, "mysql") || strings.Contains(normDriver, "mariadb"):
-		err = querySession("SELECT CAST(CONNECTION_ID() AS UNSIGNED), CURRENT_USER(), COALESCE(@@session.program_name, '')")
+		err = querySession5("SELECT CAST(@@SPID AS BIGINT), CAST(SYSTEM_USER AS NVARCHAR(256)), CAST(ISNULL(APP_NAME(), '') AS NVARCHAR(256)), CAST(COALESCE(CAST(SERVERPROPERTY('ServerName') AS NVARCHAR(256)), @@SERVERNAME, '') AS NVARCHAR(256)), CAST(ISNULL(DB_NAME(), '') AS NVARCHAR(256))")
 		if err != nil {
-			err = querySession("SELECT CAST(CONNECTION_ID() AS UNSIGNED), CURRENT_USER(), ''")
+			err = querySession3("SELECT CAST(@@SPID AS BIGINT), CAST(SYSTEM_USER AS NVARCHAR(256)), CAST(ISNULL(APP_NAME(), '') AS NVARCHAR(256))")
+		}
+	case strings.Contains(normDriver, "postgres") || strings.Contains(normDriver, "pq") || strings.Contains(normDriver, "pgx"):
+		err = querySession5("SELECT CAST(pg_backend_pid() AS BIGINT), CAST(CURRENT_USER AS TEXT), COALESCE(current_setting('application_name', true), ''), COALESCE(host(inet_server_addr()), 'localhost'), COALESCE(current_database(), '')")
+		if err != nil {
+			err = querySession3("SELECT CAST(pg_backend_pid() AS BIGINT), CAST(CURRENT_USER AS TEXT), COALESCE(current_setting('application_name', true), '')")
+		}
+	case strings.Contains(normDriver, "mysql") || strings.Contains(normDriver, "mariadb"):
+		err = querySession5("SELECT CAST(CONNECTION_ID() AS UNSIGNED), CURRENT_USER(), COALESCE(@@session.program_name, ''), COALESCE(@@hostname, ''), COALESCE(DATABASE(), '')")
+		if err != nil {
+			err = querySession5("SELECT CAST(CONNECTION_ID() AS UNSIGNED), CURRENT_USER(), '', COALESCE(@@hostname, ''), COALESCE(DATABASE(), '')")
+		}
+		if err != nil {
+			err = querySession3("SELECT CAST(CONNECTION_ID() AS UNSIGNED), CURRENT_USER(), ''")
 		}
 	case strings.Contains(normDriver, "oracle") || strings.Contains(normDriver, "ora") || strings.Contains(normDriver, "godror"):
-		err = querySession("SELECT TO_NUMBER(SYS_CONTEXT('USERENV', 'SID')), SYS_CONTEXT('USERENV', 'SESSION_USER'), COALESCE(SYS_CONTEXT('USERENV', 'MODULE'), SYS_CONTEXT('USERENV', 'CLIENT_PROGRAM_NAME'), '') FROM DUAL")
+		err = querySession5("SELECT TO_NUMBER(SYS_CONTEXT('USERENV', 'SID')), SYS_CONTEXT('USERENV', 'SESSION_USER'), COALESCE(SYS_CONTEXT('USERENV', 'MODULE'), SYS_CONTEXT('USERENV', 'CLIENT_PROGRAM_NAME'), ''), COALESCE(SYS_CONTEXT('USERENV', 'SERVER_HOST'), ''), COALESCE(SYS_CONTEXT('USERENV', 'DB_NAME'), '') FROM DUAL")
+		if err != nil {
+			err = querySession3("SELECT TO_NUMBER(SYS_CONTEXT('USERENV', 'SID')), SYS_CONTEXT('USERENV', 'SESSION_USER'), COALESCE(SYS_CONTEXT('USERENV', 'MODULE'), SYS_CONTEXT('USERENV', 'CLIENT_PROGRAM_NAME'), '') FROM DUAL")
+		}
 	case strings.Contains(normDriver, "sqlite"):
 		userName, _ := runtimeIdentity()
 		if userName == "" {
 			userName = "sqlite"
 		}
-		return int64(os.Getpid()), userName, defaultApp, nil
+		srv := "sqlite"
+		var seq sql.NullInt64
+		var name, file sql.NullString
+		if pErr := querier.QueryRowContext(ctx, "PRAGMA database_list").Scan(&seq, &name, &file); pErr == nil {
+			f := strings.TrimSpace(file.String)
+			if f != "" {
+				if idx := strings.LastIndexAny(f, `/\`); idx >= 0 && idx+1 < len(f) {
+					f = f[idx+1:]
+				}
+				srv = "sqlite:" + f
+			}
+		}
+		return int64(os.Getpid()), userName, defaultApp, srv, nil
 	default:
 		userName, _ := runtimeIdentity()
-		return int64(os.Getpid()), userName, defaultApp, nil
+		return int64(os.Getpid()), userName, defaultApp, "", nil
 	}
 
 	if appName == "" {
@@ -287,5 +347,5 @@ func FetchDatabaseSessionIdentity(ctx context.Context, querier interface {
 	if spid == 0 {
 		spid = int64(os.Getpid())
 	}
-	return spid, dbUser, appName, err
+	return spid, dbUser, appName, dbServer, err
 }

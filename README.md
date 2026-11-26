@@ -1,15 +1,16 @@
-# `go-flowAPI` — Orchestration, Artifact CRUD, Execution & Telemetry REST API (`v1.3.9`)
+# `go-flowAPI` — Orchestration, Artifact CRUD, Execution & Telemetry REST API (`v1.3.10`)
 
-> **Version:** `1.3.9` | **Core Engine:** `github.com/etl-madness/flow v1.4.5` | **OpenAPI 3.0.3:** `/api/v1/openapi.json` | **Swagger UI:** `/swagger/`  
-> **Companion Studio UI:** `FlowUI` | **Release Notes:** [`RELEASE_NOTES.md`](./RELEASE_NOTES.md) | **Online Docs:** [etl-madness.github.io/flow-docs](https://etl-madness.github.io/flow-docs/)
+> **Version:** `1.3.10` | **Core Engine:** `github.com/etl-madness/flow v1.4.7` | **OpenAPI 3.0.3:** `/api/v1/openapi.json` | **Swagger UI:** `/swagger/`  
+> **Companion Studio UI:** `FlowUI v1.3.3` | **Release Notes:** [`RELEASE_NOTES.md`](./RELEASE_NOTES.md) | **Online Docs:** [etl-madness.github.io/flow-docs](https://etl-madness.github.io/flow-docs/)
 
 **`go-flowAPI`** is the centralized REST and Server-Sent Events (SSE) API gateway for the **ETL Madness Flow Ecosystem**. It provides database-backed artifact CRUD and file upload (`pipelines`, `options`, `configs`), synchronous and live-streaming pipeline execution with per-job sandboxed workspaces, granular user/group pipeline ACLs, cryptographic utilities, Active Directory Kerberos integration, and full audit/telemetry logging across **SQL Server, PostgreSQL, MySQL/MariaDB, SQLite, and Oracle**.
 
 ---
 
-## What's New in `v1.3.9`
+## What's New in `v1.3.10`
 
-- **Docker Build-Time Schema & Table Overrides (`FLOW_EXTRA_LDFLAGS`)**: `Dockerfile` and all `docker-compose*.yml` files now accept `FLOW_EXTRA_LDFLAGS` as a build arg (e.g. `FLOW_EXTRA_LDFLAGS="-X github.com/etl-madness/flow.DefaultSchema=etl" docker compose up -d --build`), and `docker/docker-entrypoint.sh` always initializes SQLite via `/app/go-flowAPI -print-ddl sqlite` so both build-time and runtime table overrides are honored automatically.
+- **Database Server Telemetry (`db_server`) & Cross-DB `sql_bulk` Tracking**: Captures `<server>/<database>` across all 5 database engines in `pipeline_runs`, `pipeline_events`, `/api/v1/health`, and `/api/v1/db/test`. Cross-database `<sql_bulk>` steps log both `source->target` database servers and `source->target` SPIDs, while `QueryPipelineRuns` falls back to the active logging DB server for legacy rows.
+- **Docker Build-Time Schema & Table Overrides (`FLOW_EXTRA_LDFLAGS`)**: `Dockerfile` and all `docker-compose*.yml` files accept `FLOW_EXTRA_LDFLAGS` as a build arg (e.g. `FLOW_EXTRA_LDFLAGS="-X github.com/etl-madness/flow.DefaultSchema=etl" docker compose up -d --build`), and `docker/docker-entrypoint.sh` always initializes SQLite via `/app/go-flowAPI -print-ddl sqlite` so both build-time and runtime table overrides are honored automatically.
 - **Per-Job Sandboxed Workspace Isolation (`-data-dir` / `FLOW_API_DATA_DIR`)**: Each pipeline execution creates an isolated `<data-dir>/<user_login>/<pid>-<run_id>` directory for the duration of the job, confines all script subprocesses (`cmd.Dir`, `TMPDIR`/`TEMP`/`TMP`/`FLOW_JOB_DIR`), Flow file nodes (`<file_read>`, `<file_save>`, `<excel_*>`, `<template>`, `<xml_xpath>`, `<json_path>`, `<yaml_path>`), XSLT output, XSD temp files, and local file-backed stores (`sqlite`, `bbolt`, `badger`) strictly inside it, rejects `..` and external path escapes, and removes the directory automatically when the job completes.
 - **Configurable Database Schema & Table Names (`-tables-config`, `-print-ddl`, `-ldflags`)**: Override the default schema (`dbo`) and/or any of the 12 table names either at **build time** (`-ldflags="-X github.com/etl-madness/flow.DefaultSchema=etl_flow"` or `FLOW_EXTRA_LDFLAGS` in OS packaging scripts and Docker builds) or at **runtime** via a JSON/YAML mapping file (`-tables-config` / `FLOW_TABLES_CONFIG`). Generate matching `CREATE SCHEMA` / `CREATE TABLE` / `CREATE INDEX` SQL for any dialect with `-print-ddl <sqlserver|postgres|mysql|sqlite|oracle>`.
 - **Shared Unix Kerberos SQL Server Auth (`authenticator=krb5`)**: Powered by `github.com/etl-madness/flow v1.4.5`, automatically registers pure-Go Kerberos (`krb5`) auth on Linux, FreeBSD, OpenBSD, and macOS, strips `FILE:` prefixes from `KRB5CCNAME`/`KRB5_KTNAME`, qualifies `MSSQLSvc` SPNs, and cleanly falls back to standard SQL Server Authentication for bare `user:password` SQL logins.
@@ -218,7 +219,7 @@ curl -u auditor:auditor-secret-pass \
 
 ## Documentation Index
 
-- **[`RELEASE_NOTES.md`](./RELEASE_NOTES.md)** — Version history (`v1.3.9`, `v1.3.7`, `v1.3.2`, `v1.3.1`)
+- **[`RELEASE_NOTES.md`](./RELEASE_NOTES.md)** — Version history (`v1.3.10`, `v1.3.9`, `v1.3.7`, `v1.3.2`, `v1.3.1`)
 - **[`SCHEMA.md`](./SCHEMA.md)** & **[`BOOTSTRAP.md`](./BOOTSTRAP.md)** — Database schema & initial admin bootstrap
 - **[`DOCKER.md`](./DOCKER.md)** & **[`docs/AD_KERBEROS_SIDECAR_GUIDE.md`](./docs/AD_KERBEROS_SIDECAR_GUIDE.md)** — Docker Compose & Kerberos sidecar deployments
 - **[`docs/FREEBSD_API_AD_INTEGRATION_GUIDE.md`](./docs/FREEBSD_API_AD_INTEGRATION_GUIDE.md)** — Native FreeBSD Active Directory Kerberos & `rc.d` guide
