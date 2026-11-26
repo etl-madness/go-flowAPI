@@ -6,15 +6,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
+	"github.com/etl-madness/flow"
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/lib/pq"
 	_ "github.com/microsoft/go-mssqldb"
 	_ "github.com/microsoft/go-mssqldb/azuread"
 	"github.com/microsoft/go-mssqldb/integratedauth"
-	"github.com/microsoft/go-mssqldb/integratedauth/krb5"
 	"github.com/microsoft/go-mssqldb/msdsn"
 	_ "github.com/sijms/go-ora/v2"
 	_ "modernc.org/sqlite"
@@ -24,27 +23,8 @@ func init() {
 	configureUnixKerberosSQLServerAuth()
 }
 
-// configureUnixKerberosSQLServerAuth registers a smart integrated authenticator on non-Windows platforms
-// (Linux/macOS/FreeBSD containers) that normalizes KRB5CCNAME ("FILE:/path" -> "/path") for gokrb5 and
-// uses Kerberos (krb5) whenever a credential cache, keytab, or non-NTLM integrated security connection is requested.
 func configureUnixKerberosSQLServerAuth() {
-	if runtime.GOOS == "windows" {
-		return
-	}
-	ntlmProvider, _ := getRegisteredAuthProvider("ntlm")
-	_ = integratedauth.SetIntegratedAuthenticationProvider("krb5", integratedauth.ProviderFunc(func(cfg msdsn.Config) (integratedauth.IntegratedAuthenticator, error) {
-		normalizeKrb5Config(&cfg)
-		return krb5.AuthProviderFunc.GetIntegratedAuthenticator(cfg)
-	}))
-	_ = integratedauth.SetIntegratedAuthenticationProvider("smart_unix", integratedauth.ProviderFunc(func(cfg msdsn.Config) (integratedauth.IntegratedAuthenticator, error) {
-		// If DOMAIN\user + password is provided, use NTLM
-		if strings.ContainsRune(cfg.User, '\\') && cfg.Password != "" && ntlmProvider != nil {
-			return ntlmProvider.GetIntegratedAuthenticator(cfg)
-		}
-		normalizeKrb5Config(&cfg)
-		return krb5.AuthProviderFunc.GetIntegratedAuthenticator(cfg)
-	}))
-	integratedauth.DefaultProviderName = "smart_unix"
+	flow.ConfigureUnixKerberosSQLServerAuth()
 }
 
 func getRegisteredAuthProvider(name string) (integratedauth.Provider, error) {
@@ -59,125 +39,24 @@ func getRegisteredAuthProvider(name string) (integratedauth.Provider, error) {
 	}), nil
 }
 
-// normalizeKrb5Config strips the MIT Kerberos "FILE:" prefix from KRB5CCNAME / krb5-credcachefile
-// because go-mssqldb's krb5 package passes the path directly to os.Stat() and credentials.LoadCCache(),
-// and qualifies short hostnames in ServerSPN (e.g., MSSQLSvc/T15P:1433 -> MSSQLSvc/T15P.RSYSLAB.COM:1433)
-// so Active Directory KDCs can locate the registered SQL Server SPN.
 func normalizeKrb5Config(cfg *msdsn.Config) {
-	if cfg == nil {
-		return
-	}
-	if cfg.Parameters == nil {
-		cfg.Parameters = make(map[string]string)
-	}
-	cc := strings.TrimSpace(cfg.Parameters["krb5-credcachefile"])
-	if cc == "" {
-		cc = strings.TrimSpace(os.Getenv("KRB5CCNAME"))
-	}
-	if cleaned := stripKrb5FilePrefix(cc); cleaned != "" {
-		cfg.Parameters["krb5-credcachefile"] = cleaned
-	}
-	kt := strings.TrimSpace(cfg.Parameters["krb5-keytabfile"])
-	if kt == "" {
-		kt = strings.TrimSpace(os.Getenv("KRB5_KTNAME"))
-	}
-	if cleaned := stripKrb5FilePrefix(kt); cleaned != "" {
-		cfg.Parameters["krb5-keytabfile"] = cleaned
-	}
-	if strings.TrimSpace(cfg.Parameters["krb5-realm"]) == "" {
-		if envRealm := strings.TrimSpace(os.Getenv("AD_REALM")); envRealm != "" {
-			cfg.Parameters["krb5-realm"] = envRealm
-		}
-	}
-	if cfg.Parameters["krb5-keytabfile"] != "" && strings.TrimSpace(cfg.User) == "" {
-		if principal := resolveKerberosPrincipalUser(); principal != "" {
-			cfg.User = principal
-		}
-	}
-	cfg.ServerSPN = qualifyKerberosServerSPN(cfg.ServerSPN, cfg.Parameters["krb5-realm"], cfg.Parameters["krb5-configfile"])
+	flow.NormalizeKrb5Config(cfg)
 }
 
 func resolveKerberosPrincipalUser() string {
-	for _, candidate := range []string{
-		os.Getenv("KRB5_PRINCIPAL"),
-		os.Getenv("AD_USER"),
-		os.Getenv("FLOW_WINDOWS_USER"),
-		os.Getenv("HOST_USERNAME"),
-	} {
-		v := strings.TrimSpace(candidate)
-		if v == "" {
-			continue
-		}
-		if slashIdx := strings.LastIndexAny(v, `\/`); slashIdx >= 0 {
-			v = strings.TrimSpace(v[slashIdx+1:])
-		}
-		if atIdx := strings.IndexByte(v, '@'); atIdx > 0 {
-			v = strings.TrimSpace(v[:atIdx])
-		}
-		if v != "" {
-			return v
-		}
-	}
-	return ""
+	return flow.ResolveKerberosPrincipalUser()
 }
 
 func qualifyKerberosServerSPN(spn, explicitRealm, explicitConf string) string {
-	spn = strings.TrimSpace(spn)
-	if !strings.HasPrefix(spn, "MSSQLSvc/") {
-		return spn
-	}
-	rest := spn[len("MSSQLSvc/"):]
-	host := rest
-	suffix := ""
-	if colonIdx := strings.IndexByte(rest, ':'); colonIdx >= 0 {
-		host = rest[:colonIdx]
-		suffix = rest[colonIdx:]
-	}
-	if host == "" || strings.Contains(host, ".") {
-		return spn
-	}
-	domain := strings.TrimSpace(explicitRealm)
-	if domain == "" {
-		domain = strings.TrimSpace(os.Getenv("AD_REALM"))
-	}
-	if domain == "" {
-		domain = defaultRealmFromKrb5Conf(explicitConf)
-	}
-	if domain == "" || !strings.Contains(domain, ".") {
-		return spn
-	}
-	return "MSSQLSvc/" + host + "." + domain + suffix
+	return flow.QualifyKerberosServerSPN(spn, explicitRealm, explicitConf)
 }
 
 func defaultRealmFromKrb5Conf(confPath string) string {
-	if strings.TrimSpace(confPath) == "" {
-		confPath = strings.TrimSpace(os.Getenv("KRB5_CONFIG"))
-	}
-	if confPath == "" {
-		confPath = "/etc/krb5.conf"
-	}
-	data, err := os.ReadFile(confPath)
-	if err != nil {
-		return ""
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, ";") {
-			continue
-		}
-		if kv := strings.SplitN(trimmed, "=", 2); len(kv) == 2 && strings.EqualFold(strings.TrimSpace(kv[0]), "default_realm") {
-			return strings.TrimSpace(kv[1])
-		}
-	}
-	return ""
+	return flow.DefaultRealmFromKrb5Conf(confPath)
 }
 
 func stripKrb5FilePrefix(val string) string {
-	v := strings.TrimSpace(val)
-	if len(v) >= 5 && strings.EqualFold(v[:5], "FILE:") {
-		return strings.TrimSpace(v[5:])
-	}
-	return v
+	return flow.StripKrb5FilePrefix(val)
 }
 
 func isOnPremADIntegratedDSN(dsn string) bool {

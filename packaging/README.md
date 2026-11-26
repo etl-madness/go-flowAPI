@@ -109,10 +109,15 @@ packaging/
 Output artifacts are written to `packaging/dist/`. All shell scripts are portable POSIX `/bin/sh` scripts.
 
 > **Custom Build-Time Schema & Table Names (`FLOW_EXTRA_LDFLAGS`):**
-> To bake a custom default database schema or table names into any OS package without editing source files, set `FLOW_EXTRA_LDFLAGS` before running any build script (or use `-tables-config` / `FLOW_TABLES_CONFIG` at runtime and `-print-ddl <dialect>` to generate matching SQL):
+> To bake a custom default database schema or table names into any OS package without editing source files, **`export FLOW_EXTRA_LDFLAGS`** or pass it **inline on the same command line** as the build script (setting `FLOW_EXTRA_LDFLAGS=...` on a separate line without `export` will not be inherited by child `sh` scripts). You can also use `-tables-config` / `FLOW_TABLES_CONFIG` at runtime and `-print-ddl <dialect>` to generate matching SQL:
 > ```sh
-> FLOW_EXTRA_LDFLAGS="-X github.com/etl-madness/flow.DefaultSchema=etl_flow" \
->   sh ./packaging/scripts/build-all.sh host
+> # Exported before running the build script:
+> export FLOW_EXTRA_LDFLAGS="-X github.com/etl-madness/flow.DefaultSchema=etl_flow"
+> sh ./packaging/scripts/build-all.sh host
+>
+> # Or passed inline on the same command line (e.g. FreeBSD):
+> FREEBSD_MAJOR=15 FLOW_EXTRA_LDFLAGS="-X github.com/etl-madness/flow.DefaultSchema=etl_flow" \
+>   sh ./packaging/scripts/build-freebsd-pkg.sh amd64
 > ```
 
 ### 1. Build for Current Host OS

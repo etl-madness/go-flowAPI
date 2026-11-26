@@ -1,5 +1,31 @@
 # Release Notes — `go-flowAPI`
 
+## Release Notes (`v1.3.7`) — Per-Job Sandboxed Workspaces (`-data-dir`), Configurable Schema/Tables (`-tables-config`, `-print-ddl`), OpenBSD Packaging & Shared Kerberos Auth
+
+### Overview
+
+Version `1.3.7` upgrades `go-flowAPI` to **`github.com/etl-madness/flow v1.4.5`** and introduces per-job sandboxed workspaces, build-time and runtime database schema/table name overrides with dynamic DDL generation, native OpenBSD packaging, and comprehensive FreeBSD Active Directory Kerberos documentation:
+
+1. **Per-Job Sandboxed Workspace Isolation (`-data-dir` / `FLOW_API_DATA_DIR`, `config.go`, `executor.go`, `datadir_test.go`)**:
+   - Added `-data-dir` CLI flag and `FLOW_API_DATA_DIR` environment variable.
+   - When configured, every pipeline execution creates an isolated `<data-dir>/<user_login>/<pid>-<run_id>` directory for the duration of the job (using sanitized usernames such as `RSYSLAB\SVC_FLOW_API` → `rsyslab_svc_flow_api`), confines all script subprocesses (`cmd.Dir`, `TMPDIR`/`TEMP`/`TMP`/`FLOW_JOB_DIR`), Flow file nodes (`<file_read>`, `<file_save>`, `<excel_*>`, `<template>`, `<xml_xpath>`, `<json_path>`, `<yaml_path>`), XSLT output, XSD temp files, and local file-backed stores (`sqlite`, `bbolt`, `badger`) strictly inside the job directory, and deletes the directory automatically when the job finishes.
+
+2. **Configurable Database Schema & Table Names + Dynamic DDL (`-tables-config`, `-print-ddl`, `tables.go`, `config.go`, `main.go`, `tables_test.go`)**:
+   - Replaced compile-time constants in `tables.go` with `flow.TableConfig`-backed variables supporting both **build-time overrides** (`-ldflags "-X github.com/etl-madness/flow.DefaultSchema=..."`) and **runtime JSON/YAML mapping files** via `-tables-config <path>` / `FLOW_TABLES_CONFIG`.
+   - Added `-print-ddl <dialect>` (`sqlserver`, `postgres`, `mysql`, `sqlite`, `oracle`) to output ready-to-run `CREATE SCHEMA` / `CREATE TABLE` / `CREATE INDEX` DDL matching the active schema and table names.
+   - Updated `docker/docker-entrypoint.sh` to initialize SQLite via `go-flowAPI -tables-config "$FLOW_TABLES_CONFIG" -print-ddl sqlite` when `FLOW_TABLES_CONFIG` is set.
+   - Updated `packaging/scripts/common.sh`, `Build-Packages.ps1`, and `Build-Windows.ps1` to accept `FLOW_EXTRA_LDFLAGS` for baking custom build-time schema/table defaults directly into `.deb`, `.rpm`, `.pkg`, `.tgz`, `.zip`, and `.msi` packages.
+
+3. **OpenBSD Packaging & FreeBSD Active Directory Integration (`packaging/openbsd/`, `packaging/services/openbsd/`, `docs/FREEBSD_API_AD_INTEGRATION_GUIDE.md`)**:
+   - Added full OpenBSD package support (`build-openbsd-pkg.sh`, `PLIST.tmpl`, `+DESC`, `+INSTALL`, `+DEINSTALL`, and `/etc/rc.d/go_flow_api` with `rcctl` integration).
+   - Added `docs/FREEBSD_API_AD_INTEGRATION_GUIDE.md` covering MIT Kerberos (`kinit` / `klist` / `ktutil -f`), `go_flow_api` `rc.d` configuration, `/etc/cron.d` ticket renewal, `go_flow_api_env` `PATH` setup for `pwsh`/tools, and `-data-dir` usage (and bundled it in the FreeBSD `.pkg`).
+   - Updated `go-flow-api.env`, `Install-GoFlowAPIService.ps1`, and man pages (`go-flowAPI(1)`, `go-flow-api.env(5)`) for `-data-dir`, `-tables-config`, and `-print-ddl`.
+
+4. **Shared Unix Kerberos SQL Server Auth (`db.go`)**:
+   - Delegated `configureUnixKerberosSQLServerAuth` and Kerberos config/SPN normalization helpers directly to `github.com/etl-madness/flow v1.4.5`, eliminating ~140 lines of duplicated code across `go-flowAPI` and `go-flow`.
+
+---
+
 ## Release Notes (`v1.3.2`) — Parameterized SQL Resource URIs, Container Scripting Runtimes & Quality Hardening
 
 ### Overview
