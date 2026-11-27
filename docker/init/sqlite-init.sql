@@ -148,3 +148,17 @@ CREATE TABLE IF NOT EXISTS flow_pipeline_acl (
 );
 CREATE INDEX IF NOT EXISTS ix_flow_pipeline_acl_target ON flow_pipeline_acl (target_type, target_name);
 CREATE INDEX IF NOT EXISTS ix_flow_pipeline_acl_principal ON flow_pipeline_acl (principal_type, principal_name);
+
+CREATE TABLE IF NOT EXISTS flow_template_content (
+    ID          INTEGER PRIMARY KEY AUTOINCREMENT,
+    Type        TEXT     NOT NULL,
+    Name        TEXT     NOT NULL,
+    Description TEXT,
+    TemplateXML TEXT,
+    CreatedBy   TEXT     NOT NULL DEFAULT '',
+    UpdatedBy   TEXT     NOT NULL DEFAULT '',
+    CreatedAt   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UpdatedAt   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (Type, Name, CreatedBy)
+);
+CREATE INDEX IF NOT EXISTS ix_flow_template_content_owner ON flow_template_content (CreatedBy, Type);

@@ -432,6 +432,84 @@ func (s *APIServer) BuildOpenAPISpec(r *http.Request) map[string]any {
 				}),
 			},
 			"/api/v1/artifacts/{type}/id/{id}": buildArtifactItemPathItem("#/components/parameters/ArtifactIDParam", "ByID", "database table ID", "id", 1),
+			"/api/v1/templates": map[string]any{
+				"get": buildOAIOp(oaiOpSpec{
+					tag:         "Templates",
+					summary:     "List reusable pipeline, options, or config templates",
+					description: "Returns templates owned by the authenticated user by default. Users with `template-viewer`, `template-admin`, or `all` permission see templates from all authors (optionally filtered by `?owner=`).",
+					operationID: "listTemplates",
+					params: []map[string]any{
+						oaiQueryParam("type", "string", "Optional template type filter (`pipeline`, `options`, or `config`)", nil),
+						oaiQueryParam("owner", "string", "Optional author username filter (honored for `template-viewer`, `template-admin`, or `all`)", nil),
+						oaiQueryParam("include_content", "boolean", "Include full XML content in list response", false),
+					},
+					responses: oaiWithCommonResponses(map[string]any{
+						"200": oaiJSONResp("List of templates", buildOAIObjectSchema(nil, map[string]any{
+							"count":     oaiProp("integer", "", 2),
+							"templates": map[string]any{"type": "array", "items": oaiRef("#/components/schemas/TemplateRecord")},
+						})),
+					}, "400", "401"),
+				}),
+				"post": buildOAIOp(oaiOpSpec{
+					tag:         "Templates",
+					summary:     "Create a new template",
+					description: "Saves a `pipeline`, `options`, or `config` XML document as a reusable template authored by the authenticated user. Requires `write`, `upload`, `template-admin`, or `all` permission.",
+					operationID: "createTemplate",
+					body:        oaiJSONBody("#/components/schemas/UpsertTemplateRequest", true),
+					responses: oaiWithCommonResponses(map[string]any{
+						"201": oaiJSONResp("Created template", oaiRef("#/components/schemas/TemplateRecord")),
+					}, "400", "401", "403", "409"),
+				}),
+			},
+			"/api/v1/templates/{id}": map[string]any{
+				"get": buildOAIOp(oaiOpSpec{
+					tag:         "Templates",
+					summary:     "Get a template by ID",
+					description: "Retrieves a template including its XML content and authorship metadata. Users can only view their own templates unless granted `template-viewer`, `template-admin`, or `all`.",
+					operationID: "getTemplateByID",
+					params:      []map[string]any{{"name": "id", "in": "path", "required": true, "description": "Template ID", "schema": map[string]any{"type": "integer", "example": 1}}},
+					responses: oaiWithCommonResponses(map[string]any{
+						"200": oaiJSONResp("Template record", oaiRef("#/components/schemas/TemplateRecord")),
+					}, "401", "403", "404"),
+				}),
+				"put": buildOAIOp(oaiOpSpec{
+					tag:         "Templates",
+					summary:     "Update a template by ID",
+					description: "Updates a template's name, description, or XML content, recording `updated_by` and `updated_at`. Users can only edit their own templates unless granted `template-admin` or `all`.",
+					operationID: "updateTemplateByID",
+					params:      []map[string]any{{"name": "id", "in": "path", "required": true, "description": "Template ID", "schema": map[string]any{"type": "integer", "example": 1}}},
+					body:        oaiJSONBody("#/components/schemas/UpsertTemplateRequest", true),
+					responses: oaiWithCommonResponses(map[string]any{
+						"200": oaiJSONResp("Updated template", oaiRef("#/components/schemas/TemplateRecord")),
+					}, "400", "401", "403", "404", "409"),
+				}),
+				"delete": buildOAIOp(oaiOpSpec{
+					tag:         "Templates",
+					summary:     "Delete a template by ID",
+					description: "Deletes a template. Users can only delete their own templates unless granted `template-admin` or `all`.",
+					operationID: "deleteTemplateByID",
+					params:      []map[string]any{{"name": "id", "in": "path", "required": true, "description": "Template ID", "schema": map[string]any{"type": "integer", "example": 1}}},
+					responses: oaiWithCommonResponses(map[string]any{
+						"200": oaiJSONResp("Template deleted", buildOAIObjectSchema(nil, map[string]any{
+							"deleted": oaiProp("boolean", "", true),
+							"id":      oaiProp("integer", "", 1),
+						})),
+					}, "401", "403", "404"),
+				}),
+			},
+			"/api/v1/templates/{id}/instantiate": map[string]any{
+				"post": buildOAIOp(oaiOpSpec{
+					tag:         "Templates",
+					summary:     "Save a template as a live pipeline, options, or config artifact",
+					description: "Instantiates a template into a live `pipeline`, `options`, or `config` artifact, enforcing existing pipeline ACLs or write permissions on the target artifact.",
+					operationID: "instantiateTemplate",
+					params:      []map[string]any{{"name": "id", "in": "path", "required": true, "description": "Template ID", "schema": map[string]any{"type": "integer", "example": 1}}},
+					body:        oaiJSONBody("#/components/schemas/InstantiateTemplateRequest", true),
+					responses: oaiWithCommonResponses(map[string]any{
+						"201": oaiJSONResp("Created live artifact", oaiRef("#/components/schemas/ArtifactRecord")),
+					}, "400", "401", "403", "404", "409"),
+				}),
+			},
 			"/api/v1/execute": map[string]any{
 				"post": buildOAIOp(oaiOpSpec{
 					tag:         "Execution",
@@ -812,7 +890,7 @@ func buildOpenAPIComponents() map[string]any {
 				"type": "object",
 				"properties": map[string]any{
 					"username":    oaiProp("string", "", "admin"),
-					"permission":  oaiProp("string", "Role scope: `scoped`, `execution-only`, `read-only`, `write`, `upload`, or `all` (comma-separated combinations supported)", "all"),
+					"permission":  oaiProp("string", "Role scope: `scoped`, `execution-only`, `read-only`, `write`, `upload`, `template-viewer`, `template-admin`, or `all` (comma-separated combinations supported)", "all"),
 					"is_active":   oaiProp("boolean", "", true),
 					"description": oaiProp("string", "", "Initial administrator with all permissions"),
 					"groups":      map[string]any{"type": "array", "items": oaiProp("string", "", "finance_ops")},
@@ -873,7 +951,44 @@ func buildOpenAPIComponents() map[string]any {
 					"dialect":          oaiProp("string", "", "sqlserver"),
 					"spid":             oaiProp("integer", "", 55),
 					"db_user":          oaiProp("string", "", "sa"),
+					"db_server":        oaiProp("string", "", "T15P/PROTO"),
 					"application_name": oaiProp("string", "", "go-flowAPI"),
+				},
+			},
+			"TemplateRecord": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"id":          oaiProp("integer", "", 1),
+					"type":        oaiEnumProp("string", []string{"pipeline", "options", "config"}, nil, "", "pipeline"),
+					"name":        oaiProp("string", "", "nightly_etl_template"),
+					"description": oaiProp("string", "", "Standard SQL-to-SQL nightly ETL template"),
+					"content":     oaiProp("string", "", "<pipeline name=\"nightly_etl\">...</pipeline>"),
+					"created_by":  oaiProp("string", "", "alice"),
+					"updated_by":  oaiProp("string", "", "alice"),
+					"created_at":  oaiProp("string", "", "2026-11-27T13:00:00Z"),
+					"updated_at":  oaiProp("string", "", "2026-11-27T13:05:00Z"),
+				},
+			},
+			"UpsertTemplateRequest": map[string]any{
+				"type":     "object",
+				"required": []string{"type", "name", "content"},
+				"properties": map[string]any{
+					"type":        oaiEnumProp("string", []string{"pipeline", "options", "config"}, nil, "", "pipeline"),
+					"name":        oaiProp("string", "", "nightly_etl_template"),
+					"description": oaiProp("string", "", "Reusable ETL template"),
+					"content":     oaiProp("string", "", "<pipeline name=\"nightly_etl\">...</pipeline>"),
+					"overwrite":   oaiBoolProp(false, "Overwrite existing template with same (type, name) owned by caller"),
+				},
+			},
+			"InstantiateTemplateRequest": map[string]any{
+				"type":     "object",
+				"required": []string{"name"},
+				"properties": map[string]any{
+					"name":        oaiProp("string", "Target live artifact name", "finance_nightly_etl"),
+					"description": oaiProp("string", "Optional override description", "Finance nightly ETL"),
+					"content":     oaiProp("string", "Optional XML override (defaults to stored template XML)", ""),
+					"groups":      map[string]any{"type": "array", "items": oaiProp("string", "", "finance_pipelines")},
+					"overwrite":   oaiBoolProp(false, "Overwrite existing live artifact with same name"),
 				},
 			},
 		},

@@ -94,10 +94,13 @@ type EffectivePermissionsSummary struct {
 	GlobalPermission    string                        `json:"global_permission"`
 	Groups              []string                      `json:"groups"`
 	StrictACL           bool                          `json:"strict_acl"`
-	CanCreateUngrouped  bool                          `json:"can_create_ungrouped"`
-	CreatableGroups     []string                      `json:"creatable_groups"`
-	CanExecuteInlineXML bool                          `json:"can_execute_inline_xml"`
-	Count               int                           `json:"count"`
+	CanCreateUngrouped    bool                          `json:"can_create_ungrouped"`
+	CreatableGroups       []string                      `json:"creatable_groups"`
+	CanExecuteInlineXML   bool                          `json:"can_execute_inline_xml"`
+	CanWriteTemplates     bool                          `json:"can_write_templates"`
+	CanViewAllTemplates   bool                          `json:"can_view_all_templates"`
+	CanManageAllTemplates bool                          `json:"can_manage_all_templates"`
+	Count                 int                           `json:"count"`
 	Pipelines           []EffectivePipelinePermission `json:"pipelines"`
 }
 
@@ -1338,15 +1341,18 @@ func (s *APIServer) ComputeEffectivePermissionsSummary(ctx context.Context, targ
 	}
 
 	return &EffectivePermissionsSummary{
-		Username:            uname,
-		GlobalPermission:    gperm,
-		Groups:              groups,
-		StrictACL:           strict || isScopedRole,
-		CanCreateUngrouped:  canCreateUngrouped,
-		CreatableGroups:     creatableGroups,
-		CanExecuteInlineXML: canExecuteInline,
-		Count:               len(result),
-		Pipelines:           result,
+		Username:              uname,
+		GlobalPermission:      gperm,
+		Groups:                groups,
+		StrictACL:             strict || isScopedRole,
+		CanCreateUngrouped:    canCreateUngrouped,
+		CreatableGroups:       creatableGroups,
+		CanExecuteInlineXML:   canExecuteInline,
+		CanWriteTemplates:     targetUser != nil && targetUser.CanWriteOwnTemplates(),
+		CanViewAllTemplates:   targetUser != nil && targetUser.CanViewAllTemplates(),
+		CanManageAllTemplates: targetUser != nil && targetUser.CanManageAllTemplates(),
+		Count:                 len(result),
+		Pipelines:             result,
 	}, nil
 }
 

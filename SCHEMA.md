@@ -1,21 +1,22 @@
-# Database Schema Reference (`go-flowAPI v1.3.2`)
+# Database Schema Reference (`go-flowAPI v1.4.1`)
 
-`go-flowAPI` (`v1.3.2`) does **not** auto-migrate tables at startup. Provision the 12 required tables (7 core artifact/telemetry/user tables + 5 granular group & pipeline ACL tables) in your target database using the DDL scripts below before starting the API.
+`go-flowAPI` (`v1.4.1`) does **not** auto-migrate tables at startup. Provision the **13 required tables** (8 core artifact/template/telemetry/user tables + 5 granular group & pipeline ACL tables) in your target database using the DDL scripts below (or generate dialect-specific DDL with `go-flowAPI -print-ddl <dialect>`) before starting the API.
 
-## Adjustable Schema & Table Constants (`tables.go`)
+## Adjustable Schema & Table Variables (`tables.go`)
 
-All table and schema paths are controlled via constants in [`tables.go`](./tables.go):
+All table and schema paths are controlled via `flow.TableConfig` and variables in [`tables.go`](./tables.go):
 
-| Constant | Default Value | Description |
+| Variable | Default Value | Description |
 | :--- | :--- | :--- |
 | `DefaultSchema` | `"dbo."` | Default schema prefix (adjusted or stripped automatically for SQLite/MySQL/Oracle) |
 | `TablePipelineContent` | `DefaultSchema + "flow_pipeline_content"` | Stores pipeline XML definitions (`Name`, `Description`, `PipelineXML`) |
 | `TableOptionsContent` | `DefaultSchema + "flow_options_content"` | Stores reusable CLI/execution option XML profiles (`Name`, `Description`, `OptionsXML`) |
 | `TableConfigContent` | `DefaultSchema + "flow_config_content"` | Stores reusable `<Configuration>` XML profiles (`Name`, `Description`, `ConfigXML`) |
-| `TablePipelineRuns` | `DefaultSchema + "pipeline_runs"` | Stores high-level pipeline execution run summaries |
-| `TablePipelineEvents` | `DefaultSchema + "pipeline_events"` | Stores per-node execution events and `node_output` |
-| `TableAPIAuditEvents` | `DefaultSchema + "flow_api_events"` | Stores API-level audit logs for all CRUD, upload, auth, and execution calls |
-| `TableAPIUsers` | `DefaultSchema + "flow_api_users"` | Stores BasicAuth credentials and role permissions (`scoped`, `execution-only`, `read-only`, `write`/`upload`, `all`) |
+| `TableTemplateContent` | `DefaultSchema + "flow_template_content"` | Stores non-runnable reusable `pipeline`, `options`, and `config` templates with authorship (`CreatedBy`, `UpdatedBy`) and timestamps |
+| `TablePipelineRuns` | `DefaultSchema + "pipeline_runs"` | Stores high-level pipeline execution run summaries (including `db_server` and `spid`) |
+| `TablePipelineEvents` | `DefaultSchema + "pipeline_events"` | Stores per-node execution events, `db_server`, `spid` (`source->target` for `sql_bulk`), and `node_output` |
+| `TableAPIAuditEvents` | `DefaultSchema + "flow_api_events"` | Stores API-level audit logs for all CRUD, template, upload, auth, and execution calls |
+| `TableAPIUsers` | `DefaultSchema + "flow_api_users"` | Stores BasicAuth credentials and role permissions (`scoped`, `execution-only`, `read-only`, `write`/`upload`, `template-viewer`, `template-admin`, `all`) |
 | `TableAPIGroups` | `DefaultSchema + "flow_api_groups"` | Stores API user groups (`name`, `description`) |
 | `TableAPIUserGroups` | `DefaultSchema + "flow_api_user_groups"` | Many-to-many mapping of API users to API user groups (`group_name`, `username`) |
 | `TablePipelineGroups` | `DefaultSchema + "flow_pipeline_groups"` | Stores logical pipeline groups (`name`, `description`, optional `name_pattern` glob) |
@@ -74,6 +75,7 @@ CREATE TABLE dbo.pipeline_runs (
     user_name        NVARCHAR(255) NULL,
     os_user_name     NVARCHAR(255) NULL,
     db_user_name     NVARCHAR(255) NULL,
+    db_server        NVARCHAR(255) NULL,
     spid             BIGINT        NULL,
     application_name NVARCHAR(255) NULL,
     hostname         NVARCHAR(255) NULL,
@@ -97,6 +99,7 @@ CREATE TABLE dbo.pipeline_events (
     user_name        NVARCHAR(255) NULL,
     os_user_name     NVARCHAR(255) NULL,
     db_user_name     NVARCHAR(255) NULL,
+    db_server        NVARCHAR(255) NULL,
     spid             NVARCHAR(64)  NULL,
     application_name NVARCHAR(255) NULL,
     hostname         NVARCHAR(255) NULL,
@@ -199,6 +202,23 @@ CREATE TABLE dbo.flow_pipeline_acl (
     CONSTRAINT CK_flow_pipeline_acl_target_type    CHECK (target_type IN ('pipeline', 'pipeline_group', '*')),
     CONSTRAINT CK_flow_pipeline_acl_effect         CHECK (effect IN ('allow', 'deny'))
 );
+
+-- 13. Reusable Pipeline / Options / Config Templates Table (go-flowAPI v1.4.1+)
+IF OBJECT_ID('dbo.flow_template_content', 'U') IS NULL
+CREATE TABLE dbo.flow_template_content (
+    ID          INT IDENTITY(1,1) PRIMARY KEY,
+    Type        NVARCHAR(32)      NOT NULL,
+    Name        NVARCHAR(255)     NOT NULL,
+    Description NVARCHAR(MAX)     NULL,
+    TemplateXML NVARCHAR(MAX)     NULL,
+    CreatedBy   NVARCHAR(255)     NOT NULL DEFAULT N'',
+    UpdatedBy   NVARCHAR(255)     NOT NULL DEFAULT N'',
+    CreatedAt   DATETIME2         NOT NULL DEFAULT SYSUTCDATETIME(),
+    UpdatedAt   DATETIME2         NOT NULL DEFAULT SYSUTCDATETIME(),
+    CONSTRAINT UQ_flow_template_type_name_owner UNIQUE (Type, Name, CreatedBy)
+);
+CREATE NONCLUSTERED INDEX IX_flow_template_content_owner
+    ON dbo.flow_template_content (CreatedBy, Type);
 ```
 
 ---
@@ -247,6 +267,7 @@ CREATE TABLE IF NOT EXISTS dbo.pipeline_runs (
     user_name        VARCHAR(255),
     os_user_name     VARCHAR(255),
     db_user_name     VARCHAR(255),
+    db_server        VARCHAR(255),
     spid             BIGINT,
     application_name VARCHAR(255),
     hostname         VARCHAR(255),
@@ -268,6 +289,7 @@ CREATE TABLE IF NOT EXISTS dbo.pipeline_events (
     user_name        VARCHAR(255),
     os_user_name     VARCHAR(255),
     db_user_name     VARCHAR(255),
+    db_server        VARCHAR(255),
     spid             VARCHAR(64),
     application_name VARCHAR(255),
     hostname         VARCHAR(255),
@@ -351,6 +373,20 @@ CREATE TABLE IF NOT EXISTS dbo.flow_pipeline_acl (
     updated_at     TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (principal_type, principal_name, target_type, target_name, effect)
 );
+
+CREATE TABLE IF NOT EXISTS dbo.flow_template_content (
+    ID          SERIAL       PRIMARY KEY,
+    Type        VARCHAR(32)  NOT NULL,
+    Name        VARCHAR(255) NOT NULL,
+    Description TEXT,
+    TemplateXML TEXT,
+    CreatedBy   VARCHAR(255) NOT NULL DEFAULT '',
+    UpdatedBy   VARCHAR(255) NOT NULL DEFAULT '',
+    CreatedAt   TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UpdatedAt   TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (Type, Name, CreatedBy)
+);
+CREATE INDEX IF NOT EXISTS ix_flow_template_content_owner ON dbo.flow_template_content (CreatedBy, Type);
 ```
 
 ---
@@ -399,6 +435,7 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
     user_name        VARCHAR(255) NULL,
     os_user_name     VARCHAR(255) NULL,
     db_user_name     VARCHAR(255) NULL,
+    db_server        VARCHAR(255) NULL,
     spid             BIGINT       NULL,
     application_name VARCHAR(255) NULL,
     hostname         VARCHAR(255) NULL,
@@ -420,6 +457,7 @@ CREATE TABLE IF NOT EXISTS pipeline_events (
     user_name        VARCHAR(255) NULL,
     os_user_name     VARCHAR(255) NULL,
     db_user_name     VARCHAR(255) NULL,
+    db_server        VARCHAR(255) NULL,
     spid             VARCHAR(64)  NULL,
     application_name VARCHAR(255) NULL,
     hostname         VARCHAR(255) NULL,
@@ -503,6 +541,20 @@ CREATE TABLE IF NOT EXISTS flow_pipeline_acl (
     updated_at     DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     UNIQUE KEY UQ_flow_pipeline_acl_rule (principal_type, principal_name, target_type, target_name, effect)
 );
+
+CREATE TABLE IF NOT EXISTS flow_template_content (
+    ID          INT AUTO_INCREMENT PRIMARY KEY,
+    Type        VARCHAR(32)  NOT NULL,
+    Name        VARCHAR(255) NOT NULL,
+    Description LONGTEXT     NULL,
+    TemplateXML LONGTEXT     NULL,
+    CreatedBy   VARCHAR(255) NOT NULL DEFAULT '',
+    UpdatedBy   VARCHAR(255) NOT NULL DEFAULT '',
+    CreatedAt   DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    UpdatedAt   DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    UNIQUE KEY uq_flow_template_type_name_owner (Type, Name, CreatedBy),
+    KEY ix_flow_template_content_owner (CreatedBy, Type)
+);
 ```
 
 ---
@@ -551,6 +603,7 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
     user_name        TEXT,
     os_user_name     TEXT,
     db_user_name     TEXT,
+    db_server        TEXT,
     spid             INTEGER,
     application_name TEXT,
     hostname         TEXT,
@@ -572,6 +625,7 @@ CREATE TABLE IF NOT EXISTS pipeline_events (
     user_name        TEXT,
     os_user_name     TEXT,
     db_user_name     TEXT,
+    db_server        TEXT,
     spid             TEXT,
     application_name TEXT,
     hostname         TEXT,
@@ -655,6 +709,20 @@ CREATE TABLE IF NOT EXISTS flow_pipeline_acl (
     updated_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (principal_type, principal_name, target_type, target_name, effect)
 );
+
+CREATE TABLE IF NOT EXISTS flow_template_content (
+    ID          INTEGER PRIMARY KEY AUTOINCREMENT,
+    Type        TEXT     NOT NULL,
+    Name        TEXT     NOT NULL,
+    Description TEXT,
+    TemplateXML TEXT,
+    CreatedBy   TEXT     NOT NULL DEFAULT '',
+    UpdatedBy   TEXT     NOT NULL DEFAULT '',
+    CreatedAt   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UpdatedAt   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (Type, Name, CreatedBy)
+);
+CREATE INDEX IF NOT EXISTS ix_flow_template_content_owner ON flow_template_content (CreatedBy, Type);
 ```
 
 ---
@@ -701,6 +769,7 @@ CREATE TABLE pipeline_runs (
     user_name        VARCHAR2(255),
     os_user_name     VARCHAR2(255),
     db_user_name     VARCHAR2(255),
+    db_server        VARCHAR2(255),
     spid             NUMBER(19),
     application_name VARCHAR2(255),
     hostname         VARCHAR2(255),
@@ -722,6 +791,7 @@ CREATE TABLE pipeline_events (
     user_name        VARCHAR2(255),
     os_user_name     VARCHAR2(255),
     db_user_name     VARCHAR2(255),
+    db_server        VARCHAR2(255),
     spid             VARCHAR2(64),
     application_name VARCHAR2(255),
     hostname         VARCHAR2(255),
@@ -805,6 +875,20 @@ CREATE TABLE flow_pipeline_acl (
     updated_at     TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
     CONSTRAINT UQ_flow_pipeline_acl_rule UNIQUE (principal_type, principal_name, target_type, target_name, effect)
 );
+
+CREATE TABLE flow_template_content (
+    ID          NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    Type        VARCHAR2(32)  NOT NULL,
+    Name        VARCHAR2(255) NOT NULL,
+    Description CLOB,
+    TemplateXML CLOB,
+    CreatedBy   VARCHAR2(255) DEFAULT '' NOT NULL,
+    UpdatedBy   VARCHAR2(255) DEFAULT '' NOT NULL,
+    CreatedAt   TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
+    UpdatedAt   TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
+    CONSTRAINT UQ_FLOW_TEMPLATE_OWNER UNIQUE (Type, Name, CreatedBy)
+);
+CREATE INDEX IX_FLOW_TEMPLATE_OWNER ON flow_template_content (CreatedBy, Type);
 ```
 
 ---
@@ -823,8 +907,10 @@ CREATE TABLE flow_pipeline_acl (
 | `scoped` | Zero global permissions — strictly governed by granular `allow` / `deny` rules in `flow_pipeline_acl` (user-level or group-level across individual pipelines, pipeline groups, or `*`) |
 | `execution-only` | `POST /api/v1/execute`, `POST /api/v1/execute/stream`, `POST /api/v1/validate`, plus all `read-only` operations (subject to explicit ACL `deny` rules or `-strict-acl`) |
 | `read-only` | `GET /api/v1/artifacts/...`, `GET /api/v1/logs/runs`, `GET /api/v1/logs/events`, `GET /api/v1/logs/api-events` |
-| `write` or `upload` | `POST /api/v1/artifacts/{type}/upload`, `POST/PUT/DELETE/GET /api/v1/artifacts/{type}...` |
-| `all` | Full access to all endpoints (Read, Write/Upload, Execute, `/api/v1/databases/test`, `/api/v1/users`, `/api/v1/groups`, `/api/v1/pipeline-groups`, `/api/v1/acls`) |
+| `write` or `upload` | `POST /api/v1/artifacts/{type}/upload`, `POST/PUT/DELETE/GET /api/v1/artifacts/{type}...`, plus create/edit/delete own templates (`/api/v1/templates`) |
+| `template-viewer` | View and instantiate templates authored by **any** user (combinable with other roles, e.g. `write,template-viewer` or `read-only,template-viewer`) |
+| `template-admin` | View, create, edit, delete, and instantiate templates authored by **any** user (combinable with other roles, e.g. `write,template-admin`) |
+| `all` | Full access to all endpoints (Read, Write/Upload, Execute, all Templates, `/api/v1/databases/test`, `/api/v1/users`, `/api/v1/groups`, `/api/v1/pipeline-groups`, `/api/v1/acls`) |
 
 > You can also combine permissions with a comma, e.g. `read-only,execution-only`. Pass `-strict-acl` (or `FLOW_API_STRICT_ACL=true`) at startup to disable legacy global pipeline permissions for all non-`all` roles so every pipeline operation requires an explicit `allow` entry in `flow_pipeline_acl`.
 

@@ -56,6 +56,10 @@ func (s *APIServer) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/artifacts/", s.handleArtifactsRouter)
 	mux.HandleFunc("/api/v1/upload/", s.RequireAuth(s.handleUploadRouter))
 
+	// Reusable Templates CRUD & Instantiation (/api/v1/templates and /api/v1/templates/{id}[/instantiate])
+	mux.HandleFunc("/api/v1/templates", s.RequireAuth(s.handleTemplatesCollection))
+	mux.HandleFunc("/api/v1/templates/", s.RequireAuth(s.handleTemplateByID))
+
 	// Execution & Validation Routes (granularity enforced per resolved target pipeline via AuthorizeExecutionRequest)
 	mux.HandleFunc("/api/v1/execute", s.RequireAuth(s.handleExecuteSync))
 	mux.HandleFunc("/api/v1/execute/", s.RequireAuth(s.handleExecuteRouter))
@@ -139,6 +143,7 @@ func (s *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 			"pipeline_content":       TablePipelineContent,
 			"options_content":        TableOptionsContent,
 			"config_content":         TableConfigContent,
+			"template_content":       TableTemplateContent,
 			"pipeline_runs":          TablePipelineRuns,
 			"pipeline_events":        TablePipelineEvents,
 			"api_events":             TableAPIAuditEvents,

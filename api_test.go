@@ -178,6 +178,18 @@ func setupTestServer(t *testing.T) (*APIServer, *httptest.Server, *sql.DB) {
 			updated_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			UNIQUE (principal_type, principal_name, target_type, target_name, effect)
 		)`,
+		`CREATE TABLE IF NOT EXISTS flow_template_content (
+			ID          INTEGER PRIMARY KEY AUTOINCREMENT,
+			Type        TEXT     NOT NULL,
+			Name        TEXT     NOT NULL,
+			Description TEXT,
+			TemplateXML TEXT,
+			CreatedBy   TEXT     NOT NULL DEFAULT '',
+			UpdatedBy   TEXT     NOT NULL DEFAULT '',
+			CreatedAt   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			UpdatedAt   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE (Type, Name, CreatedBy)
+		)`,
 	}
 
 	for _, stmt := range ddlStatements {

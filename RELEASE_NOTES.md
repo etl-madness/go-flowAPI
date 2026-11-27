@@ -1,5 +1,29 @@
 # Release Notes — `go-flowAPI`
 
+## Release Notes (`v1.4.1`) — Reusable Pipeline, Options & Config Templates with Authorship & Per-User Isolation
+
+### Overview
+
+Version `1.4.1` introduces reusable **Pipeline, Options, and Config Templates** stored in a dedicated `flow_template_content` table with full authorship tracking (`CreatedBy`, `UpdatedBy`, `CreatedAt`, `UpdatedAt`), per-user visibility isolation by default, and dedicated template roles:
+
+1. **Dedicated Template Storage (`tables.go`, `templates_store.go`, `main.go`, `docker/init/*.sql`)**:
+   - Added `TableTemplateContent` (`dbo.flow_template_content`, overridable via `-ldflags="-X main.DefaultTableTemplateContent=..."`) with columns `ID`, `Type`, `Name`, `Description`, `TemplateXML`, `CreatedBy`, `UpdatedBy`, `CreatedAt`, `UpdatedAt`, and `UNIQUE (Type, Name, CreatedBy)`.
+   - Appended `flow_template_content` DDL to `-print-ddl <dialect>` across all 5 dialects (`sqlserver`, `postgres`, `mysql`, `sqlite`, `oracle`) and bundled Docker init scripts.
+   - Templates are isolated from runnable artifact tables and cannot be executed directly via `/api/v1/execute`.
+
+2. **Template CRUD & Instantiation REST API (`handlers_templates.go`, `handlers.go`, `swagger.go`)**:
+   - `GET /api/v1/templates` (optional `?type=`, `?owner=`, `?include_content=true`) and `GET /api/v1/templates/{id}`
+   - `POST /api/v1/templates`, `PUT /api/v1/templates/{id}`, and `DELETE /api/v1/templates/{id}`
+   - `POST /api/v1/templates/{id}/instantiate` — saves a template as a live `pipeline`, `options`, or `config` artifact, enforcing existing strict pipeline ACLs or global write permissions.
+   - Documented all endpoints and schemas in OpenAPI 3.0.3 (`/api/v1/openapi.json` / `/swagger/`) and audited all operations to `flow_api_events`.
+
+3. **Per-User Visibility & Template Roles (`auth.go`, `acl.go`)**:
+   - Users see and manage **only their own templates** by default (`CreatedBy == authenticated user`).
+   - Added combinable role tokens **`template-viewer`** (view and instantiate templates from any author) and **`template-admin`** (view, edit, delete, and instantiate templates from any author; automatically included in `all`).
+   - Exposed `can_write_templates`, `can_view_all_templates`, and `can_manage_all_templates` in `/api/v1/permissions/effective`.
+
+---
+
 ## Release Notes (`v1.3.10`) — Database Server Telemetry (`db_server`) & Cross-DB `sql_bulk` Source/Target Tracking
 
 ### Overview

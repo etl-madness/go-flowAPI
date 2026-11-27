@@ -34,7 +34,12 @@ func main() {
 		if err != nil {
 			log.Fatalf("[go-flowAPI] failed generating DDL for %q: %v", cfg.PrintDDLDialect, err)
 		}
+		tmplDDL, err := RenderTemplateDDL(cfg.PrintDDLDialect)
+		if err != nil {
+			log.Fatalf("[go-flowAPI] failed generating template DDL for %q: %v", cfg.PrintDDLDialect, err)
+		}
 		fmt.Print(ddl)
+		fmt.Print(tmplDDL)
 		return
 	}
 

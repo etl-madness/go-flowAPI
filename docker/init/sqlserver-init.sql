@@ -228,3 +228,28 @@ IF NOT EXISTS (
 CREATE NONCLUSTERED INDEX IX_flow_pipeline_acl_principal
     ON dbo.flow_pipeline_acl (principal_type, principal_name);
 GO
+
+-- 13. Reusable Pipeline / Options / Config Templates Table
+IF OBJECT_ID('dbo.flow_template_content', 'U') IS NULL
+CREATE TABLE dbo.flow_template_content (
+    ID          INT IDENTITY(1,1) PRIMARY KEY,
+    Type        NVARCHAR(32)      NOT NULL,
+    Name        NVARCHAR(255)     NOT NULL,
+    Description NVARCHAR(MAX)     NULL,
+    TemplateXML NVARCHAR(MAX)     NULL,
+    CreatedBy   NVARCHAR(255)     NOT NULL DEFAULT N'',
+    UpdatedBy   NVARCHAR(255)     NOT NULL DEFAULT N'',
+    CreatedAt   DATETIME2         NOT NULL DEFAULT SYSUTCDATETIME(),
+    UpdatedAt   DATETIME2         NOT NULL DEFAULT SYSUTCDATETIME(),
+    CONSTRAINT UQ_flow_template_type_name_owner UNIQUE (Type, Name, CreatedBy)
+);
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name = 'IX_flow_template_content_owner'
+      AND object_id = OBJECT_ID('dbo.flow_template_content')
+)
+CREATE NONCLUSTERED INDEX IX_flow_template_content_owner
+    ON dbo.flow_template_content (CreatedBy, Type);
+GO

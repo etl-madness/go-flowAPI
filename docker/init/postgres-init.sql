@@ -150,3 +150,17 @@ CREATE TABLE IF NOT EXISTS dbo.flow_pipeline_acl (
 );
 CREATE INDEX IF NOT EXISTS ix_flow_pipeline_acl_target ON dbo.flow_pipeline_acl (target_type, target_name);
 CREATE INDEX IF NOT EXISTS ix_flow_pipeline_acl_principal ON dbo.flow_pipeline_acl (principal_type, principal_name);
+
+CREATE TABLE IF NOT EXISTS dbo.flow_template_content (
+    ID          SERIAL       PRIMARY KEY,
+    Type        VARCHAR(32)  NOT NULL,
+    Name        VARCHAR(255) NOT NULL,
+    Description TEXT,
+    TemplateXML TEXT,
+    CreatedBy   VARCHAR(255) NOT NULL DEFAULT '',
+    UpdatedBy   VARCHAR(255) NOT NULL DEFAULT '',
+    CreatedAt   TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UpdatedAt   TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (Type, Name, CreatedBy)
+);
+CREATE INDEX IF NOT EXISTS ix_flow_template_content_owner ON dbo.flow_template_content (CreatedBy, Type);

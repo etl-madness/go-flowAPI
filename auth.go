@@ -19,12 +19,14 @@ import (
 
 // Permission Scope Constants
 const (
-	PermScoped        = "scoped"
-	PermExecutionOnly = "execution-only"
-	PermReadOnly      = "read-only"
-	PermWrite         = "write"
-	PermUpload        = "upload"
-	PermAll           = "all"
+	PermScoped         = "scoped"
+	PermExecutionOnly  = "execution-only"
+	PermReadOnly       = "read-only"
+	PermWrite          = "write"
+	PermUpload         = "upload"
+	PermTemplateViewer = "template-viewer"
+	PermTemplateAdmin  = "template-admin"
+	PermAll            = "all"
 
 	WindowsIntegratedAuthMarker = "__WINDOWS_INTEGRATED__"
 	WindowsAutoHostUserMarker   = "__AUTO_HOST__"
@@ -94,6 +96,14 @@ func (u *APIUser) HasPermission(required string) bool {
 			if tok == PermExecutionOnly || tok == PermWrite {
 				return true
 			}
+		case PermTemplateViewer:
+			if tok == PermTemplateViewer || tok == PermTemplateAdmin {
+				return true
+			}
+		case PermTemplateAdmin:
+			if tok == PermTemplateAdmin {
+				return true
+			}
 		case PermAll:
 			if tok == PermAll {
 				return true
@@ -101,6 +111,21 @@ func (u *APIUser) HasPermission(required string) bool {
 		}
 	}
 	return false
+}
+
+// CanViewAllTemplates returns true if the user can view/instantiate templates authored by any user.
+func (u *APIUser) CanViewAllTemplates() bool {
+	return u.HasPermission(PermTemplateViewer)
+}
+
+// CanManageAllTemplates returns true if the user can edit/delete templates authored by any user.
+func (u *APIUser) CanManageAllTemplates() bool {
+	return u.HasPermission(PermTemplateAdmin)
+}
+
+// CanWriteOwnTemplates returns true if the user can create, edit, and delete their own templates.
+func (u *APIUser) CanWriteOwnTemplates() bool {
+	return u.HasPermission(PermWrite) || u.HasPermission(PermUpload) || u.HasPermission(PermTemplateAdmin)
 }
 
 func normalizePermToken(p string) string {
@@ -118,6 +143,10 @@ func normalizePermToken(p string) string {
 		return PermUpload
 	case "write", "write-only", "write_only", "read-write", "editor":
 		return PermWrite
+	case "template-viewer", "template_viewer", "templates-read-all", "templates_read_all", "template-reader":
+		return PermTemplateViewer
+	case "template-admin", "template_admin", "templates-all", "templates_all":
+		return PermTemplateAdmin
 	default:
 		return s
 	}
@@ -181,10 +210,10 @@ func ValidatePermissionString(perm string) error {
 	for _, part := range strings.Split(perm, ",") {
 		norm := normalizePermToken(part)
 		switch norm {
-		case PermAll, PermScoped, PermExecutionOnly, PermReadOnly, PermWrite, PermUpload:
+		case PermAll, PermScoped, PermExecutionOnly, PermReadOnly, PermWrite, PermUpload, PermTemplateViewer, PermTemplateAdmin:
 			// valid
 		default:
-			return fmt.Errorf("unsupported permission %q: expected scoped, execution-only, read-only, write, upload, or all", strings.TrimSpace(part))
+			return fmt.Errorf("unsupported permission %q: expected scoped, execution-only, read-only, write, upload, template-viewer, template-admin, or all", strings.TrimSpace(part))
 		}
 	}
 	return nil
